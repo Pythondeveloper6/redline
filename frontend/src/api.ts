@@ -79,10 +79,15 @@ async function call<T>(method: string, url: string, body?: unknown): Promise<T> 
   const { status, json } = await raw(method, url, body)
   if (status >= 400) {
     const e = json?.error
-    throw new ApiError(status, e?.code ?? 'error', e?.message ?? `Request failed (${status})`)
+    // Redline answers {"error": {code, message}}; anything else (a proxy, a foreign
+    // framework error) may use {"detail": "..."}.
+    const detail = typeof json?.detail === 'string' ? json.detail : undefined
+    throw new ApiError(status, e?.code ?? (status === 401 ? 'unauthorized' : status === 403 ? 'forbidden' : 'error'), e?.message ?? detail ?? `Request failed (${status})`)
   }
   return json as T
 }
+
+const enc = encodeURIComponent
 
 const qs = (o: Record<string, string | number | undefined | null>) => {
   const p = new URLSearchParams()
@@ -95,12 +100,12 @@ export const api = {
   meta: () => call<Meta>('GET', './api/meta'),
   traces: (f: TraceFilters, cursor?: string | null, limit = 50) =>
     call<Page>('GET', './api/traces' + qs({ ...f, limit, cursor })),
-  trace: (id: string) => call<Trace>('GET', `./api/traces/${id}`),
-  profile: (id: string) => call<Speedscope>('GET', `./api/traces/${id}/profile`),
+  trace: (id: string) => call<Trace>('GET', `./api/traces/${enc(id)}`),
+  profile: (id: string) => call<Speedscope>('GET', `./api/traces/${enc(id)}/profile`),
   endpoints: (window: string) => call<{ items: EndpointStats[] }>('GET', './api/endpoints' + qs({ window })),
   issues: (window: string, kind?: string) => call<{ items: IssueGroup[] }>('GET', './api/issues' + qs({ window, kind })),
   explain: (trace_id: string, span_id: string, analyze = false) =>
     call<ExplainResult>('POST', './api/explain', { trace_id, span_id, analyze }),
   clear: () => call<{ deleted: number }>('DELETE', './api/traces'),
-  profileUrl: (id: string) => `./api/traces/${id}/profile`,
+  profileUrl: (id: string) => `./api/traces/${enc(id)}/profile`,
 }

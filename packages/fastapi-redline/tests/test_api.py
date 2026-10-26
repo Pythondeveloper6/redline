@@ -4,6 +4,7 @@ import base64
 import secrets
 
 import httpx
+import pytest
 from fastapi import Depends, HTTPException
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.testclient import TestClient
@@ -71,7 +72,8 @@ def test_api_endpoints_roundtrip(make_env):
 def test_default_is_loopback_only(make_env):
     env = make_env(dependencies=None)
     assert env.redline.api  # installed with the default guard
-    with TestClient(env.app) as c:  # TestClient reports "testclient" (loopback in tests)
+    # TestClient reports the client as "testclient" (loopback in tests)
+    with TestClient(env.app, base_url="http://localhost:8000") as c:
         assert c.get("/_redline/api/meta").status_code == 200
     from fastapi_redline._security import _is_loopback
 
@@ -79,11 +81,56 @@ def test_default_is_loopback_only(make_env):
         True
     ] * 4
     assert not any(_is_loopback(h) for h in ("203.0.113.9", "10.0.0.5", "2001:db8::1", "evil.com"))
-    with TestClient(env.app, client=("203.0.113.9", 5555)) as c:
+    with TestClient(env.app, client=("203.0.113.9", 5555), base_url="http://localhost") as c:
         r = c.get("/_redline/api/meta")
-        assert r.status_code == 403 and "localhost" in r.json()["detail"]
+        assert r.status_code == 403
+        assert r.json()["error"]["code"] == "forbidden"
+        assert "localhost" in r.json()["error"]["message"]
         assert c.get("/_redline/").status_code == 403
         assert c.get("/orders/1").status_code == 200  # the app itself is not guarded
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "localhost",
+        "localhost:8000",
+        "127.0.0.1",
+        "127.0.0.1:9",
+        "[::1]",
+        "[::1]:8000",
+        "app.localhost:3000",
+        "LOCALHOST",
+    ],
+)
+def test_loopback_host_names_are_accepted(make_env, host):
+    env = make_env(dependencies=None)
+    with TestClient(env.app) as c:
+        assert c.get("/_redline/api/meta", headers={"Host": host}).status_code == 200
+
+
+@pytest.mark.parametrize(
+    "host", ["evil.example", "evil.example:8000", "testserver", "10.0.0.1", "localhost.evil.com"]
+)
+def test_dns_rebinding_is_blocked(make_env, host):
+    """A rebinding page reaches 127.0.0.1 but its requests carry its own Host name."""
+    env = make_env(dependencies=None)
+    with TestClient(env.app) as c:
+        for path in ("/_redline/api/meta", "/_redline/api/traces", "/_redline/"):
+            r = c.get(path, headers={"Host": host})
+            assert r.status_code == 403
+            assert r.json()["error"]["code"] == "forbidden"
+            assert "Host" in r.json()["error"]["message"]
+
+
+def test_loopback_guard_allowed_hosts(make_env):
+    from fastapi_redline import loopback_guard
+
+    env = make_env(dependencies=[Depends(loopback_guard(allowed_hosts=["devbox"]))])
+    with TestClient(env.app) as c:
+        assert c.get("/_redline/api/meta", headers={"Host": "devbox:8000"}).status_code == 200
+        assert c.get("/_redline/api/meta", headers={"Host": "localhost"}).status_code == 200
+        assert c.get("/_redline/api/meta", headers={"Host": "evil.example"}).status_code == 403
 
 
 def test_warning_logged_without_dependencies(make_env, caplog):
@@ -107,7 +154,11 @@ def test_basic_auth_dependency(make_env):
 
     env = make_env(dependencies=[Depends(require_admin)])
     with TestClient(env.app, client=("203.0.113.9", 1)) as c:
-        assert c.get("/_redline/api/meta").status_code == 401
+        r = c.get("/_redline/api/meta")
+        assert r.status_code == 401 and r.headers["www-authenticate"] == "Basic"
+        assert r.json() == {"error": {"code": "unauthorized", "message": "Not authenticated"}}
+        bad = c.get("/_redline/api/meta", headers=basic(password="bad"))
+        assert bad.json()["error"]["code"] == "unauthorized"  # HTTPException(401) from the dep
         assert c.get("/_redline/").status_code == 401
         assert c.get("/_redline/api/meta", headers=basic(password="bad")).status_code == 401
         assert c.get("/_redline/api/meta", headers=basic()).status_code == 200
@@ -140,6 +191,11 @@ def test_csrf_blocks_cross_origin_mutations(make_env):
         assert c.delete("/_redline/api/traces", headers={"Origin": "null"}).status_code == 403
         r = c.post("/_redline/api/explain", json={}, headers=evil)
         assert r.status_code == 403
+        assert r.json()["error"] == {
+            "code": "csrf_failed",
+            "message": "Cross-origin request blocked.",
+        }
+        assert c.put("/_redline/api/traces").json()["error"]["code"] == "method_not_allowed"
         assert (
             c.delete("/_redline/api/traces", headers={"Sec-Fetch-Site": "cross-site"}).status_code
             == 403
@@ -238,3 +294,57 @@ async def test_httpx_not_instrumented_by_default(make_env):
     ) as c:
         await c.get("/http-out")
     assert not [s for s in env.trace("/http-out").spans if s.kind == "http_out"]
+
+
+def test_disabled_installs_no_listeners_and_no_middleware(tmp_path):
+    from fastapi import FastAPI
+    from sqlalchemy import create_engine, event, text
+
+    from fastapi_redline import RedlineMiddleware, install
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'd.db'}")
+    app = FastAPI()
+
+    @app.get("/q")
+    def q():
+        with engine.connect() as conn:
+            return {"v": conn.execute(text("SELECT 1")).scalar()}
+
+    redline = install(
+        app,
+        engine=engine,
+        settings={"enabled": False, "storage_path": str(tmp_path / "r.db")},
+        dependencies=[],
+    )
+    try:
+        assert not event.contains(engine, "before_cursor_execute", _any_listener(engine))
+        assert not any(m.cls is RedlineMiddleware for m in app.user_middleware)
+        with TestClient(app) as c:
+            assert c.get("/q").json() == {"v": 1}
+            assert c.get("/_redline/api/meta").json()["storage"]["rows"] == 0
+        assert "default" in redline.engines  # EXPLAIN still knows the engine
+    finally:
+        redline.close()
+
+
+def _any_listener(engine):
+    """The registered before_cursor_execute listener, if any (else a dummy)."""
+    for fn in engine.dispatch.before_cursor_execute:
+        return fn
+    return lambda *a: None
+
+
+def test_asset_traversal_and_security_headers(make_env):
+    env = make_env()
+    with TestClient(env.app) as c:
+        for path in (
+            "/_redline/assets/..%2F..%2F__init__.py",
+            "/_redline/assets/%2e%2e/%2e%2e/__init__.py",
+            "/_redline/..%2F__init__.py",
+        ):
+            r = c.get(path)
+            assert r.status_code == 404, path
+            assert "import" not in r.text  # never the source file
+        page = c.get("/_redline/")
+        assert page.headers["x-frame-options"] == "DENY"
+        assert page.headers["x-content-type-options"] == "nosniff"

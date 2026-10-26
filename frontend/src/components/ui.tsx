@@ -87,11 +87,20 @@ export function Empty({ title, children, icon }: { title: string; children?: Rea
   )
 }
 
+const ERROR_TITLE: Record<string, string> = {
+  unauthorized: 'Sign in required',
+  forbidden: 'Access denied',
+  csrf_failed: 'Request blocked (CSRF check failed)',
+  network: 'Cannot reach the server',
+}
+
 export function ErrorBox({ error, onRetry }: { error: Error; onRetry?: () => void }) {
+  const code = (error as Error & { code?: string }).code
+  const title = (code && ERROR_TITLE[code]) || 'Something went wrong'
   return (
-    <div className="m-4 rounded-lg border border-bad/30 bg-bad/5 p-4 text-bad flex items-center gap-3">
+    <div className="m-4 rounded-lg border border-bad/30 bg-bad/5 p-4 text-bad flex items-center gap-3" role="alert">
       <Icon d={I.alert} size={16} />
-      <div className="flex-1 min-w-0"><div className="font-semibold">Something went wrong</div><div className="text-[12px] opacity-90 break-words">{error.message}</div></div>
+      <div className="flex-1 min-w-0"><div className="font-semibold">{title}</div><div className="text-[12px] opacity-90 break-words">{error.message}</div></div>
       {onRetry && <button className="btn" onClick={onRetry}>Retry</button>}
     </div>
   )

@@ -93,14 +93,16 @@ REDLINE = {
     "ALWAYS_KEEP_SLOWER_THAN_MS": 500,
     "ALWAYS_KEEP_ERRORS": True,
     "IGNORE_PATHS": ["/static/", "/media/", "/favicon.ico", "^/health"],  # "^" = regex
-    "STORAGE_PATH": BASE_DIR / ".redline/redline.db",                      # the default
+    "STORAGE_PATH": BASE_DIR / ".redline/redline.db",  # the default; str or pathlib.Path
     "N_PLUS_ONE_THRESHOLD": 5,
     "SLOW_QUERY_MS": 100,
     "TOO_MANY_QUERIES": 50,
     "PROFILE": "opt_in",              # off | opt_in | sampled | all
     "EXPLAIN_ANALYZE": False,         # ANALYZE executes the query: off by default
-    "MAX_ROWS": 10_000, "MAX_AGE_DAYS": 7,
+    "MAX_ROWS": 10_000, "MAX_AGE_DAYS": 7,  # 0 or None disables a retention rule
+    "MAX_SPANS_PER_TRACE": 2_000,     # beyond it spans are counted, not stored
     "PERMISSION": "myproject.redline.can_view",   # Django-only, see below
+    "STORE": "myproject.redline.make_store",      # Django-only: a custom Store (optional)
 }
 ```
 
@@ -111,7 +113,8 @@ The full list is in the settings reference of the docs (`redline_core.conf.Setti
 
 - **Access**: staff only by default (`user.is_active and user.is_staff`). Override it with
   `REDLINE["PERMISSION"]`, a callable `(request) -> bool` or its dotted path. Anonymous visitors to
-  the page are redirected to the admin login. The API answers `403` JSON.
+  the page are redirected to the admin login. The API answers `403` JSON. Redline's views also
+  enforce `ALLOWED_HOSTS` (against DNS rebinding) and the page sends `X-Frame-Options: DENY`.
 - **CSRF**: the JSON API runs Django's own CSRF check on every request, even without
   `CsrfViewMiddleware`. Mutating calls (`DELETE` traces, `POST api/explain`) need the token in the
   CSRF header (`X-CSRFToken` by default). On HTTPS the Origin/Referer checks also apply. The page

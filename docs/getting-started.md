@@ -143,8 +143,8 @@ uv sync --all-packages        # all three packages, editable, plus the dev tools
     `{alias: engine}`. Omit it and Redline still records requests, but no SQL.
     See [FastAPI: engines](fastapi.md#engines).
 
-    With no `dependencies` argument the UI answers **only to loopback clients** and
-    logs a warning at startup. That is right for `uvicorn` on your laptop; read
+    With no `dependencies` argument the UI answers **only to loopback clients that
+    address it as `localhost`, `127.0.0.1` or `[::1]`** and logs a warning at startup. That is right for `uvicorn` on your laptop; read
     [FastAPI: access control](fastapi.md#access-control) before you deploy.
 
 ## Look at it

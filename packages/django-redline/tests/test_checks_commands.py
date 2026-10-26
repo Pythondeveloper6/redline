@@ -88,6 +88,9 @@ def test_clear_and_prune_commands(client, latest, rt):
         client.get("/plain/")
     latest()
     out = io.StringIO()
+    call_command("redline_prune", "--max-rows", "0", "--max-age-days", "0", stdout=out)
+    assert "Pruned 0 trace(s); 3 left." in out.getvalue()  # 0 disables, never "delete all"
+    out = io.StringIO()
     call_command("redline_prune", "--max-rows", "1", stdout=out)
     assert "Pruned 2 trace(s); 1 left." in out.getvalue()
     out = io.StringIO()

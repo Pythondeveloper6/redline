@@ -18,6 +18,9 @@ def test_asset_path_refuses_traversal():
     assert ui.asset_path("/../../etc/passwd") is None
     assert ui.asset_path("") is None
     assert ui.asset_path("nope.js") is None
+    assert ui.asset_path("assets/../../ui/__init__.py") is None
+    assert ui.asset_path("assets/..\\..\\__init__.py") is None
+    assert ui.asset_path("a\x00b") is None
     if ui.is_built():
         assert ui.asset_path("index.html") is not None
 

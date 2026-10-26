@@ -3,15 +3,15 @@
 [← Index](index.md)
 
 A profiler that slows the thing it measures is worse than useless, so Redline is built to
-keep its cost low and explainable. This page describes the **cost model**: where the time
-goes and what you can do about it. It deliberately contains **no measured numbers yet**.
+keep its cost low and explainable. This page describes the **cost model** (where the time
+goes and what you can do about it) and the [measured numbers](#measured-numbers).
 
-!!! warning "Benchmark numbers are to be measured"
+!!! abstract "In one line"
 
-    The project plan calls for published overhead measurements: Redline off, sampled and
-    full, per request and per query. They have not been run. Until they are, this
-    page makes **no claims** in milliseconds or percent. Anyone quoting a figure for
-    Redline's overhead today is guessing. See [the placeholder section](#measured-numbers).
+    Measured on an Apple M2 Pro (Python 3.13, 2026-10-26): recording costs about
+    **0.04 to 0.06 ms per request plus 12 to 44 µs per SQL query**, depending on the
+    framework and on whether the trace is kept; disabled, it is a few µs. Details and how
+    to reproduce are [below](#measured-numbers).
 
 ## Where the cost is
 
@@ -69,12 +69,16 @@ the request path. The request only does a `put_nowait`.
 - **No tracing of itself.** Its own mount is ignored and its store is not one of your
   connections.
 
-## What it does not avoid
+## Memory
 
-- Memory proportional to the number of spans in the **in-flight** requests. There is no
-  per-trace span cap in this version.
+- Each in-flight SQL span costs about **1.5 KB** (measured, including its callsite stack).
+  A request stores at most `max_spans_per_trace` spans (default **2000**, about 3 MB);
+  beyond that spans are counted but not kept, so a runaway loop of 100,000 queries does
+  not hold 150 MB. Query counts, query time, and the N+1 and slow-query issues still
+  include the dropped spans (per fingerprint and callsite counters), and the trace is
+  marked **truncated** in the UI. `0` or `None` removes the cap.
 - A queue of up to `writer_queue_size` full traces in memory when the writer lags.
-- Garbage: a span object and a dict per query.
+- Garbage: a span object and a dict per query (beyond the cap, a short-lived one).
 - The callsite stack walk is a Python loop. Deep stacks cost more.
 
 ## How to keep it cheap
@@ -91,25 +95,53 @@ the request path. The request only does a `put_nowait`.
 
 ## Measured numbers
 
-This section is reserved for results. The plan calls for a benchmark suite in a
-`benchmarks/` directory (it does not exist in the repository yet). Once it has been run on
-stated hardware this table will be filled in:
+From `benchmarks/RESULTS.md`, measured on **2026-10-26**, Apple M2 Pro, Python 3.13.15
+(CPython, macOS arm64), Django 6.1.2, FastAPI 0.162.0, SQLAlchemy 2.1.6, pyinstrument
+5.1.3. Each cell is 1500 timed requests after warm-up, in a fresh subprocess, through an
+in-process client against in-memory SQLite. The baseline (`off`) is a bare view with no
+middleware, so Redline's *share* looks larger than it would next to a real database and
+templates; the absolute added time is what carries over.
 
-| Scenario | What will be measured | Status |
-|---|---|---|
-| Redline disabled (`enabled: false`) vs not installed | the cost of the middleware being present | **to be measured** |
-| Redline recording, `sample_rate = 0` | per-request and per-query recording cost alone | **to be measured** |
-| Redline recording, `sample_rate = 1` | recording plus analysis plus write | **to be measured** |
-| Query-heavy request (hundreds of queries) | how cost scales with query count | **to be measured** |
-| Profiled request | pyinstrument overhead | **to be measured** |
-| Writer saturation | the request rate at which `dropped` starts rising | **to be measured** |
+**Added time per request** (median, 0 queries) and **per SQL query**, against Redline not
+installed:
 
-The *target* in the project plan is **under 1 ms plus a few microseconds per query when
-not profiling**. It is a target, not a result.
+| Mode | Django / request | Django / query | FastAPI / request | FastAPI / query |
+|---|---|---|---|---|
+| `enabled: false` | +0.004 ms | +0.4 µs | +0.006 ms | +0.4 µs |
+| recording, `sample_rate = 0` (nothing kept) | +0.039 ms | +12.5 µs | +0.028 ms | +25.6 µs |
+| recording, `sample_rate = 1` (every trace kept) | +0.063 ms | +22.4 µs | +0.048 ms | +44.1 µs |
+| `profile: "all"` (a flamegraph on every request) | +0.195 ms | +41.9 µs | +0.229 ms | +91.2 µs |
+
+The FastAPI per-query figures include SQLAlchemy's event dispatch around a ~15 µs
+`text()` query. A disabled FastAPI install adds no middleware and no SQLAlchemy listeners.
+
+| Scenario | Result |
+|---|---|
+| Disabled vs not installed | a few µs per request, under 1 µs per query |
+| Recording with `sample_rate = 0` | the per-query recording cost alone: 12.5 µs (Django), 25.6 µs (FastAPI) |
+| Recording with `sample_rate = 1` | adds analysis, redaction and the enqueue: 22.4 µs / 44.1 µs per query |
+| Query-heavy request | linear in query count: at the `sample_rate = 1` rates, 200 queries add about 4.5 ms (Django) or 9 ms (FastAPI); beyond `max_spans_per_trace` the cost per query drops (no redaction, no storage) |
+| Profiled request | about 0.2 ms per request plus roughly double the per-query cost while pyinstrument samples |
+| Writer saturation | the writer stores about **3,800 traces/s** of 20 queries each (about 440/s at 200 queries, 50,000/s with none) on the same machine; `dropped` only rises above that rate of *kept* traces (`benchmarks/storage.py`) |
+
+The plan's target was "under 1 ms plus a few microseconds per query when not profiling".
+The per-request part is met by a wide margin; the per-query part is **12 to 44 µs**, more
+than "a few", mostly spent on fingerprinting, callsite capture and parameter redaction.
+
+### Reproduce
+
+```bash
+uv sync --all-packages
+uv run python benchmarks/overhead.py     # about 4 minutes; --quick for a smoke run
+uv run python benchmarks/storage.py      # about a minute: sizes and writer throughput
+```
+
+Absolute numbers are machine specific; compare modes on the same machine.
 
 ### Measure it yourself
 
-Until then, A/B your own application with a representative load:
+The benchmark is a bare view. To know the cost in your application, A/B it with a
+representative load:
 
 1. Run the app with `enabled: false`, record requests per second and latency percentiles
    with a load tool you trust (Locust, k6, `wrk`, `hey`).
@@ -121,5 +153,5 @@ Until then, A/B your own application with a representative load:
 ## Why this page exists anyway
 
 The cost model tells you *which setting to reach for* when something is slow, which does
-not depend on the numbers. When the benchmarks are run, the table above will say how
-much.
+not depend on the numbers. The measurements say how much, on one machine; your own A/B
+says how much on yours.

@@ -19,9 +19,9 @@ from django.dispatch import receiver
 from redline_core.api import RedlineAPI
 from redline_core.conf import Settings
 from redline_core.recorder import Recorder, configure
-from redline_core.storage import SQLiteStore, Store
+from redline_core.storage import Store
 
-from .conf import DjangoOptions, get_core_settings, get_options
+from .conf import DjangoOptions, build_store, get_core_settings, get_options
 
 __all__ = ["Runtime", "get_runtime", "reset_runtime"]
 
@@ -35,12 +35,16 @@ class Runtime:
     store: Store
     recorder: Recorder
     api: RedlineAPI
+    #: False for a ``STORE`` given as a ready instance: it outlives runtime rebuilds.
+    owns_store: bool = True
 
-    def close(self) -> None:
+    def close(self, *, final: bool = False) -> None:
         try:
             self.store.flush(2.0)
         except Exception:  # pragma: no cover - defensive
             pass
+        if not (self.owns_store or final):
+            return
         try:
             self.store.close()
         except Exception:  # pragma: no cover - defensive
@@ -58,11 +62,18 @@ def build_runtime(settings: Settings | None = None) -> Runtime:
 
     core = settings or get_core_settings()
     options = get_options()
-    store = SQLiteStore.from_settings(core)
+    store, owned = build_store(options.store, core)
     suggester = DjangoFixSuggester(project_root=core.project_root)
     recorder = configure(core, store, [suggester])
     api = RedlineAPI(store, core, framework="django", explain_executor=executor_factory)
-    return Runtime(settings=core, options=options, store=store, recorder=recorder, api=api)
+    return Runtime(
+        settings=core,
+        options=options,
+        store=store,
+        recorder=recorder,
+        api=api,
+        owns_store=owned,
+    )
 
 
 def get_runtime() -> Runtime:
@@ -95,7 +106,7 @@ def reset_runtime() -> None:
 def _close_at_exit() -> None:
     rt = _runtime
     if rt is not None:
-        rt.close()
+        rt.close(final=True)
 
 
 @receiver(setting_changed)

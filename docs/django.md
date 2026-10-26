@@ -89,8 +89,8 @@ REDLINE = {
 }
 ```
 
-Every key is a [core setting](settings.md) (case-insensitive) except `PERMISSION`. What
-Django adds:
+Every key is a [core setting](settings.md) (case-insensitive) except `PERMISSION` and
+`STORE`. What Django adds:
 
 | Behaviour | Detail |
 |---|---|
@@ -98,16 +98,54 @@ Django adds:
 | `STORAGE_PATH` default | `<BASE_DIR>/.redline/redline.db` when `BASE_DIR` is defined |
 | `PROJECT_ROOT` default | `BASE_DIR`. It decides which stack frames count as your code |
 | Errors | An unknown key or a bad value raises `ImproperlyConfigured` carrying the core message, and the system check `django_redline.E001` reports it |
-| Paths | `STORAGE_PATH` and `PROJECT_ROOT` must be **strings**. A `pathlib.Path` is rejected: use `str(BASE_DIR / ...)` |
+| Paths | `STORAGE_PATH` and `PROJECT_ROOT` accept a string or a `pathlib.Path` (`BASE_DIR / ".redline" / "redline.db"`) |
+| `STORE` | Where traces are kept, like FastAPI's `install(store=...)`. See [Custom store](#custom-store) |
 
 The runtime (settings, store, recorder, API) is built **lazily on first use**, not in
 `AppConfig.ready()`, so management commands like `migrate` never create `.redline/`. It is
 rebuilt when `REDLINE`, `DEBUG` or `BASE_DIR` change through `setting_changed`, which is
 what makes `override_settings(REDLINE=...)` work in tests.
 
+## Custom store
+
+`REDLINE["STORE"]` replaces the default `SQLiteStore.from_settings(settings)` with any
+object implementing the [`Store` protocol](extending.md#the-store-protocol). It accepts:
+
+| Value | Used as |
+|---|---|
+| a callable or a class, e.g. `MyStore` | called with the core `Settings`; the result is the store. Rebuilt (and the old one closed) whenever the runtime is rebuilt |
+| a ready instance | used as-is. It outlives runtime rebuilds (`override_settings` only flushes it) and is closed at process exit |
+| a dotted path to either, e.g. `"myproject.redline.make_store"` | imported, then as above |
+
+```python
+# myproject/redline.py
+from redline_core.storage import SQLiteStore
+
+class MirroringStore(SQLiteStore):
+    def __init__(self, settings):
+        super().__init__(
+            settings.storage_path,
+            queue_size=settings.writer_queue_size,
+            max_rows=settings.max_rows,
+            max_age_s=settings.max_age_s,
+        )
+
+    def save(self, trace):
+        super().save(trace)
+        send_somewhere_else(trace)                          # must not block
+
+# settings.py
+REDLINE = {"STORE": "myproject.redline.MirroringStore"}
+```
+
+An import error, or a value that does not produce a `Store`, raises
+`ImproperlyConfigured` (and the system check `django_redline.E001`).
+
 ## Access control
 
-Every view, page, assets and API, first checks `REDLINE["PERMISSION"]`.
+Every view, page, assets and API, first checks `REDLINE["PERMISSION"]`. Before that, it
+calls `request.get_host()`, so `ALLOWED_HOSTS` is enforced on Redline's views even without
+`CommonMiddleware` (a defence against [DNS rebinding](security.md#dns-rebinding)).
 
 | | Default | |
 |---|---|---|
@@ -198,9 +236,9 @@ Details worth knowing:
 | Request body | read up front only if it is **not multipart**, has a `Content-Length` above 0 and at most `max_body_bytes`. Otherwise Redline does **not** read it (the view may stream it), and picks up whatever the view itself read |
 | Response status, headers | `Set-Cookie` values from `response.cookies` are included, then redacted |
 | Response body | only for non-streaming responses; **streaming and file responses are never consumed**. The size comes from `Content-Length` |
-| Exceptions | `process_exception` remembers a view's exception for the trace and returns `None`: it **never handles or swallows** it. An exception that escapes the stack is recorded as a 500 and re-raised |
+| Exceptions | `process_exception` remembers a view's exception for the trace and returns `None`: it **never handles or swallows** it. It becomes the trace's `error` only when the final response is a 5xx: `Http404`, `PermissionDenied`, `BadRequest` and friends turn into 4xx responses and are **not errors** (no `error` on the trace, not kept by `ALWAYS_KEEP_ERRORS`). An exception that escapes the stack is recorded as a 500 and re-raised |
 | `X-Redline-Run` | becomes `run_id` and `step` tags |
-| `?_redline=profile` / `X-Redline-Profile: 1` | starts the [profiler](flamegraphs.md) |
+| `?_redline=profile` (or `1`, `true`, `yes`, `on`) / `X-Redline-Profile: 1` | starts the [profiler](flamegraphs.md); the same values as FastAPI |
 
 With `DEBUG = True`, a **kept** response gets an `X-Redline-Trace: <trace id>` header so you
 can find it. It is never sent in production.
@@ -275,7 +313,7 @@ Redline is enabled; the others always run.
 | Command | Does |
 |---|---|
 | `manage.py redline_clear [--noinput]` | Deletes every recorded trace. Asks for confirmation (`Delete all N Redline traces? [y/N]`) unless `--noinput` or `--no-input` |
-| `manage.py redline_prune [--max-age-days N] [--max-rows N]` | Applies [retention](storage.md#retention) now. Defaults to the `MAX_AGE_DAYS` and `MAX_ROWS` settings. Negative values are an error |
+| `manage.py redline_prune [--max-age-days N] [--max-rows N]` | Applies [retention](storage.md#retention) now. Defaults to the `MAX_AGE_DAYS` and `MAX_ROWS` settings. `0` disables that rule for this run (it never deletes everything: that is `redline_clear`). Negative values are an error |
 
 Both build the runtime, flush pending writes, and print how many traces they removed. Run
 `redline_prune` from cron if your app is idle for long stretches (the writer prunes as
@@ -317,7 +355,8 @@ A pytest marker for this (`@pytest.mark.redline(no_n_plus_one=True)`) is planned
 ## Deployment notes
 
 - **WSGI (gunicorn, uWSGI)**: the runtime is built lazily in each worker, after the
-  fork. Each worker writes to the same file; see
+  fork, and the store is fork-safe even if something built it before the fork
+  (`--preload`). Each worker writes to the same file; see
   [Production: process models](production.md#process-models).
 - **ASGI (uvicorn, daphne, hypercorn)**: nothing special.
 - **Behind a proxy**: the Django permission uses your session, not the client address, so

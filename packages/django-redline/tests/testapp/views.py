@@ -88,6 +88,12 @@ def not_found(request):
     return JsonResponse({"totals": [_total(o) for o in orders]})
 
 
+def missing(request):
+    from django.http import Http404
+
+    raise Http404("no such order")
+
+
 def list_orders():
     return list(Order.objects.all())
 
@@ -180,6 +186,7 @@ urlpatterns = [
     path("plain/<int:pk>/", plain),
     path("plain/", plain),
     path("boom/", boom),
+    path("missing/", missing),
     path("stream/", streaming),
     path("file/", file_view),
     path("cached/", cached),

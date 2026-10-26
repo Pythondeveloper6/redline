@@ -34,17 +34,14 @@ curl -H "X-Redline-Profile: 1" http://127.0.0.1:8000/slow/
 
 Then open the request in the UI and click **Profile**.
 
-| Trigger | Django | FastAPI |
-|---|---|---|
-| `?_redline=profile` | yes (exactly `profile`) | yes |
-| `?_redline=1`, `true`, `yes`, `on` | **no** | yes |
-| `X-Redline-Profile: 1`, `true`, `yes`, `on` | yes | yes (also `profile`) |
+| Trigger | Django and FastAPI |
+|---|---|
+| `?_redline=profile`, `1`, `true`, `yes` or `on` | yes |
+| `X-Redline-Profile: profile`, `1`, `true`, `yes` or `on` | yes |
 
-!!! note "Use `profile` or the header for both frameworks"
-
-    The FastAPI middleware accepts more spellings for the query parameter than the
-    Django one does. `?_redline=profile` and the `X-Redline-Profile: 1` header work
-    identically in both.
+The values are case-insensitive, and both adapters parse them with the same core function
+(`redline_core.sampling.profile_requested`), so a URL that profiles on one framework
+profiles on the other. Any other value (`?_redline=0`) is ignored.
 
 A profiled request is **always stored**, even if it is fast and the sample rate would
 have dropped it (`tags["sampled_by"]` is then `profile`).

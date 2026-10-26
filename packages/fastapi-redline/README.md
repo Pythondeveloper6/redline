@@ -145,9 +145,13 @@ the one-line code hint with lower confidence instead. Both the lazy-load form
 The UI exposes your SQL, request bodies and EXPLAIN, so treat it like an admin tool.
 
 **Default.** With no `dependencies`, only loopback clients (127.0.0.0/8, `::1`, unix sockets)
-are served and a warning is logged at startup. Behind a reverse proxy every client may look
-like localhost: pass real dependencies instead, or run uvicorn with `--proxy-headers`
-and `--forwarded-allow-ips` so the client address is the real one.
+that address the server by a loopback name (`Host: localhost`, `127.0.0.1`, `[::1]`, any port;
+this blocks DNS rebinding)
+are served and a warning is logged at startup. Refusals, and `HTTPException`s from your own
+dependencies, are JSON `{"error": {"code": "forbidden" | "unauthorized" | ..., "message"}}`.
+Use `Depends(loopback_guard(allowed_hosts=["devbox"]))` to allow another host name. Behind a
+reverse proxy every client may look like localhost: pass real dependencies instead, or run
+uvicorn with `--proxy-headers` and `--forwarded-allow-ips` so the client address is the real one.
 
 **Your existing auth dependency:**
 

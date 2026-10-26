@@ -15,24 +15,18 @@ from __future__ import annotations
 
 import re
 from typing import Any
-from urllib.parse import parse_qs
 
 from redline_core import Recorder, get_recorder
+from redline_core.sampling import profile_requested
 
 __all__ = ["RedlineMiddleware"]
 
-_TRUTHY = {"1", "true", "yes", "on", "profile"}
 _JSON_PAIR = re.compile(r'("(?:[^"\\]|\\.)*")(\s*:\s*)("(?:[^"\\]|\\.)*"|[^,}\]\s]+)')
 
 
 def _wants_profile(headers: list[tuple[bytes, bytes]], query: bytes) -> bool:
-    for key, value in headers:
-        if key == b"x-redline-profile":
-            return value.decode("latin-1").strip().lower() in _TRUTHY
-    if b"_redline" in query:
-        values = parse_qs(query.decode("latin-1")).get("_redline", [])
-        return any(v.strip().lower() in _TRUTHY for v in values)
-    return False
+    header = next((v for k, v in headers if k == b"x-redline-profile"), None)
+    return profile_requested(query, header)
 
 
 def _header(headers: list[tuple[bytes, bytes]], name: bytes) -> str | None:

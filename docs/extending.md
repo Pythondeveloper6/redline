@@ -181,9 +181,10 @@ class Store(Protocol):
 | `list` | Newest first. `filters` carries `q`, `method`, `status`, `min_ms`, `min_queries`, `has_issues`, `route`, `tag`. Return a `Page(items, next_cursor, total)` of `TraceSummary` dicts (`Trace.summary()`). Cursors must stay valid while new rows arrive |
 | `endpoints` | One `EndpointStats` per `(route or path, method)` in the window; see [the definitions](issues-and-endpoints.md#endpoints). `series` has at most 48 non-empty buckets |
 | `issues` | Issue groups deduplicated by `Issue.id`, the sample being the latest occurrence |
-| `delete`, `clear`, `prune` | Return the number of traces deleted |
+| `delete`, `clear`, `prune` | Return the number of traces deleted. `prune(None, None)` applies the store's own rules; `0` disables a rule for that call (never "delete all"); negative values raise `ValueError` |
 | `flush` | Block until everything saved so far is durable; `False` on timeout. Called on shutdown |
 | `close` | Flush and release resources. `save` after `close` should drop |
+| fork safety | A store built before `fork()` (gunicorn `--preload`) is used in every worker. Do not share sockets, threads or connections across the fork: reopen them in the child (`os.register_at_fork(after_in_child=...)`, or compare `os.getpid()` on use), as `SQLiteStore` does |
 
 Useful helpers: `Filters.from_params(...)` parses and validates raw query parameters
 (raising `FilterError`), `parse_window`, `percentile`, and `encode_cursor` /
@@ -199,9 +200,12 @@ Useful helpers: `Filters.from_params(...)` parses and validates raw query parame
 
 === "Django"
 
-    There is **no hook** for a custom store in this version: the runtime always builds a
-    `SQLiteStore` from the settings. You can still replace `get_runtime().store`,
-    `.recorder.store` and `.api.store` yourself, but that is not a supported surface.
+    ```python
+    REDLINE = {"STORE": "myproject.redline.MyStore"}   # called with the core Settings
+    ```
+
+    `STORE` takes a `Store` instance, a callable or class taking the core `Settings`, or
+    the dotted path of either. See [Django: custom store](django.md#custom-store).
 
 ### Building on `SQLiteStore`
 

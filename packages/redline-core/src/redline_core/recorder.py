@@ -54,6 +54,7 @@ if TYPE_CHECKING:
     from .storage import Store
 
 __all__ = [
+    "OverflowGroup",
     "Recorder",
     "SpanContext",
     "TraceBuilder",
@@ -76,6 +77,39 @@ _parent: ContextVar[str | None] = ContextVar("redline_span", default=None)
 
 _perf = time.perf_counter
 _MAX_MANY_ROWS = 10  # executemany: keep the first N parameter rows
+#: Span kinds never dropped by ``max_spans_per_trace`` (a handful per request, and the
+#: waterfall's skeleton).
+_ALWAYS_KEPT = frozenset(("middleware", "view"))
+#: Distinct (fingerprint, callsite) groups tracked for spans beyond the cap.
+_MAX_OVERFLOW_GROUPS = 1_000
+
+
+class OverflowGroup:
+    """Counters for the SQL spans of one ``(fingerprint, callsite)`` dropped by the cap.
+
+    The detectors add these to the stored spans, so an N+1 loop that runs past
+    ``max_spans_per_trace`` is still reported with its full count and time.
+    """
+
+    __slots__ = ("count", "explainable", "max_ms", "sample", "slow_count", "slow_ms", "total_ms")
+
+    def __init__(self, sample: Span) -> None:
+        self.sample = sample  # the first dropped span, for callsite and suggesters
+        self.explainable = bool(sample.data.get("explainable"))
+        self.count = 0
+        self.total_ms = 0.0
+        self.max_ms = 0.0
+        self.slow_count = 0
+        self.slow_ms = 0.0
+
+    def add(self, duration_ms: float, slow_ms: float) -> None:
+        self.count += 1
+        self.total_ms += duration_ms
+        if duration_ms > self.max_ms:
+            self.max_ms = duration_ms
+        if duration_ms >= slow_ms:
+            self.slow_count += 1
+            self.slow_ms += duration_ms
 
 
 def current() -> TraceBuilder | None:
@@ -93,10 +127,13 @@ class TraceBuilder:
         "_token",
         "active",
         "client",
+        "dropped_spans",
         "finished",
         "framework",
         "id",
+        "max_spans",
         "method",
+        "overflow",
         "path",
         "profiler",
         "query_count",
@@ -149,6 +186,9 @@ class TraceBuilder:
         self.spans: list[Span] = []
         self.query_count = 0
         self.query_ms = 0.0
+        self.max_spans = recorder.settings.max_spans_per_trace or 0
+        self.dropped_spans = 0
+        self.overflow: dict[tuple[str, str | None], OverflowGroup] = {}
         self.started_at = time.time()
         self.t0 = _perf()
         self.profiler: Any = None
@@ -173,13 +213,36 @@ class TraceBuilder:
     def elapsed_ms(self) -> float:
         return (_perf() - self.t0) * 1000.0
 
+    @property
+    def full(self) -> bool:
+        """Whether the ``max_spans_per_trace`` cap has been reached."""
+        return bool(self.max_spans) and len(self.spans) >= self.max_spans
+
     def add(self, span: Span) -> None:
-        """Append a finished span (thread-safe)."""
+        """Append a finished span (thread-safe).
+
+        Beyond ``max_spans_per_trace`` the span is not stored – it is counted, and SQL
+        spans are folded into per-(fingerprint, callsite) :class:`OverflowGroup`
+        counters so query totals and N+1 detection stay exact.
+        """
         with self._lock:
-            self.spans.append(span)
             if span.kind == "sql":
                 self.query_count += 1
                 self.query_ms += span.duration_ms
+            if not self.max_spans or len(self.spans) < self.max_spans or span.kind in _ALWAYS_KEPT:
+                self.spans.append(span)
+                return
+            self.dropped_spans += 1
+            if span.kind != "sql":
+                return
+            loc = span.callsite.location if span.callsite else None
+            key = (str(span.data.get("fingerprint", "")), loc)
+            group = self.overflow.get(key)
+            if group is None:
+                if len(self.overflow) >= _MAX_OVERFLOW_GROUPS:
+                    return
+                group = self.overflow[key] = OverflowGroup(span)
+            group.add(span.duration_ms, self.recorder.settings.slow_query_ms)
 
 
 class Recorder:
@@ -313,6 +376,12 @@ class Recorder:
             spans = sorted(builder.spans, key=lambda s: s.start_ms)
             trace.query_count = builder.query_count
             trace.query_ms = round(builder.query_ms, 3)
+            overflow = list(builder.overflow.values())
+            if builder.dropped_spans:
+                trace.truncated = {
+                    "dropped_spans": builder.dropped_spans,
+                    "max_spans": builder.max_spans,
+                }
         trace.spans = spans
         reason = self.sampler.keep(
             rolled=builder.rolled,
@@ -327,7 +396,7 @@ class Recorder:
         try:
             trace.request = self._request_dict(builder)
             trace.response = self._response_dict(headers, body, size)
-            trace.issues = self.detector.detect(trace)
+            trace.issues = self.detector.detect(trace, overflow=overflow)
         except Exception:  # never let analysis break the response
             logger.exception("Redline failed to analyse trace %s", trace.id)
         if self.store is not None:
@@ -476,7 +545,9 @@ def record_query(
     if builder is None or builder.finished:
         return None
     redactor = builder.recorder.redactor
-    if many and isinstance(params, (list, tuple)):
+    if builder.full:  # the span will only be counted, so skip the redaction work
+        safe: Any = None
+    elif many and isinstance(params, (list, tuple)):
         safe = [redactor.sql_params(sql, row) for row in list(params)[:_MAX_MANY_ROWS]]
     else:
         safe = redactor.sql_params(sql, params)

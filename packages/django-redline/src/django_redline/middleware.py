@@ -29,6 +29,7 @@ from django.http import HttpRequest, HttpResponseBase
 from django.urls import NoReverseMatch, reverse
 
 from redline_core.recorder import SpanContext, TraceBuilder
+from redline_core.sampling import profile_requested
 
 from .instrument import begin_request, end_request
 from .runtime import get_runtime
@@ -60,10 +61,9 @@ def _reset_mount(**kwargs: Any) -> None:
 
 
 def _profile_requested(request: HttpRequest) -> bool:
-    if request.GET.get("_redline") == "profile":
-        return True
-    value = request.headers.get("X-Redline-Profile", "")
-    return value.strip().lower() in ("1", "true", "yes", "on")
+    return profile_requested(
+        request.META.get("QUERY_STRING", ""), request.headers.get("X-Redline-Profile")
+    )
 
 
 class RedlineMiddleware:
@@ -106,7 +106,12 @@ class RedlineMiddleware:
         return response
 
     def process_exception(self, request: HttpRequest, exception: BaseException) -> None:
-        """Remember the view's exception for the trace; never handles it."""
+        """Remember the view's exception for the trace; never handles it.
+
+        It is only recorded as the trace's ``error`` when the final response is a 5xx:
+        ``Http404``, ``PermissionDenied``, ``BadRequest``… become 4xx responses and are
+        client errors, not failures (so ``always_keep_errors`` does not keep them).
+        """
         request._redline_error = exception  # type: ignore[attr-defined]
         return None
 
@@ -155,6 +160,8 @@ class RedlineMiddleware:
             if builder.req_body is None and builder.recorder.settings.capture_request_body:
                 builder.req_body = getattr(request, "_body", None)
             error = exc or getattr(request, "_redline_error", None)
+            if response is not None and response.status_code < 500:
+                error = None  # Http404 & co.: handled by Django as a 4xx, not a failure
             if response is None:
                 builder.recorder.finish_trace(
                     builder, status=500, route=route, view=view, error=exc

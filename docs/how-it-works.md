@@ -47,11 +47,12 @@ One request is one **trace**. A trace has request and response metadata and a fl
 | `route` | the **template** (`/orders/<int:pk>/` or `/orders/{order_id}`), known once routing ran |
 | `view` | dotted name of the view or endpoint (`shop.views.order_detail`) |
 | `status`, `duration_ms` | response status and wall time |
-| `query_count`, `query_ms` | SQL span count and their summed duration |
+| `query_count`, `query_ms` | SQL query count and their summed duration (exact even when the trace is truncated) |
 | `request`, `response` | redacted headers, query, body, truncation flags, size |
 | `issues` | what the [detectors](n-plus-one.md) found |
 | `tags` | free-form; `run_id` and `step` (load-test correlation), `sampled_by`, `profile_error` |
-| `error` | `{type, message, traceback}` for an unhandled exception |
+| `error` | `{type, message, traceback}` for an unhandled exception; never set for a 4xx (Django's `Http404` is not an error) |
+| `truncated` | `{dropped_spans, max_spans}` when the request hit `max_spans_per_trace`, else `null` |
 
 Span kinds and the data each carries:
 
@@ -172,7 +173,7 @@ Recording is cheap, storing is not, so the decision is split.
 |---|---|
 | `all` | the dice said yes and `sample_rate >= 1.0` |
 | `rate` | the dice said yes and `sample_rate < 1.0` |
-| `error` | `always_keep_errors` is on and the request raised or returned 5xx |
+| `error` | `always_keep_errors` is on and the request returned 5xx, or raised without becoming a 4xx (a raised `Http404` is a 404, not an error) |
 | `slow` | `duration_ms >= always_keep_slower_than_ms` |
 | `profile` | the request was profiled |
 
@@ -207,14 +208,18 @@ Cost has four sources:
 | Per-kept-trace analysis (redaction, detectors, serialising) | kept traces | `sample_rate`, always-keep rules |
 | Profiling | profiled requests | `profile`, `profile_sample_rate` |
 
-Memory: a trace's spans are held until the request ends. A request that runs tens of
-thousands of queries holds tens of thousands of span objects (there is no per-trace span
-cap in this version). Bodies are captured only up to `max_body_bytes`.
+Measured on an Apple M2 Pro (Python 3.13, 2026-10-26, `benchmarks/RESULTS.md`), the
+per-request bookkeeping is **0.03 to 0.06 ms**, and per-query recording **12.5 µs**
+(Django) or **25.6 µs** (FastAPI, including SQLAlchemy event dispatch) when nothing is
+kept, rising to **22 to 44 µs** when every trace is kept and analysed. Disabled, Redline
+costs a few µs per request. See [Performance and overhead](performance.md#measured-numbers)
+for the full table and how to reproduce it.
 
-!!! warning "No benchmark numbers yet"
-
-    This page deliberately gives no millisecond figures. They will be measured, not
-    guessed. See [Performance and overhead](performance.md).
+Memory: a trace's spans are held until the request ends, about **1.5 KB per SQL span**.
+At most `max_spans_per_trace` spans (default 2000) are kept per request; beyond that they
+are counted, folded into per-(fingerprint, callsite) counters so the N+1 and slow-query
+detectors still see every query, and the trace is marked `truncated`. Bodies are captured
+only up to `max_body_bytes`.
 
 ## Design choices worth knowing
 

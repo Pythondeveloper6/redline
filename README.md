@@ -285,12 +285,12 @@ Report vulnerabilities privately: see [SECURITY.md](SECURITY.md).
 Honest, and not exhaustive. The [FAQ](docs/faq.md) has more.
 
 - **Alpha.** The API, settings and storage schema may change. No upgrade path yet.
-- **Overhead is not benchmarked.** The [cost model](docs/performance.md) is documented;
-  measured numbers are not. `sample_rate` reduces analysis and disk work, **not** the
-  per-query recording cost.
+- **Overhead is measured on one machine.** About 0.04 to 0.06 ms per request plus 12 to
+  44 µs per query on an Apple M2 Pro ([numbers](docs/performance.md#measured-numbers)).
+  `sample_rate` reduces analysis and disk work, **not** the per-query recording cost.
 - **Not hardened for production fleets.** Single-node SQLite. Multi-process use shares one
-  file and is untested. With FastAPI do not use `gunicorn --preload`
-  ([why](docs/production.md#process-models)).
+  file; the store is fork-safe (gunicorn `--preload` works), but busy multi-worker
+  deployments have not been load-tested ([details](docs/production.md#process-models)).
 - **No load testing yet, no distributed tracing, no alerting.**
 - **Aggregates describe stored traces.** Sampling plus always-keep-slow biases percentiles
   upward.

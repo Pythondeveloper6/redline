@@ -35,16 +35,39 @@ Vendor names come from the adapter: Django's `connection.vendor`, SQLAlchemy's
 Only statements `redline_core.sql.is_explainable` accepts: **a single read-only
 `SELECT`** (or `WITH ... SELECT`, `VALUES`, `TABLE`). Redline refuses:
 
-- anything containing a write or DDL keyword (`INSERT`, `UPDATE`, `DELETE`, `MERGE`,
-  `CREATE`, `DROP`, `ALTER`, `TRUNCATE`, `GRANT`, `REVOKE`, `CALL`, `COPY`, `INTO`): this
-  covers data-modifying CTEs, `SELECT ... INTO` and `SELECT ... FOR UPDATE`;
-- **more than one statement** (a `;` anywhere outside a literal);
+- any write or DDL keyword, in any letter case (`INSERT`, `UPDATE`, `DELETE`, `MERGE`,
+  `CREATE`, `DROP`, `ALTER`, `TRUNCATE`, `GRANT`, `REVOKE`, `CALL`, `COPY`, `INTO`). This
+  covers data-modifying CTEs (`WITH x AS (DELETE ... RETURNING *) SELECT ...`) and
+  `SELECT ... INTO`;
+- every **row-locking clause**: `FOR UPDATE`, `FOR NO KEY UPDATE`, `FOR SHARE`,
+  `FOR KEY SHARE` (PostgreSQL) and `LOCK IN SHARE MODE` (MySQL). Under `ANALYZE` they
+  would take row locks until the rollback;
+- **more than one statement** (a `;` outside a literal; one trailing `;` is fine);
 - `executemany` spans (`many=True`), whose parameters are a list of rows.
 
-The check is a keyword screen over the normalised statement, with the literals already
-stripped out, so a string literal containing the word `DELETE` does not trip it. It is
-conservative by design; a read-only locking clause such as `FOR SHARE` is not in the
-list, so it passes (and is harmless to plan inside a rolled-back transaction).
+The check reads the statement **twice** and both readings must pass:
+
+1. **Literal-aware**: over the normalised statement with literals and comments stripped,
+   so `WHERE note = 'DELETE me'` or a column named `"update"` does not trip it.
+2. **Dialect-pessimistic**: over the raw text, removing only what every database agrees
+   is inert. Databases disagree about quoting: a backslash ends a standard PostgreSQL
+   string but escapes the quote in MySQL; MySQL has no `$$` dollar quoting, executes
+   `/*! ... */` "comments", and needs a space after `--`. A statement that hides a `;` or
+   a write keyword under one of those readings (`SELECT 'a\' ; DELETE FROM t; --'`,
+   `SELECT 1 /*! INTO OUTFILE '/tmp/x' */`) is refused.
+
+The check errs on the side of refusing: an unusual but harmless statement may be refused,
+a harmful one is not let through.
+
+!!! note "Functions with side effects are out of scope"
+
+    `SELECT nextval('seq')`, `SELECT pg_advisory_lock(1)` or a user function that writes
+    all *look* like reads, and Redline does not try to know which functions have side
+    effects. A plain `EXPLAIN` (the default) only plans the statement and never calls
+    them. `EXPLAIN ANALYZE` does run them, which is one more reason it is off by default;
+    it still runs inside a transaction that is always rolled back (and `READ ONLY` on
+    PostgreSQL, which refuses most writes). Effects outside the transaction (a sequence
+    advancing, an advisory lock held until the rollback, a sleep) can happen.
 
 The same check runs in the API **and** again in the explain runner, whatever the adapter
 passes: it is not left to the UI.
