@@ -3,41 +3,93 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Sequence
+from collections.abc import Callable, Coroutine, Sequence
 from typing import Any
 
-from fastapi import APIRouter, Depends, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.routing import APIRoute
 
 from redline_core import ui
 
-from ._security import csrf_guard
+from ._security import RedlineHTTPError, csrf_guard
 
-__all__ = ["build_router"]
+__all__ = ["RedlineRoute", "build_router", "error_response"]
 
 _NO_STORE = {"Cache-Control": "no-store"}
 _IMMUTABLE = {"Cache-Control": "public, max-age=31536000, immutable"}
+_SECURITY = {
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "same-origin",
+    "X-Frame-Options": "DENY",
+}
+_CODES = {
+    400: "bad_request",
+    401: "unauthorized",
+    403: "forbidden",
+    404: "not_found",
+    405: "method_not_allowed",
+    429: "too_many_requests",
+}
+
+
+def error_response(
+    status: int, code: str, message: str, headers: dict[str, str] | None = None
+) -> JSONResponse:
+    """A JSON error in the API's shape (``CONTRACT.md`` §5)."""
+    return JSONResponse(
+        {"error": {"code": code, "message": message}},
+        status_code=status,
+        headers={**_NO_STORE, **_SECURITY, **(headers or {})},
+    )
+
+
+class RedlineRoute(APIRoute):
+    """Renders ``HTTPException`` – from Redline's guards *and* your auth dependencies –
+    as ``{"error": {"code", "message"}}`` instead of FastAPI's ``{"detail": ...}``, so
+    the UI can show it. Headers such as ``WWW-Authenticate`` are kept."""
+
+    def get_route_handler(self) -> Callable[[Request], Coroutine[Any, Any, Response]]:
+        handler = super().get_route_handler()
+
+        async def route_handler(request: Request) -> Response:
+            try:
+                return await handler(request)
+            except HTTPException as exc:
+                if isinstance(exc, RedlineHTTPError):
+                    code, message = exc.code, exc.message
+                else:
+                    code = _CODES.get(exc.status_code, "http_error")
+                    detail = exc.detail
+                    message = detail if isinstance(detail, str) else str(detail or code)
+                return error_response(exc.status_code, code, message, dict(exc.headers or {}))
+
+        return route_handler
 
 
 def build_router(redline: Any, dependencies: Sequence[Any]) -> APIRouter:
-    router = APIRouter(dependencies=list(dependencies), include_in_schema=False)
+    router = APIRouter(
+        dependencies=list(dependencies), include_in_schema=False, route_class=RedlineRoute
+    )
 
     @router.get("/")
     async def index() -> HTMLResponse:
-        return HTMLResponse(ui.index_html(), headers=_NO_STORE)
+        return HTMLResponse(ui.index_html(), headers={**_NO_STORE, **_SECURITY})
 
     @router.get("/assets/{path:path}")
     async def assets(path: str) -> Response:
         file = ui.asset_path(f"assets/{path}")
         if file is None:
-            return JSONResponse(
-                {"error": {"code": "not_found", "message": "No such asset."}}, status_code=404
-            )
-        return FileResponse(file, media_type=ui.content_type(file), headers=_IMMUTABLE)
+            return error_response(404, "not_found", "No such asset.")
+        return FileResponse(
+            file, media_type=ui.content_type(file), headers={**_IMMUTABLE, **_SECURITY}
+        )
 
     @router.api_route(
-        "/api/{path:path}", methods=["GET", "POST", "DELETE"], dependencies=[Depends(csrf_guard)]
+        "/api/{path:path}",
+        methods=["GET", "POST", "DELETE", "PUT", "PATCH"],  # the core answers 405 for the last two
+        dependencies=[Depends(csrf_guard)],
     )
     async def api(request: Request, path: str) -> JSONResponse:
         redline.loop = asyncio.get_running_loop()
@@ -52,15 +104,15 @@ def build_router(redline: Any, dependencies: Sequence[Any]) -> APIRouter:
         status, payload = await run_in_threadpool(
             redline.api.dispatch, request.method, f"api/{path}", params, body
         )
-        return JSONResponse(payload, status_code=status, headers=_NO_STORE)
+        return JSONResponse(payload, status_code=status, headers={**_NO_STORE, **_SECURITY})
 
     @router.get("/{name}")
     async def top_level(name: str) -> Response:
         file = ui.asset_path(name)  # favicon.svg etc.
         if file is None:
-            return JSONResponse(
-                {"error": {"code": "not_found", "message": "Not found."}}, status_code=404
-            )
-        return FileResponse(file, media_type=ui.content_type(file), headers=_NO_STORE)
+            return error_response(404, "not_found", "Not found.")
+        return FileResponse(
+            file, media_type=ui.content_type(file), headers={**_NO_STORE, **_SECURITY}
+        )
 
     return router

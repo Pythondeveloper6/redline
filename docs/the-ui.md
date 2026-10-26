@@ -74,7 +74,9 @@ framework, which is a reasonable thing to see on a fresh install.
 
 Click a request. The header shows the method, path, status, start time, framework, route
 and view. If the request raised, a red box shows the exception type, message and a
-collapsible **traceback**. Under it five cards:
+collapsible **traceback**. If it produced more than `max_spans_per_trace` spans, an amber
+**Trace truncated** notice says how many spans were counted but not stored (query counts,
+query time and the N+1 and slow-query issues still include them). Under it five cards:
 
 | Card | Shows |
 |---|---|

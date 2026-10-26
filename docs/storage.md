@@ -47,7 +47,8 @@ history).
 ## The writer thread
 
 `SQLiteStore.save(trace)` puts the trace on a bounded queue (`writer_queue_size`, default
-1000) and returns. A daemon thread named `redline-writer`:
+1000) and returns. A daemon thread named `redline-writer`, started on the first `save` in
+each process:
 
 1. takes one item, then drains up to **50** more that are already waiting (a batch);
 2. writes the batch in **one transaction**;
@@ -79,6 +80,9 @@ reads are small, but note:
   thousands of traces) delays the writer for its duration.
 - Several **processes** can share the file (WAL, 10-second busy timeout), but see
   [Production: process models](production.md#process-models) for the caveats.
+- After `fork()` (gunicorn `--preload`, uWSGI without `lazy-apps`) the store opens a
+  new connection, queue and writer thread in the child; the parent's connection is never
+  touched there. See [Production: process models](production.md#process-models).
 - `SQLiteStore(background=False)` writes inline on the calling thread. That is for tests
   and short scripts, **not** for serving requests.
 
@@ -88,8 +92,11 @@ Two rules, applied together.
 
 | Rule | Setting | Behaviour |
 |---|---|---|
-| Age | `max_age_days` (default 7) | delete traces whose start is older than this. `0` disables the age rule |
-| Count | `max_rows` (default 10,000) | keep the newest N, delete the rest. `0` means keep none |
+| Age | `max_age_days` (default 7) | delete traces whose start is older than this. `0` or `None` disables the age rule |
+| Count | `max_rows` (default 10,000) | keep the newest N, delete the rest. `0` or `None` disables the row cap |
+
+Zero means "no limit" for both rules, and a negative value is an error. Pruning never
+deletes everything because of a zero; that is what **Clear all** is for.
 
 Applied by the writer every 200 saved traces, by `manage.py redline_prune` (Django) on
 demand, and when you call `store.prune(max_age_s=..., max_rows=...)`. Pruning removes the
@@ -107,18 +114,34 @@ to roughly that many.
 
 ## Size
 
-!!! warning "To be measured"
+Measured with `benchmarks/storage.py` on 2026-10-26 (Apple M2 Pro, Python 3.13.15), for a
+`GET` with browser-like headers and a JSON response of about 1 KB, every query issued
+from one loop line (so the 20- and 200-query traces carry an N+1 issue and its fix
+suggestion). Bytes are the `.db` file after a WAL checkpoint, divided by the traces stored:
 
-    No sizes are quoted here because none have been measured yet. The factors are:
+| Trace | On disk per trace |
+|---|---|
+| no queries | **1.6 KiB** |
+| 20 queries | **31 KiB** |
+| 200 queries | **261 KiB** |
+| a pyinstrument profile of a ~20 ms request | **+1.6 KiB** (a profile grows with the number of distinct stacks sampled; deep, long requests reach hundreds of KiB) |
 
-    - the number of spans (every SQL query is a span with its SQL text and parameters);
-    - captured bodies (up to `max_body_bytes` each, request and response);
-    - the callsite source line and stack on each SQL span;
-    - **profiles**, by far the largest single item.
+So each SQL span costs about **1.3 KiB** on disk, most of it the SQL text and the
+callsite (file, line, source line and up to 12 stack frames). With the defaults
+(`max_rows = 10,000`) a store of 20-query traces settles around **300 MiB**; a store of
+plain requests around 16 MiB. `max_spans_per_trace` (default 2000) bounds the largest
+single trace at roughly 2.6 MiB.
 
-    Measure your own app: after a representative run, look at `ls -lh .redline/` (include
-    the `-wal` file) and divide by `storage.rows` from `GET api/meta`. A number will go
-    on this page when the [benchmarks](performance.md) are run.
+The factors, largest first:
+
+- the number of SQL spans, and the length of your SQL;
+- captured bodies (up to `max_body_bytes` each, request and response);
+- **profiles**, which can dominate for long requests;
+- headers and tags.
+
+To measure your own app: after a representative run, `ls -lh .redline/` (include the
+`-wal` file) and divide by `storage.rows` from `GET api/meta`. Reproduce the table with
+`uv run python benchmarks/storage.py`.
 
 Disk usage after pruning does not shrink on its own: SQLite reuses freed pages but does not
 return them to the operating system. To reclaim space, stop the app and run
@@ -153,5 +176,5 @@ the `.db` file while it is being written can miss data that is still in the `-wa
 ## A different store
 
 The `Store` protocol is public. A Postgres store is planned for
-[v1.0](roadmap.md). To plug in your own now (FastAPI), see
-[Extending](extending.md#the-store-protocol).
+[v1.0](roadmap.md). To plug in your own now, pass `install(store=...)` (FastAPI) or set
+`REDLINE["STORE"]` (Django); see [Extending](extending.md#the-store-protocol).

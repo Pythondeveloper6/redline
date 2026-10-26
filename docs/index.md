@@ -278,7 +278,7 @@ There is no Node.js requirement: the web UI ships prebuilt inside `redline-core`
 | [Production](production.md) | Sampling, retention, overhead, what not to do |
 | [Security](security.md) | Redaction, authentication, exposure, data on disk |
 | [Storage](storage.md) | The SQLite store, the writer thread, retention |
-| [Performance and overhead](performance.md) | The cost model, and where measured numbers will go |
+| [Performance and overhead](performance.md) | The cost model and the measured overhead |
 | [Roadmap](roadmap.md) | v0.2 Stress, v0.3 Compare and CI, v1.0 |
 | [FAQ](faq.md) | How finished it is, how it differs from other tools |
 

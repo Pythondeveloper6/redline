@@ -16,8 +16,14 @@ export function SuggestionBlock({ s }: { s: Suggestion }) {
         </div>
       )}
       {s.diff && <DiffView diff={s.diff} />}
-      {s.docs_url && <a href={s.docs_url} target="_blank" rel="noreferrer" className="text-info text-[12px] hover:underline">Read the docs</a>}
+      {safeUrl(s.docs_url) && <a href={safeUrl(s.docs_url)!} target="_blank" rel="noreferrer" className="text-info text-[12px] hover:underline">Read the docs</a>}
     </div>
   )
+}
+// Only http(s) links: a suggestion comes from a (possibly third-party) suggester, and a
+// `javascript:` URL in an href would run in the Redline page.
+function safeUrl(url: string | null): string | null {
+  if (!url) return null
+  try { return ['http:', 'https:'].includes(new URL(url, location.href).protocol) ? url : null } catch { return null }
 }
 export const kindLabel = (k: string) => ISSUE_LABEL[k] ?? k

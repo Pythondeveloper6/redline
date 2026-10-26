@@ -106,3 +106,51 @@ def test_tables_and_columns():
     assert cols["shop_order"] == ["customer_id"]
     assert statement_kind(sql) == "SELECT"
     assert filter_columns("SELECT * FROM t WHERE f::text = ?") == {"t": ["f"]}
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        # every row-locking clause, whatever the case
+        "select * from t for share",
+        "SELECT * FROM t FOR NO KEY UPDATE",
+        "select * from t for key share skip locked",
+        "SELECT * FROM t FOR UPDATE OF t NOWAIT",
+        "SELECT * FROM t LOCK IN SHARE MODE",
+        # data-modifying CTEs, lower-case keywords not in the fingerprint keyword list
+        "with x as (delete from t returning *) select * from x",
+        "with x as (update t set a = 1 returning *) select * from x",
+        "WITH x AS (INSERT INTO t VALUES (1) RETURNING *) SELECT * FROM x",
+        "with x as (select 1) truncate t",
+        "with x as (select 1) merge into t using x on true when matched then delete",
+        # quoting tricks: a backslash ends a standard PostgreSQL string ...
+        "SELECT 'a\\' ; DELETE FROM t; --'",
+        # ... MySQL runs /*! */ comments and needs a space after --
+        "SELECT 1 /*! INTO OUTFILE '/tmp/x' */",
+        "SELECT 1 --1; DELETE FROM t",
+        # MySQL has no dollar quoting
+        "SELECT $$; DELETE FROM t; $$",
+        "SELECT a INTO @v FROM t",
+        "",
+        "SELECT 1\x00",
+    ],
+)
+def test_is_explainable_refuses_writes_locks_and_quoting_tricks(sql):
+    assert is_explainable(sql) is False
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        # Django's SQLite LIKE lookups: a lone backslash literal
+        'SELECT "t"."id" FROM "t" WHERE "t"."name" LIKE %s ESCAPE \'\\\' AND "t"."x" = %s',
+        # identifiers that happen to be keywords are fine
+        'SELECT "t"."update", "t"."lock", "t"."share" FROM "t"',
+        "SELECT `into` FROM t WHERE a = $1",
+        "SELECT * FROM t WHERE note = 'FOR UPDATE; DELETE'",
+        "SELECT 1;",
+        "select updated_at, created_by from t",
+    ],
+)
+def test_is_explainable_accepts_ordinary_reads(sql):
+    assert is_explainable(sql) is True

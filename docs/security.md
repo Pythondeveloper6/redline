@@ -127,9 +127,16 @@ console with read-only privileges *and* to the traffic.
 
 === "FastAPI"
 
-    **Default: loopback only.** Without `dependencies`, only `127.0.0.0/8`, `::1` and unix
-    sockets are served, and a warning is logged at startup. Pass your own dependencies for
-    anything else. See [FastAPI: access control](fastapi.md#access-control).
+    **Default: loopback only.** Without `dependencies`, a request is served only when
+    **both** hold, and a warning is logged at startup:
+
+    - the client is loopback (`127.0.0.0/8`, `::1`, unix sockets);
+    - the `Host` header names loopback: `localhost`, `*.localhost`, `127.x.x.x` or
+      `[::1]`, with any port. This defeats DNS rebinding (below).
+
+    Pass your own dependencies for anything else. A refusal is `403` JSON
+    `{"error": {"code": "forbidden", ...}}`. See
+    [FastAPI: access control](fastapi.md#access-control).
 
 ### Cross-site request forgery
 
@@ -139,20 +146,41 @@ api/explain`, are protected:
 - **Django** runs Django's own CSRF machinery on every API request (token in the CSRF
   header, plus the Origin and Referer checks on HTTPS), even if `CsrfViewMiddleware` is not
   installed, and answers `403 csrf_failed` as JSON.
-- **FastAPI** rejects cross-site browser requests via `Origin` and `Sec-Fetch-Site`.
+- **FastAPI** rejects cross-site browser requests via `Origin` and `Sec-Fetch-Site`,
+  with `403 csrf_failed` in the same JSON shape.
+
+### DNS rebinding
+
+A web page on `evil.example` can re-point its own DNS name at `127.0.0.1`. Your browser
+then sends that page's requests to your local server, as same-origin requests, so CORS and
+the CSRF checks do not stop it reading `GET` endpoints. What gives it away is the `Host`
+header, which still says `evil.example`.
+
+- **FastAPI:** the default `local_only` guard refuses any `Host` that is not a loopback
+  name or address (`403 forbidden`). If you reach the app through a hosts-file alias, allow
+  it explicitly:
+  `install(app, dependencies=[Depends(loopback_guard(allowed_hosts=["devbox"]))])`.
+  With your own `dependencies` (real authentication), the attacker's page has no
+  credentials for your host (cookies are bound to `evil.example`), so it is refused too.
+- **Django:** every Redline view calls `request.get_host()`, so `ALLOWED_HOSTS` is enforced
+  on them even without `CommonMiddleware` (an unknown host gets Django's `400`). With
+  `DEBUG = True` and an empty `ALLOWED_HOSTS`, Django only accepts `localhost`,
+  `127.0.0.1` and `[::1]`. The staff session cookie is not sent to the attacker's host name
+  either. Do not combine `ALLOWED_HOSTS = ["*"]` with a `PERMISSION` that returns `True`.
+
+### Framing
+
+The UI page is served with `X-Frame-Options: DENY` by both adapters, so another site
+cannot frame it and trick a click on **Clear all**.
 
 ### Putting it behind a proxy
 
 !!! warning "Loopback is not a security boundary behind a proxy"
 
     If a reverse proxy forwards to your app on `127.0.0.1`, FastAPI's default allows
-    **everyone** the proxy lets through. Pass `dependencies`, or run uvicorn with
-    `--proxy-headers --forwarded-allow-ips=<proxy ip>`.
-
-    Also remember the default loopback check does **not** validate the `Host` header, so
-    it is not defended against DNS rebinding by itself (a malicious page that rebinds a
-    hostname to `127.0.0.1` could read `GET` endpoints from your browser). On a developer
-    laptop that risk is small but real; any real `dependencies` closes it.
+    **everyone** the proxy lets through whose `Host` the proxy rewrites to `localhost`
+    (many do). Pass `dependencies`, or run uvicorn with
+    `--proxy-headers --forwarded-allow-ips=<proxy ip>` so the real client address is seen.
 
 ### If you must expose it
 
@@ -186,10 +214,10 @@ Never expose it with `dependencies=[]` or a permission that returns `True`.
 
 | Surface | Behaviour |
 |---|---|
-| **Responses** | Django: the page sets `X-Content-Type-Options: nosniff`, `Referrer-Policy: same-origin` and `Cache-Control: no-store`. API responses are `no-store` |
-| **Static assets** | Served through the same access check. Hashed asset names are cached for a year; the path is checked to stay inside the bundle directory (no traversal) |
+| **Responses** | Both adapters: the page sets `X-Content-Type-Options: nosniff`, `Referrer-Policy: same-origin`, `X-Frame-Options: DENY` and `Cache-Control: no-store`. API responses are `no-store` and `nosniff` |
+| **Static assets** | Served through the same access check. Hashed asset names are cached for a year; the path is resolved (symlinks and `..` included) and refused unless it stays inside the bundle directory, so `assets/../../conf.py` is a `404` |
 | **`X-Redline-Trace` header** | Django only, and only when `DEBUG` is true: the id of the trace is added to the response, so you can find it. It is not sent in production |
-| **Rendering** | The UI renders stored text through React, which escapes it. Stored bodies are shown as text, never as HTML |
+| **Rendering** | The UI renders stored text through React, which escapes it: there is no `dangerouslySetInnerHTML` or `innerHTML` anywhere. The SQL highlighter returns tokens rendered as text nodes, the diff view renders each line as text, and a suggestion's docs link is only rendered when it is `http(s)` (never `javascript:`). Trace ids are URL-encoded in API calls |
 | **Outbound network** | Redline makes **no** network calls of its own: no telemetry, no update check |
 | **Dependencies** | `redline-core` has **no runtime dependencies** |
 | **The profiler** | Optional; adds `pyinstrument` |
@@ -207,7 +235,8 @@ the project does not own that name there, and a third party could.
 |---|---|---|
 | Anonymous internet user | Read traces | Django: login and staff check. FastAPI: loopback default or your dependency. **Not stopped** if you expose it open |
 | Logged-in non-admin user | Read other users' request data | `PERMISSION` / `dependencies` |
-| A malicious website the admin visits | Delete traces, trigger EXPLAIN | CSRF protections |
-| A malicious website (DNS rebinding) | Read `GET` endpoints of a loopback FastAPI | a real `dependencies` |
+| A malicious website the admin visits | Delete traces, trigger EXPLAIN | CSRF protections; `X-Frame-Options: DENY` |
+| A malicious website (DNS rebinding) | Read `GET` endpoints of a local instance | FastAPI: the `Host` check of the loopback default, or real auth. Django: `ALLOWED_HOSTS` (enforced on Redline's views) and the session cookie |
 | Someone with read access to the disk or backups | Everything stored | redaction, retention, file permissions. **Not** encryption |
-| An admin with the UI | Run arbitrary SQL | Not possible: EXPLAIN is limited to **recorded single `SELECT`s**, in a rolled-back transaction. They can read what was recorded and, if `explain_analyze` is on, make the server re-run recorded queries |
+| An admin with the UI | Run arbitrary SQL | Not possible: EXPLAIN takes a trace and span id, never SQL, and is limited to **recorded single read-only `SELECT`s** (no locking clause, no data-modifying CTE, no second statement; see [EXPLAIN: safety](explain.md#safety)), in a rolled-back transaction. They can read what was recorded and, if `explain_analyze` is on, make the server re-run recorded queries |
+| Someone who can write the store file | Plant SQL for EXPLAIN | The same `is_explainable` check runs again before EXPLAIN, on the stored text; side-effecting *functions* in a planted `SELECT` would only run under `explain_analyze` (off by default), in a rolled-back transaction |

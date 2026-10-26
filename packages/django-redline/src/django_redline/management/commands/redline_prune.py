@@ -10,12 +10,15 @@ from django_redline.runtime import get_runtime
 class Command(BaseCommand):
     help = (
         "Apply Redline's retention now: delete traces older than MAX_AGE_DAYS and the "
-        "oldest beyond MAX_ROWS (or the values given here)."
+        "oldest beyond MAX_ROWS (or the values given here). 0 disables a rule; use "
+        "redline_clear to delete everything."
     )
 
     def add_arguments(self, parser: CommandParser) -> None:
-        parser.add_argument("--max-age-days", type=float, default=None)
-        parser.add_argument("--max-rows", type=int, default=None)
+        parser.add_argument(
+            "--max-age-days", type=float, default=None, help="0 disables the age rule."
+        )
+        parser.add_argument("--max-rows", type=int, default=None, help="0 disables the row cap.")
 
     def handle(self, *args: Any, **options: Any) -> None:
         rt = get_runtime()

@@ -104,13 +104,14 @@ Two limits, both applied by the writer thread every 200 saved traces and by
 
 | Setting | Effect | Note |
 |---|---|---|
-| `max_age_days` | delete older than this | `0` disables the age rule |
-| `max_rows` | keep only the newest N | `0` deletes everything; use a large number for "no limit" |
+| `max_age_days` | delete older than this | `0` or `None` disables the age rule |
+| `max_rows` | keep only the newest N | `0` or `None` disables the row cap |
 
-Size depends on what you store, so there is no honest single number. As a rule of
-thumb a trace with a few dozen spans and bodies is **tens of kilobytes** of JSON (not
-measured: see [Storage](storage.md#size)). Profiles are far larger. The ceiling you set
-with `max_rows` times the size of your *largest* typical trace is your upper bound.
+Size depends on what you store. Measured (`benchmarks/storage.py`): about **1.6 KiB** for
+a trace with no queries, **31 KiB** with 20 queries and **260 KiB** with 200, roughly
+1.3 KiB per SQL span. See [Storage: size](storage.md#size). The ceiling you set with
+`max_rows` times the size of your *largest* typical trace is your upper bound, and
+`max_spans_per_trace` (default 2000) bounds the largest trace.
 
 ## What to leave off
 
@@ -147,17 +148,16 @@ in each process, not at import, so it is safe with gunicorn's pre-fork model and
 management commands (`migrate` never creates `.redline/`). Each worker process gets its
 own writer thread writing to the same file (see below).
 
-**FastAPI.** `install()` creates the store, and its writer thread, **at the moment it is
-called**, typically at import time.
+**FastAPI.** `install()` creates the store when it is called, typically at import time.
+The writer thread starts lazily, on the first trace saved in each process.
 
-!!! danger "gunicorn `--preload` with FastAPI"
-
-    A thread does not survive `fork()`. If the app is imported in the gunicorn master
-    (`--preload`) the writer thread belongs to the master, and the forked workers inherit a
-    queue nobody drains. Traces are then dropped once the queue fills (`storage.dropped`
-    climbs). This follows from how the store is built; it has not been tested here. Do not
-    use `--preload` with FastAPI, or call `install()` from a startup hook that runs in each
-    worker. With `uvicorn --workers N` each worker imports the app itself, so it is fine.
+**Fork-safe in both.** The store notices when it is used in a new process
+(`os.register_at_fork`, plus a PID check on every call) and opens its own SQLite
+connection, queue and writer thread there; the connection inherited from the parent is
+never used or closed in the child. So gunicorn `--preload`, uWSGI without `lazy-apps`
+and `multiprocessing` with the fork start method all work: traces recorded in a worker
+are written by that worker. This is covered by a test that forks a process with a running
+writer. With `uvicorn --workers N` each worker imports the app itself anyway.
 
 **Several workers.** All workers write to the **same SQLite file**. SQLite serialises
 writers (WAL mode, a 10-second busy timeout), and each worker prunes on its own schedule,

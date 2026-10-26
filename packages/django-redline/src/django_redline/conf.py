@@ -14,10 +14,16 @@ Django-only keys:
 ``PERMISSION``
     Who may open the UI and the API: a callable ``(request) -> bool`` or its dotted path.
     Default: active staff users (:func:`default_permission`).
+``STORE``
+    Where traces go (the counterpart of FastAPI's ``install(store=...)``): a
+    :class:`~redline_core.storage.Store` instance, a callable (or class) taking the core
+    :class:`~redline_core.Settings` and returning one, or the dotted path of either.
+    Default: ``SQLiteStore.from_settings(settings)``.
 """
 
 from __future__ import annotations
 
+import inspect
 import os
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -29,19 +35,21 @@ from django.http import HttpRequest
 from django.utils.module_loading import import_string
 
 from redline_core.conf import Settings, SettingsError
+from redline_core.storage import SQLiteStore, Store
 
 __all__ = [
     "DJANGO_KEYS",
     "PRODUCTION_SAMPLE_RATE",
     "SETTING_NAME",
     "DjangoOptions",
+    "build_store",
     "default_permission",
     "get_core_settings",
     "get_options",
 ]
 
 SETTING_NAME = "REDLINE"
-DJANGO_KEYS = ("permission",)
+DJANGO_KEYS = ("permission", "store")
 #: Default ``SAMPLE_RATE`` when ``DEBUG`` is False.
 PRODUCTION_SAMPLE_RATE = 0.1
 
@@ -59,6 +67,8 @@ class DjangoOptions:
     """The Django-only part of ``REDLINE``."""
 
     permission: Permission = default_permission
+    #: The ``STORE`` value after importing a dotted path (``None``: the SQLite default).
+    store: Any = None
 
 
 def _raw() -> dict[str, Any]:
@@ -91,11 +101,24 @@ def get_core_settings() -> Settings:
 
 
 def get_options() -> DjangoOptions:
-    """The Django-only options (``PERMISSION``)."""
+    """The Django-only options (``PERMISSION``, ``STORE``)."""
     raw = {k.lower(): v for k, v in _raw().items()}
+    store = raw.get("store")
+    if isinstance(store, str):
+        try:
+            store = import_string(store)
+        except ImportError as exc:
+            raise ImproperlyConfigured(
+                f"settings.{SETTING_NAME}['STORE'] could not be imported: {exc}"
+            ) from exc
+    if store is not None and not callable(store) and not isinstance(store, Store):
+        raise ImproperlyConfigured(
+            f"settings.{SETTING_NAME}['STORE'] must be a Store, a callable (settings) -> "
+            f"Store, or the dotted path of either; got {store!r}."
+        )
     permission = raw.get("permission")
     if permission is None:
-        return DjangoOptions()
+        return DjangoOptions(store=store)
     if isinstance(permission, str):
         try:
             permission = import_string(permission)
@@ -108,4 +131,26 @@ def get_options() -> DjangoOptions:
             f"settings.{SETTING_NAME}['PERMISSION'] must be a callable (request) -> bool "
             "or its dotted path."
         )
-    return DjangoOptions(permission=permission)
+    return DjangoOptions(permission=permission, store=store)
+
+
+def build_store(spec: Any, core: Settings) -> tuple[Store, bool]:
+    """``(store, owned)`` for a ``STORE`` value; ``owned`` stores are closed on rebuilds.
+
+    ``None`` builds the default SQLite store. A class or plain callable is called with the
+    core settings. A ready instance is used as-is and is *not* closed when the runtime is
+    rebuilt (``override_settings``), only flushed – it outlives the runtime.
+    """
+    if spec is None:
+        return SQLiteStore.from_settings(core), True
+    if inspect.isclass(spec) or (callable(spec) and not isinstance(spec, Store)):
+        store = spec(core)
+        owned = True
+    else:
+        store, owned = spec, False
+    if not isinstance(store, Store):
+        raise ImproperlyConfigured(
+            f"settings.{SETTING_NAME}['STORE'] produced {store!r}, which does not implement "
+            "the redline_core.storage.Store protocol."
+        )
+    return store, owned

@@ -33,7 +33,7 @@ import hashlib
 import json
 import logging
 from collections.abc import Iterable, Sequence
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from . import sql as sqlmod
 from .conf import Settings
@@ -48,6 +48,9 @@ __all__ = [
     "detect",
     "issue_id",
 ]
+
+if TYPE_CHECKING:
+    from .recorder import OverflowGroup
 
 logger = logging.getLogger("redline")
 
@@ -142,22 +145,35 @@ class Detector:
         self.suggesters = [*others, suggester, *generic]
 
     # entry point -----------------------------------------------------------
-    def detect(self, trace: Trace) -> list[Issue]:
+    def detect(self, trace: Trace, overflow: Sequence[OverflowGroup] | None = None) -> list[Issue]:
+        """Every issue in ``trace``.
+
+        ``overflow`` are the counters of SQL spans dropped by ``max_spans_per_trace``
+        (from the recorder); N+1 and slow-query issues include them, so a truncated trace
+        still reports the full loop. Duplicate detection only sees stored spans.
+        """
         sql_spans = [s for s in trace.spans if s.kind == "sql"]
+        extra: dict[tuple[str, str | None], OverflowGroup] = {}
+        for group in overflow or ():
+            sample = group.sample
+            fp = sample.data.get("fingerprint") or sqlmod.fingerprint(sample.data.get("sql", ""))
+            extra[(fp, sample.callsite.location if sample.callsite else None)] = group
         issues: list[Issue] = []
-        n1 = self._n_plus_one(sql_spans)
+        samples: dict[str, Span] = {}
+        n1 = self._n_plus_one(sql_spans, extra, samples)
         covered = {sid for issue in n1 for sid in issue.span_ids}
         issues.extend(n1)
         issues.extend(self._duplicates(sql_spans, covered))
-        issues.extend(self._slow(sql_spans))
+        issues.extend(self._slow(sql_spans, extra, samples))
         too_many = self._too_many(trace, sql_spans)
         if too_many:
             issues.append(too_many)
         by_id = {s.id: s for s in sql_spans}
         for issue in issues:
-            issue.suggestion = self._suggest(
-                issue, [by_id[i] for i in issue.span_ids if i in by_id]
-            )
+            spans = [by_id[i] for i in issue.span_ids if i in by_id]
+            if not spans and issue.id in samples:
+                spans = [samples[issue.id]]
+            issue.suggestion = self._suggest(issue, spans)
         order = {"critical": 0, "warning": 1, "info": 2}
         issues.sort(key=lambda i: (order[i.severity], -i.total_ms))
         return issues
@@ -174,7 +190,12 @@ class Detector:
         return None
 
     # detectors -------------------------------------------------------------
-    def _n_plus_one(self, spans: Iterable[Span]) -> list[Issue]:
+    def _n_plus_one(
+        self,
+        spans: Iterable[Span],
+        extra: dict[tuple[str, str | None], OverflowGroup] | None = None,
+        samples: dict[str, Span] | None = None,
+    ) -> list[Issue]:
         threshold = self.settings.n_plus_one_threshold
         groups: dict[tuple[str, str | None], list[Span]] = {}
         for s in spans:
@@ -184,17 +205,24 @@ class Detector:
             fp = data.get("fingerprint") or sqlmod.fingerprint(data.get("sql", ""))
             loc = s.callsite.location if s.callsite else None
             groups.setdefault((fp, loc), []).append(s)
+        extra = {k: g for k, g in (extra or {}).items() if g.explainable}
+        for key in extra:
+            groups.setdefault(key, [])
         issues = []
         for (fp, loc), group in groups.items():
-            n = len(group)
+            more = extra.get((fp, loc))
+            n = len(group) + (more.count if more else 0)
             if n < threshold:
                 continue
-            total = sum(s.duration_ms for s in group)
+            total = sum(s.duration_ms for s in group) + (more.total_ms if more else 0.0)
             critical = n >= 4 * threshold or total >= self.settings.slow_query_ms
-            callsite = group[0].callsite
+            callsite = group[0].callsite if group else more.sample.callsite if more else None
+            iid = issue_id("n_plus_one", fp, loc)
+            if more is not None and samples is not None:
+                samples[iid] = more.sample
             issues.append(
                 Issue(
-                    id=issue_id("n_plus_one", fp, loc),
+                    id=iid,
                     kind="n_plus_one",
                     severity="critical" if critical else "warning",
                     title=f"N+1: {n} queries{_on(fp)}{_where(callsite)}",
@@ -250,7 +278,12 @@ class Detector:
             )
         return issues
 
-    def _slow(self, spans: Iterable[Span]) -> list[Issue]:
+    def _slow(
+        self,
+        spans: Iterable[Span],
+        extra: dict[tuple[str, str | None], OverflowGroup] | None = None,
+        samples: dict[str, Span] | None = None,
+    ) -> list[Issue]:
         limit = self.settings.slow_query_ms
         groups: dict[tuple[str, str | None], list[Span]] = {}
         for s in spans:
@@ -259,15 +292,22 @@ class Detector:
             fp = s.data.get("fingerprint") or sqlmod.fingerprint(s.data.get("sql", ""))
             loc = s.callsite.location if s.callsite else None
             groups.setdefault((fp, loc), []).append(s)
+        extra = {k: g for k, g in (extra or {}).items() if g.slow_count}
+        for key in extra:
+            groups.setdefault(key, [])
         issues = []
         for (fp, loc), group in groups.items():
-            slowest = max(s.duration_ms for s in group)
-            total = sum(s.duration_ms for s in group)
-            callsite = group[0].callsite
-            n = len(group)
+            more = extra.get((fp, loc))
+            slowest = max([s.duration_ms for s in group] + ([more.max_ms] if more else []))
+            total = sum(s.duration_ms for s in group) + (more.slow_ms if more else 0.0)
+            callsite = group[0].callsite if group else more.sample.callsite if more else None
+            n = len(group) + (more.slow_count if more else 0)
+            iid = issue_id("slow_query", fp, loc)
+            if more is not None and samples is not None:
+                samples[iid] = more.sample
             issues.append(
                 Issue(
-                    id=issue_id("slow_query", fp, loc),
+                    id=iid,
                     kind="slow_query",
                     severity="critical" if slowest >= 5 * limit else "warning",
                     title=f"Slow query: {slowest:.0f} ms{_on(fp)}{_where(callsite)}",
@@ -310,7 +350,10 @@ class Detector:
 
 
 def detect(
-    trace: Trace, settings: Settings | None = None, suggesters: Sequence[FixSuggester] = ()
+    trace: Trace,
+    settings: Settings | None = None,
+    suggesters: Sequence[FixSuggester] = (),
+    overflow: Sequence[OverflowGroup] | None = None,
 ) -> list[Issue]:
     """Convenience: run a one-off :class:`Detector` over ``trace``."""
-    return Detector(settings, suggesters).detect(trace)
+    return Detector(settings, suggesters).detect(trace, overflow)

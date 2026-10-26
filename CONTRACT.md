@@ -51,8 +51,11 @@ class Trace:
     issues: list[Issue]
     tags: dict[str, str]       # free-form; reserved keys: "run_id", "step" (load tester), "git_sha", "sampled_by"
     profile: dict | None       # speedscope JSON (only on profiled requests); stored separately, see storage
-    error: dict | None         # {"type": str, "message": str, "traceback": str} for unhandled exceptions
+    error: dict | None         # {"type": str, "message": str, "traceback": str} for unhandled exceptions (never for a 4xx)
+    truncated: dict | None     # {"dropped_spans": int, "max_spans": int} when max_spans_per_trace was hit
 ```
+
+Errors: a request is an *error* (for `always_keep_errors`, `sampled_by: "error"` and `EndpointStats.error_rate`) when its status is 5xx, or when it raised and the response is not a 4xx (`redline_core.sampling.is_error`). Django's `Http404`/`PermissionDenied`/`BadRequest` are client errors: the trace has `error: None`.
 
 Span `data` by kind:
 
@@ -113,7 +116,7 @@ class FixSuggester(Protocol):
 - `start_trace(*, method, path, framework="other", route=None, view=None, headers=None, query=None, body=None, client=None, tags=None, profile_requested=False) -> TraceBuilder`.
   - `headers` is a mapping or ASGI `[(b"k", b"v")]`. `query` is a mapping or a raw query string. `body` is raw bytes or str.
   - Pass all of them **unredacted**. Redaction happens in `finish_trace`.
-  - `profile_requested` is True when the adapter sees `?_redline=profile` or `X-Redline-Profile: 1`. The core starts and stops pyinstrument itself.
+  - `profile_requested` is True when the adapter sees `?_redline=<flag>` or `X-Redline-Profile: <flag>`, where `<flag>` is one of `profile`, `1`, `true`, `yes`, `on` (case-insensitive). Both adapters call `redline_core.sampling.profile_requested(query, header)`, so they accept the same values. The core starts and stops pyinstrument itself.
   - The `X-Redline-Run: <id>;step=<n>` header becomes the tags `run_id` and `step`.
   - For an ignored path the builder is inert: nothing is recorded or stored.
 - `builder.set_route(route, view=None)` and `builder.tag(key, value)` can be called once routing is known.
@@ -127,6 +130,7 @@ class FixSuggester(Protocol):
   - It redacts params by column name, makes them JSON-safe, and keeps the first 10 rows for `executemany`.
   - Pass params in the driver's paramstyle as captured. EXPLAIN reuses them.
 - `span(name, kind="custom", **data)` – public context manager AND decorator (sync + async) for user code. Exported as `redline_core.span`.
+- Span cap: a trace stores at most `max_spans_per_trace` spans (`middleware` and `view` spans are always kept). Further spans are counted, not stored: `query_count`/`query_ms` stay exact, SQL spans are folded into per-(fingerprint, callsite) counters (`OverflowGroup`) that the N+1 and slow-query detectors add to the stored spans, and the trace gets `truncated`. Duplicate detection only sees stored spans.
 - Writes go through `Recorder.store.save(trace)` which must not block the request (queue + background writer thread).
 
 ## 4. Storage (`redline_core.storage`)
@@ -141,15 +145,16 @@ class FixSuggester(Protocol):
 - `list(filters: Filters | None, limit=50, cursor=None) -> Page`
 - `endpoints(window_seconds) -> list[EndpointStats]`
 - `issues(window_seconds, kind=None) -> list[IssueGroup]`
-- `delete(trace_id) -> int`, `clear() -> int` and `prune(max_age_s=None, max_rows=None) -> int`, each returning the number of rows deleted
+- `delete(trace_id) -> int`, `clear() -> int` and `prune(max_age_s=None, max_rows=None) -> int`, each returning the number of rows deleted. For `prune`, `None` means "use the store's rule" and `0` disables that rule for the call (it never deletes everything; that is `clear()`); negative values raise `ValueError`
 - `count() -> int`
 - `flush(timeout) -> bool`
 - `close()`
 
-Default `SQLiteStore(path=".redline/redline.db", *, background=True, queue_size=1000, max_rows=10_000, max_age_s=7 days, prune_every=200)`:
+Default `SQLiteStore(path=".redline/redline.db", *, background=True, queue_size=1000, max_rows=10_000, max_age_s=7 days, prune_every=200)` (`path` may be any `os.PathLike`; `max_rows`/`max_age_s` of `0` or `None` disable that rule):
 
 - It uses its own file in WAL mode, never the app DB. Profiles are stored in a separate table.
-- A daemon writer thread drains a bounded queue. When the queue is full, `save` drops the trace and increments `store.dropped`.
+- A daemon writer thread drains a bounded queue. When the queue is full, `save` drops the trace and increments `store.dropped`. The thread starts lazily on the first `save` in each process.
+- Fork-safe: after `fork()` (gunicorn `--preload`, uWSGI without `lazy-apps`) the child gets a fresh connection, queue and writer (`os.register_at_fork(after_in_child=...)`, plus a PID check on every call). The inherited connection is never used or closed in the child.
 - The writer prunes every `prune_every` writes.
 - `SQLiteStore.from_settings(settings)` builds one from `Settings`. `":memory:"` works.
 
@@ -157,20 +162,23 @@ Default `SQLiteStore(path=".redline/redline.db", *, background=True, queue_size=
 
 ## 5. JSON HTTP API (served by adapters under their mount prefix; frontend uses relative URLs `./api/...`)
 
-All responses JSON. Errors: `{"error": {"code": str, "message": str}}` with 4xx/5xx.
+All responses JSON. Errors: `{"error": {"code": str, "message": str}}` with 4xx/5xx – including the adapters' own access and CSRF refusals (FastAPI renders any `HTTPException` raised by the Redline guards or the user's auth dependencies in this shape, keeping headers such as `WWW-Authenticate`).
 
 Implementation: `redline_core.api.RedlineAPI(store, settings, framework=..., explain_executor=factory)`.
 
 - `api.dispatch(method, path, params=None, body=None) -> (status, payload)`. `path` is relative to the mount, for example `"api/traces/abc"`, and leading or trailing slashes are ignored. `params` is a mapping of query parameters, where values may be str or lists. `body` is raw bytes/str or a parsed dict. Adapters just route everything under `api/` here.
 - `factory(db_alias, vendor) -> executor | None`. The `executor(sql, params) -> rows` must run inside a transaction that it **always rolls back**, and must handle its own driver's paramstyle.
-- Error codes:
-  - 400: `invalid_filter`, `invalid_window`, `invalid_kind`, `invalid_json`, `invalid_body`, `not_explainable`, `analyze_unsupported` (MySQL)
-  - 403: `analyze_disabled`
-  - 404: `not_found`, `trace_not_found`, `span_not_found`, `profile_not_found`
+- Error codes (core API unless marked *adapter*):
+  - 400: `invalid_filter`, `invalid_window`, `invalid_kind`, `invalid_json`, `invalid_body`, `not_explainable`, `unsupported_vendor` (EXPLAIN on a database that is not PostgreSQL/MySQL/SQLite), `analyze_unsupported` (MySQL)
+  - 401: `unauthorized` (*adapter*, FastAPI: an auth dependency raised 401)
+  - 403: `analyze_disabled`; `forbidden` (*adapter*: Django `PERMISSION` refused, FastAPI `local_only` refused the client address or the `Host` header, or an auth dependency raised 403); `csrf_failed` (*adapter*: Django's CSRF check, FastAPI's Origin / `Sec-Fetch-Site` check on DELETE/POST)
+  - 404: `not_found` (also a missing UI asset), `trace_not_found`, `span_not_found`, `profile_not_found`
   - 405: `method_not_allowed`
   - 422: `explain_failed`
   - 500: `internal_error`
   - 501: `explain_unavailable`
+  - FastAPI maps any other `HTTPException` status from a user dependency to `bad_request` (400), `not_found` (404), `too_many_requests` (429) or `http_error`.
+  - Django rejects a `Host` not in `ALLOWED_HOSTS` on every Redline view with Django's own 400 (`DisallowedHost`), before any JSON is produced.
 - `status` also accepts `1xx` and `3xx`. `window` also accepts `<n>m|h|d` and defaults to `24h`. `limit` is clamped to 1..500.
 
 | Method & path | Returns |
@@ -195,7 +203,8 @@ Finding       = {severity, title, detail}
 
 EXPLAIN safety:
 
-- Only spans with `explainable: true` can be explained. That means a single SELECT/WITH with no data-modifying CTE, `SELECT … INTO`, `FOR UPDATE` or second statement.
+- Only spans with `explainable: true` can be explained, and `run_explain` re-checks the SQL. Explainable means a single `SELECT`/`WITH`/`VALUES`/`TABLE` statement with no data-modifying CTE (`WITH x AS (DELETE …)`), no `SELECT … INTO`, no row-locking clause (`FOR UPDATE`, `FOR NO KEY UPDATE`, `FOR SHARE`, `FOR KEY SHARE`, `LOCK IN SHARE MODE`) and no second statement. Keywords match case-insensitively, and the text is checked twice: once literal-aware, once with a pessimistic reading of quoting (backslashes in strings, dollar quotes, MySQL `/*! */` and `--` comments). A statement that is ambiguous between dialects is refused.
+- Functions with side effects (`nextval`, `pg_advisory_lock`, user functions that write) are not detected. A plain EXPLAIN never executes them; `EXPLAIN ANALYZE` (off by default) does, inside the rolled-back (and on PostgreSQL `READ ONLY`) transaction.
 - EXPLAIN runs in a transaction that is always rolled back.
 - `analyze` is refused (403 `analyze_disabled`) unless settings allow it.
 
@@ -206,7 +215,7 @@ PlanNode `flags` are `seq_scan`, `full_scan`, `sort_spill`, `hash_spill`, `neste
 | name | type | default |
 |---|---|---|
 | enabled | bool | True |
-| storage_path | str | ".redline/redline.db" |
+| storage_path | str (any `os.PathLike` is converted) | ".redline/redline.db" |
 | sample_rate | float 0–1 | 1.0 |
 | always_keep_slower_than_ms | float | 500 |
 | always_keep_errors | bool | True |
@@ -222,9 +231,12 @@ PlanNode `flags` are `seq_scan`, `full_scan`, `sort_spill`, `hash_spill`, `neste
 | profile | "off" \| "opt_in" \| "sampled" \| "all" | "opt_in" (`?_redline=profile` or header `X-Redline-Profile: 1`) |
 | profile_sample_rate | float | 0.0 |
 | explain_analyze | bool | False |
-| max_rows / max_age_days | int | 10_000 / 7 |
-| project_root | str\|None | auto (cwd) – for callsite filtering |
+| max_rows / max_age_days | int \| None | 10_000 / 7 (`0` or `None` disables that retention rule; negative is an error) |
+| max_spans_per_trace | int \| None | 2_000 (`0` or `None`: no cap; see §3) |
+| project_root | str\|None (any `os.PathLike` is converted) | auto (cwd) – for callsite filtering |
 | writer_queue_size | int | 1_000 (background writer queue bound; overflow dropped + counted) |
+
+Adapter-only settings: Django `REDLINE["PERMISSION"]` (callable or dotted path) and `REDLINE["STORE"]` (a `Store` instance, a callable/class taking the core `Settings` and returning one, or the dotted path of either; mirrors FastAPI's `install(store=...)`). FastAPI's `install(dependencies=None)` uses `local_only`: loopback client **and** a loopback `Host` (`localhost`, `*.localhost`, `127.0.0.0/8`, `[::1]`, any port), against DNS rebinding; `loopback_guard(allowed_hosts=[...])` builds a variant. With `enabled=False` FastAPI adds no middleware and no SQLAlchemy listeners.
 
 `Settings.from_mapping(dict)` matches keys case-insensitively (`SAMPLE_RATE` works). Unknown keys raise `SettingsError` with a "did you mean" hint. `ignore_paths` entries that start with `^` are regular expressions; all other entries are path prefixes. Adapters append their own mount prefix.
 

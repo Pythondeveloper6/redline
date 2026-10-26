@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import dataclasses
 import difflib
+import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -86,17 +87,21 @@ class Settings:
     # explain
     explain_analyze: bool = False
 
-    # storage & retention
-    max_rows: int = 10_000
-    max_age_days: int = 7
+    # storage & retention (``0`` or ``None`` disables a rule)
+    max_rows: int | None = 10_000
+    max_age_days: int | None = 7
     #: Bound of the background writer's queue; traces beyond it are dropped and counted.
     writer_queue_size: int = 1_000
+
+    #: Spans kept per trace; beyond it spans are counted but not stored (``0``/``None``:
+    #: no cap). Query counts, query time and N+1 detection stay exact.
+    max_spans_per_trace: int | None = 2_000
 
     # callsites
     project_root: str | None = None
 
     def __post_init__(self) -> None:
-        for name in _SEQ_FIELDS:
+        for name in (*_SEQ_FIELDS, *_PATH_FIELDS):
             object.__setattr__(self, name, _coerce(name, getattr(self, name)))
         _validate(self)
 
@@ -142,8 +147,9 @@ class Settings:
 
     # derived ---------------------------------------------------------------
     @property
-    def max_age_s(self) -> float:
-        return float(self.max_age_days) * 86_400.0
+    def max_age_s(self) -> float | None:
+        """``max_age_days`` in seconds, or ``None`` when age pruning is disabled."""
+        return float(self.max_age_days) * 86_400.0 if self.max_age_days else None
 
     def public_dict(self) -> dict[str, Any]:
         """The subset shown by ``GET api/meta`` (no paths or patterns)."""
@@ -166,9 +172,18 @@ class Settings:
 
 
 _SEQ_FIELDS = {"ignore_paths", "redact_headers", "redact_keys"}
+_PATH_FIELDS = {"storage_path", "project_root"}
+#: Integer settings where ``0`` and ``None`` both mean "no limit".
+_OPTIONAL_LIMITS = ("max_rows", "max_age_days", "max_spans_per_trace")
 
 
 def _coerce(name: str, value: Any) -> Any:
+    if name in _PATH_FIELDS:
+        if isinstance(value, os.PathLike):
+            value = os.fspath(value)
+        if isinstance(value, bytes):
+            value = os.fsdecode(value)
+        return value
     if name in _SEQ_FIELDS:
         if isinstance(value, str):
             value = (value,)
@@ -205,13 +220,19 @@ def _validate(s: Settings) -> None:
         "n_plus_one_threshold",
         "duplicate_threshold",
         "too_many_queries",
-        "max_rows",
-        "max_age_days",
         "writer_queue_size",
     ):
         _check_type(s, name, (int,), "an integer")
         if getattr(s, name) < 0:
             raise SettingsError(f"Redline setting {name!r} must not be negative.")
+    for name in _OPTIONAL_LIMITS:
+        if getattr(s, name) is None:
+            continue
+        _check_type(s, name, (int,), "an integer (0 or None disables it)")
+        if getattr(s, name) < 0:
+            raise SettingsError(
+                f"Redline setting {name!r} must not be negative (use 0 or None to disable it)."
+            )
     for name in ("n_plus_one_threshold", "duplicate_threshold", "writer_queue_size"):
         if getattr(s, name) < 1 + (name != "writer_queue_size"):
             raise SettingsError(f"Redline setting {name!r} is too small: {getattr(s, name)}.")
@@ -227,9 +248,9 @@ def _validate(s: Settings) -> None:
     for name in ("sample_rate", "profile_sample_rate"):
         if not 0.0 <= getattr(s, name) <= 1.0:
             raise SettingsError(f"Redline setting {name!r} must be between 0 and 1.")
-    _check_type(s, "storage_path", (str,), "a string")
+    _check_type(s, "storage_path", (str,), "a string or os.PathLike")
     if s.project_root is not None:
-        _check_type(s, "project_root", (str,), "a string or None")
+        _check_type(s, "project_root", (str,), "a string, os.PathLike or None")
     if s.profile not in PROFILE_MODES:
         raise SettingsError(
             f"Redline setting 'profile' must be one of {', '.join(PROFILE_MODES)}; "

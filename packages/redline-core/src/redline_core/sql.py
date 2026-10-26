@@ -119,9 +119,34 @@ def truncate_name(text: str, limit: int = 120) -> str:
 
 
 _FIRST_WORD = re.compile(r"[A-Za-z]+")
-_WRITE_WORDS = re.compile(
-    r"\b(INSERT|UPDATE|DELETE|MERGE|CREATE|DROP|ALTER|TRUNCATE|GRANT|REVOKE|CALL|COPY|INTO)\b"
+#: Words that make a statement write, lock or run something: DML/DDL (also inside a
+#: data-modifying CTE), ``SELECT … INTO``, and every row-locking clause – ``FOR UPDATE``,
+#: ``FOR NO KEY UPDATE``, ``FOR SHARE``, ``FOR KEY SHARE`` (PostgreSQL) and
+#: ``LOCK IN SHARE MODE`` (MySQL).
+_UNSAFE = re.compile(
+    r"\b(?:INSERT|UPDATE|DELETE|MERGE|CREATE|DROP|ALTER|TRUNCATE|GRANT|REVOKE|CALL|COPY|INTO)\b"
+    r"|\bFOR\s+(?:NO\s+KEY\s+)?UPDATE\b|\bFOR\s+(?:KEY\s+)?SHARE\b"
+    r"|\bLOCK\s+IN\s+SHARE\s+MODE\b",
+    re.IGNORECASE,
 )
+_QUOTED_IDENT = re.compile(r'"(?:[^"]|"")*"|`(?:[^`]|``)*`')
+#: A second, *dialect-pessimistic* reading of the raw text. The fingerprint tokenizer
+#: treats ``\'`` as an escaped quote and ``$tag$…$tag$`` as a string, and strips every
+#: comment; a server may disagree (PostgreSQL's standard strings have no backslash
+#: escapes, MySQL has no dollar quoting, runs ``/*! … */`` "comments" and needs a space
+#: after ``--``). This pass only removes what *every* dialect agrees is inert, so a quoting
+#: trick cannot hide a second statement or a write keyword from both passes.
+_STRICT_INERT = re.compile(
+    r"""
+      --(?=\s|$)[^\n]*            # a comment in every dialect (MySQL needs the space)
+    | /\*(?!!)(?:(?!\*/).)*\*/      # block comment, but not MySQL's executable /*! */
+    | '(?:[^']|'')*'            # a standard string: a backslash escapes nothing
+    | "(?:[^"]|"")*"            # a quoted identifier
+    | `(?:[^`]|``)*`            # a MySQL identifier
+    """,
+    re.VERBOSE | re.DOTALL,
+)
+_READ_KINDS = ("SELECT", "WITH", "VALUES", "TABLE")
 
 
 def statement_kind(sql: str) -> str:
@@ -135,16 +160,32 @@ def statement_kind(sql: str) -> str:
 def is_explainable(sql: str) -> bool:
     """Whether ``sql`` is a single read-only ``SELECT`` (or ``WITH … SELECT``).
 
-    Anything that writes or locks – data-modifying CTEs, ``SELECT … INTO``, ``FOR UPDATE``
-    and multiple statements – is refused, so EXPLAIN can never run arbitrary statements.
+    Refused: anything that is not a ``SELECT``/``WITH``/``VALUES``/``TABLE``, a second
+    statement, data-modifying CTEs (``WITH x AS (DELETE …)``), ``SELECT … INTO``, every
+    row-locking clause (``FOR UPDATE``/``NO KEY UPDATE``/``SHARE``/``KEY SHARE``,
+    ``LOCK IN SHARE MODE``) and MySQL executable comments. The text is checked twice –
+    once literal-aware (the fingerprint) and once with a pessimistic reading of quoting
+    and comments – and must pass both; ambiguous statements are refused. Keyword
+    matching is case-insensitive.
+
+    Functions with side effects (``SELECT nextval(…)``, ``pg_advisory_lock(…)``, a user
+    function that writes) are **not** detected: a plain ``EXPLAIN`` never executes them,
+    and ``EXPLAIN ANALYZE`` (off by default) runs inside a transaction that is always
+    rolled back – read-only on PostgreSQL.
     """
+    if not sql or "\x00" in sql:
+        return False
     fp = fingerprint(sql)
     if ";" in fp:  # literals are already gone, so a ';' means a second statement
         return False
-    kind = statement_kind(sql)
-    if kind not in ("SELECT", "WITH", "VALUES", "TABLE"):
+    if statement_kind(sql) not in _READ_KINDS:
         return False
-    return _WRITE_WORDS.search(fp) is None
+    if _UNSAFE.search(_QUOTED_IDENT.sub(" ", fp)):
+        return False
+    strict = _STRICT_INERT.sub(" ", sql).strip().rstrip(";")
+    if ";" in strict:
+        return False
+    return _UNSAFE.search(strict) is None
 
 
 # ── table / column extraction (best-effort, for titles and index suggestions) ─────────

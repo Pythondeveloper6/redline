@@ -25,6 +25,7 @@ export interface Trace {
   response: { headers: Record<string, string>; body: string | null; body_truncated: boolean; size: number | null }
   spans: Span[]; issues: Issue[]; tags: Record<string, string>
   error: { type: string; message: string; traceback: string } | null
+  truncated?: { dropped_spans: number; max_spans: number } | null
   has_profile: boolean
 }
 export interface TraceSummary {

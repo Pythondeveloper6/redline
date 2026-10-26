@@ -179,6 +179,15 @@ export default function RequestDetail() {
           {tbOpen && <pre className="m-0 mt-1 rounded bg-surface border border-line p-3 overflow-auto max-h-72">{trace.error.traceback}</pre>}
         </div>
       )}
+      {trace.truncated && (
+        <div className="rounded-lg border border-warn/30 bg-warn/5 p-3 flex items-start gap-2" role="status">
+          <span className="text-warn mt-0.5"><Icon d={I.alert} size={15} /></span>
+          <div>
+            <div className="font-semibold">Trace truncated</div>
+            <div className="text-[12px] text-muted">This request produced more than {trace.truncated.max_spans} spans; {trace.truncated.dropped_spans} were counted but not stored. Query counts, query time and N+1 / slow-query issues still include them. Raise <code>max_spans_per_trace</code> to keep more.</div>
+          </div>
+        </div>
+      )}
       <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
         <Card label="Status" value={trace.status} tone={trace.status >= 500 ? 'text-bad' : trace.status >= 400 ? 'text-warn' : ''} sub={bytes(trace.response.size)} />
         <Card label="Duration" value={ms(trace.duration_ms)} tone={slow ? 'text-bad' : ''} sub={`${trace.spans.length} spans`} />

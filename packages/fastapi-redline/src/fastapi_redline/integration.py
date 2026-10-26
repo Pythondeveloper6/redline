@@ -65,7 +65,8 @@ class Redline:
         if alias is None:
             alias = alias_for(engine, self.engines)
         self.engines[alias] = engine
-        instrument_engine(engine, alias)
+        if self.settings.enabled:
+            instrument_engine(engine, alias)
         return alias
 
     def _executor_for(self, alias: str, vendor: str) -> ExplainExecutor | None:
@@ -102,8 +103,10 @@ def install(
         Where the UI and API live (``/_redline/``). Never recorded.
     ``dependencies``
         FastAPI dependencies protecting the UI and API, e.g.
-        ``[Depends(require_admin)]``. When omitted only loopback clients are allowed and a
-        warning is logged; pass ``[]`` to deliberately leave it open.
+        ``[Depends(require_admin)]``. When omitted, :func:`local_only` applies (loopback
+        clients addressing ``localhost``/``127.0.0.1``/``[::1]``) and a warning is
+        logged; pass ``[]`` to deliberately leave it open. ``HTTPException`` raised by
+        these dependencies is answered in the API's error shape.
     ``models``
         Declarative ``Base``/``registry`` (or a list) for fix suggestions; by default every
         registry SQLAlchemy knows about.
@@ -128,8 +131,7 @@ def install(
         app=app, prefix=prefix, settings=cfg, recorder=recorder, store=store, suggester=suggester
     )
     for alias, eng in name_engines(engine).items():
-        redline.engines[alias] = eng
-        instrument_engine(eng, alias)
+        redline.add_engine(eng, alias)
 
     if dependencies is None:
         deps: list[Any] = [Depends(local_only)]
@@ -148,7 +150,8 @@ def install(
     del app.router.routes[before:]
     app.router.routes[0:0] = added  # win over catch-all routes declared earlier
 
-    app.add_middleware(RedlineMiddleware, recorder=recorder)
+    if cfg.enabled:  # disabled: no middleware and no SQLAlchemy listeners at all
+        app.add_middleware(RedlineMiddleware, recorder=recorder)
 
     original = app.router.lifespan_context
 

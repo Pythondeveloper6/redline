@@ -56,6 +56,16 @@ def _allowed(request: HttpRequest) -> bool:
         return False
 
 
+def _check_host(request: HttpRequest) -> None:
+    """Enforce ``ALLOWED_HOSTS`` on Redline's views (``DisallowedHost`` -> 400).
+
+    Django only validates ``Host`` when something calls ``get_host()``
+    (``CommonMiddleware`` does); calling it here makes the protection against DNS
+    rebinding independent of the middleware stack.
+    """
+    request.get_host()
+
+
 def _login_url() -> str:
     try:
         return reverse("admin:login")
@@ -65,6 +75,7 @@ def _login_url() -> str:
 
 def _page_guard(view: Callable[..., HttpResponseBase]) -> Callable[..., HttpResponseBase]:
     def guarded(request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponseBase:
+        _check_host(request)
         if _allowed(request):
             return view(request, *args, **kwargs)
         user = getattr(request, "user", None)
@@ -96,6 +107,7 @@ def index(request: HttpRequest) -> HttpResponse:
     response["Cache-Control"] = "no-store"
     response["X-Content-Type-Options"] = "nosniff"
     response["Referrer-Policy"] = "same-origin"
+    response["X-Frame-Options"] = "DENY"
     return response
 
 
@@ -145,6 +157,7 @@ def _no_response(request: HttpRequest) -> HttpResponse:  # pragma: no cover - ne
 @transaction.non_atomic_requests
 def api(request: HttpRequest, path: str = "") -> HttpResponseBase:
     """Route ``api/<path>`` to the core :class:`~redline_core.api.RedlineAPI`."""
+    _check_host(request)
     if not _allowed(request):
         return _json(
             403, {"error": {"code": "forbidden", "message": "You do not have access to Redline."}}

@@ -9,7 +9,12 @@ Design points (each one fixes something django-silk gets wrong):
   bounded queue. If the queue is full the trace is dropped and counted
   (:attr:`SQLiteStore.dropped`), rather than slowing the application down.
 * A daemon **writer thread** drains the queue in batches, one transaction per batch, and
-  prunes by age and row count every ``prune_every`` writes.
+  prunes by age and row count every ``prune_every`` writes. It is started lazily, on the
+  first :meth:`~SQLiteStore.save` in each process.
+* **Fork-safe.** A store created before ``fork()`` (gunicorn ``--preload``, uWSGI without
+  ``lazy-apps``, ``multiprocessing`` with the fork start method) notices it is in a new
+  process and opens its own connection, queue and writer thread there. The parent's
+  connection is never touched in the child.
 
 One connection is shared behind a lock; SQLite serialises writers anyway and the reads the
 UI does are small. ``path=":memory:"`` works (handy in tests).
@@ -25,6 +30,7 @@ import queue
 import sqlite3
 import threading
 import time
+import weakref
 from collections import defaultdict
 from typing import Any
 
@@ -89,6 +95,21 @@ CREATE INDEX IF NOT EXISTS issues_trace ON issues (trace_id);
 CREATE INDEX IF NOT EXISTS issues_started ON issues (started_at);
 """
 
+#: Every live store, so the fork hook can reset them in the child.
+_STORES: weakref.WeakSet[SQLiteStore] = weakref.WeakSet()
+#: Connections inherited across fork(). They must never be used *or closed* in the
+#: child (closing would release the parent's locks), so they are kept alive here.
+_INHERITED: list[Any] = []
+
+
+def _after_fork_in_child() -> None:
+    for store in list(_STORES):
+        store._reset_after_fork()
+
+
+if hasattr(os, "register_at_fork"):  # POSIX
+    os.register_at_fork(after_in_child=_after_fork_in_child)
+
 _SUMMARY_COLS = (
     "id, method, path, route, view, status, started_at, duration_ms, query_count, query_ms, "
     "issue_count, issue_kinds, has_profile, tags"
@@ -108,20 +129,27 @@ class SQLiteStore:
 
     def __init__(
         self,
-        path: str = ".redline/redline.db",
+        path: str | os.PathLike[str] = ".redline/redline.db",
         *,
         background: bool = True,
         queue_size: int = 1_000,
-        max_rows: int = 10_000,
-        max_age_s: float = 7 * 86_400.0,
+        max_rows: int | None = 10_000,
+        max_age_s: float | None = 7 * 86_400.0,
         prune_every: int = 200,
         batch_size: int = 50,
     ) -> None:
+        path = os.fspath(path)
+        for name, value in (("max_rows", max_rows), ("max_age_s", max_age_s)):
+            if value is not None and value < 0:
+                raise ValueError(f"{name} must not be negative (use 0 or None to disable it).")
         self.path = path
-        self.max_rows = max_rows
-        self.max_age_s = max_age_s
+        #: Retention rules; ``0``/``None`` disables a rule.
+        self.max_rows = max_rows or None
+        self.max_age_s = max_age_s or None
         self.prune_every = max(1, prune_every)
         self.batch_size = max(1, batch_size)
+        self.background = background
+        self.queue_size = max(1, queue_size)
         self.dropped = 0
         self.written = 0
         self._since_prune = 0
@@ -130,21 +158,68 @@ class SQLiteStore:
             directory = os.path.dirname(os.path.abspath(path))
             os.makedirs(directory, exist_ok=True)
         self._lock = threading.RLock()
-        self._conn = sqlite3.connect(
-            path, check_same_thread=False, isolation_level=None, timeout=10.0
-        )
-        self._conn.row_factory = sqlite3.Row
-        with self._lock:
-            if path != ":memory:":
-                self._conn.execute("PRAGMA journal_mode=WAL")
-            self._conn.execute("PRAGMA synchronous=NORMAL")
-            self._conn.executescript(_SCHEMA)
+        self._start_lock = threading.Lock()
+        self._conn = self._connect()
         self._queue: queue.Queue[Any] | None = None
         self._thread: threading.Thread | None = None
-        if background:
-            self._queue = queue.Queue(maxsize=max(1, queue_size))
-            self._thread = threading.Thread(target=self._run, name="redline-writer", daemon=True)
-            self._thread.start()
+        self._pid = os.getpid()
+        _STORES.add(self)
+
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(
+            self.path, check_same_thread=False, isolation_level=None, timeout=10.0
+        )
+        conn.row_factory = sqlite3.Row
+        if self.path != ":memory:":
+            conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.executescript(_SCHEMA)
+        return conn
+
+    def _reset_after_fork(self) -> None:
+        """Called in a forked child: drop everything inherited from the parent.
+
+        The parent's queue (and whatever was in it) and its writer thread do not exist
+        here; the connection is parked, never used or closed. A fresh connection is opened
+        and the writer starts on the next :meth:`save`. ``":memory:"`` stores start empty.
+        """
+        if self._pid == os.getpid():
+            return
+        self._pid = os.getpid()
+        self._lock = threading.RLock()
+        self._start_lock = threading.Lock()
+        self._queue = None
+        self._thread = None
+        self.dropped = 0
+        self.written = 0
+        self._since_prune = 0
+        _INHERITED.append(self._conn)
+        if self._closed:
+            return
+        try:
+            self._conn = self._connect()
+        except Exception:  # pragma: no cover - e.g. the file vanished
+            logger.exception("Redline could not reopen its store after fork")
+            self._closed = True
+
+    def _check_pid(self) -> None:
+        # register_at_fork covers os.fork(); this also covers forks it cannot see
+        # (a C extension calling fork() directly).
+        if self._pid != os.getpid():
+            self._reset_after_fork()
+
+    def _ensure_writer(self) -> queue.Queue[Any]:
+        q = self._queue
+        if q is not None:
+            return q
+        with self._start_lock:
+            if self._queue is None:
+                self._queue = queue.Queue(maxsize=self.queue_size)
+                self._thread = threading.Thread(
+                    target=self._run, args=(self._queue,), name="redline-writer", daemon=True
+                )
+                self._thread.start()
+            return self._queue
 
     @classmethod
     def from_settings(cls, settings: Any, **kwargs: Any) -> SQLiteStore:
@@ -160,19 +235,21 @@ class SQLiteStore:
     # writing ---------------------------------------------------------------
     def save(self, trace: Trace) -> None:
         """Enqueue ``trace`` (never blocks); dropped and counted when the queue is full."""
+        self._check_pid()
         if self._closed:
             self.dropped += 1
             return
-        if self._queue is None:
+        if not self.background:
             self._write([trace])
             return
         try:
-            self._queue.put_nowait(trace)
+            self._ensure_writer().put_nowait(trace)
         except queue.Full:
             self.dropped += 1
 
     def flush(self, timeout: float | None = 5.0) -> bool:
         """Wait until everything enqueued so far is written. ``False`` on timeout."""
+        self._check_pid()
         if self._queue is None or self._thread is None or not self._thread.is_alive():
             return True
         marker = threading.Event()
@@ -182,9 +259,7 @@ class SQLiteStore:
             return False
         return marker.wait(timeout)
 
-    def _run(self) -> None:
-        q = self._queue
-        assert q is not None
+    def _run(self, q: queue.Queue[Any]) -> None:
         while True:
             item = q.get()
             batch: list[Trace] = []
@@ -275,6 +350,7 @@ class SQLiteStore:
 
     # reading ---------------------------------------------------------------
     def _query(self, sql: str, params: Any = ()) -> list[sqlite3.Row]:
+        self._check_pid()
         with self._lock:
             return self._conn.execute(sql, params).fetchall()
 
@@ -480,6 +556,7 @@ class SQLiteStore:
     def _delete_ids(self, ids: builtins.list[str]) -> int:
         if not ids:
             return 0
+        self._check_pid()
         params = [(i,) for i in ids]
         with self._lock:
             c = self._conn
@@ -503,6 +580,7 @@ class SQLiteStore:
         return self._delete_ids([r["id"] for r in exists])
 
     def clear(self) -> int:
+        self._check_pid()
         with self._lock:
             c = self._conn
             n = int(c.execute("SELECT COUNT(*) FROM traces").fetchone()[0])
@@ -513,17 +591,25 @@ class SQLiteStore:
         return n
 
     def prune(self, max_age_s: float | None = None, max_rows: int | None = None) -> int:
-        """Delete traces older than ``max_age_s`` and the oldest beyond ``max_rows``."""
+        """Delete traces older than ``max_age_s`` and the oldest beyond ``max_rows``.
+
+        ``None`` uses the store's own rule; ``0`` disables that rule for this call (it
+        never means "delete everything" – use :meth:`clear` for that). Negative values
+        raise :class:`ValueError`.
+        """
+        for name, value in (("max_age_s", max_age_s), ("max_rows", max_rows)):
+            if value is not None and value < 0:
+                raise ValueError(f"{name} must not be negative (use 0 or None to disable it).")
         max_age_s = self.max_age_s if max_age_s is None else max_age_s
         max_rows = self.max_rows if max_rows is None else max_rows
         doomed: builtins.list[str] = []
-        if max_age_s is not None and max_age_s > 0:
+        if max_age_s:
             cutoff = time.time() - max_age_s
             doomed += [
                 r["id"]
                 for r in self._query("SELECT id FROM traces WHERE started_at < ?", (cutoff,))
             ]
-        if max_rows is not None and max_rows >= 0:
+        if max_rows:
             rows = self._query(
                 "SELECT id FROM traces ORDER BY started_at DESC, id DESC LIMIT -1 OFFSET ?",
                 (max_rows,),
@@ -534,6 +620,7 @@ class SQLiteStore:
 
     def close(self) -> None:
         """Flush pending writes, stop the writer and close the connection."""
+        self._check_pid()
         if self._closed:
             return
         self._closed = True

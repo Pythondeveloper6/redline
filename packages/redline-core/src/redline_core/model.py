@@ -280,6 +280,10 @@ class Trace:
     tags: dict[str, str] = field(default_factory=dict)
     profile: dict[str, Any] | None = None
     error: dict[str, Any] | None = None
+    #: Set when the request produced more spans than ``max_spans_per_trace``:
+    #: ``{"dropped_spans": int, "max_spans": int}``. Counters (``query_count``,
+    #: ``query_ms``) and the N+1 / slow-query issues still cover every span.
+    truncated: dict[str, Any] | None = None
 
     # derived ---------------------------------------------------------------
     @property
@@ -326,6 +330,7 @@ class Trace:
             "issues": [i.to_dict() for i in self.issues],
             "tags": dict(self.tags),
             "error": self.error,
+            "truncated": self.truncated,
         }
         if include_profile:
             data["profile"] = self.profile
@@ -377,4 +382,5 @@ class Trace:
             tags={str(k): str(v) for k, v in (data.get("tags") or {}).items()},
             profile=data.get("profile"),
             error=data.get("error"),
+            truncated=data.get("truncated"),
         )

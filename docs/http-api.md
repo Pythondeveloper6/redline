@@ -29,6 +29,7 @@ The mutating methods are additionally protected against cross-site requests:
 === "Django"
 
     - Anonymous or unauthorised callers get `403` with `{"error": {"code": "forbidden", ...}}`.
+    - A `Host` not in `ALLOWED_HOSTS` gets Django's own `400` before anything else.
     - The API runs Django's own CSRF check on **every** request, whether or not
       `CsrfViewMiddleware` is installed. `GET` is free; `DELETE` and `POST` need the
       token in the CSRF header (`X-CSRFToken` by default, or your `CSRF_HEADER_NAME`),
@@ -39,12 +40,16 @@ The mutating methods are additionally protected against cross-site requests:
 
 === "FastAPI"
 
-    - Your `dependencies` run first. The default (`local_only`) answers `403` to a
-      non-loopback client with FastAPI's usual `{"detail": "..."}` body, **not** the error
-      shape above.
+    - Your `dependencies` run first. The default (`local_only`) answers `403
+      forbidden` to a non-loopback client, or to a request whose `Host` is not a loopback
+      name (DNS rebinding).
+    - An `HTTPException` raised by **your** dependencies is answered in the same error
+      shape: `401` becomes `unauthorized`, `403` `forbidden`, other statuses
+      `bad_request`/`not_found`/`too_many_requests`/`http_error`. The exception's `detail`
+      is the `message`, and its headers (`WWW-Authenticate`) are kept.
     - `DELETE` and `POST` reject browser requests whose `Origin` does not match the
       request host (or `X-Forwarded-Host`), `Origin: null`, and `Sec-Fetch-Site:
-      cross-site`, with `403 {"detail": "Cross-origin request blocked."}`.
+      cross-site`, with `403 csrf_failed`.
     - Requests **without** an `Origin` header (curl, scripts) pass the CSRF guard. They
       are still subject to your auth dependencies.
 
@@ -63,10 +68,11 @@ cookie and `X-CSRFToken`.
 | 400 | `not_explainable` | The span is not a single read-only `SELECT` |
 | 400 | `analyze_unsupported` | `analyze: true` on MySQL |
 | 400 | `unsupported_vendor` | EXPLAIN on a database that is not PostgreSQL, MySQL or SQLite |
+| 401 | `unauthorized` | (FastAPI) one of your auth dependencies raised `401` |
 | 403 | `analyze_disabled` | `analyze: true` while `explain_analyze` is off |
-| 403 | `forbidden` | (Django) no permission |
-| 403 | `csrf_failed` | (Django) CSRF check failed |
-| 404 | `not_found` | No such API endpoint |
+| 403 | `forbidden` | Django: `PERMISSION` refused. FastAPI: the loopback default refused the client or the `Host`, or your dependency raised `403` |
+| 403 | `csrf_failed` | Django: the CSRF check failed. FastAPI: a cross-origin `DELETE`/`POST` |
+| 404 | `not_found` | No such API endpoint (or UI asset) |
 | 404 | `trace_not_found` | The trace id does not exist (or was pruned) |
 | 404 | `span_not_found` | The span id is not in that trace |
 | 404 | `profile_not_found` | The trace has no profile |
@@ -74,6 +80,10 @@ cookie and `X-CSRFToken`.
 | 422 | `explain_failed` | The database rejected the EXPLAIN |
 | 500 | `internal_error` | An unexpected error. Logged on the `redline` logger |
 | 501 | `explain_unavailable` | No connection or engine for the span's database alias |
+
+Every one of these uses the `{"error": {"code", "message"}}` shape, on both adapters. The
+only exception is Django's own `400` for a disallowed `Host`, which Django renders before
+Redline runs.
 
 ## Endpoints
 

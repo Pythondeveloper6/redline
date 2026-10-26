@@ -57,9 +57,9 @@ you pass them*:
 
 | Setting | Type | Default | Description |
 |---|---|---|---|
-| `enabled` | `bool` | `True` | Master switch. When false nothing is recorded or stored. The middleware stays installed but every request passes straight through |
-| `storage_path` | `str` | `".redline/redline.db"` | The SQLite file. Parent directories are created. `":memory:"` works. **Django default:** `<BASE_DIR>/.redline/redline.db`. See [Storage](storage.md) |
-| `project_root` | `str` or `None` | `None` | Directory that marks "your code" for [callsite capture](how-it-works.md#callsites). `None` means the working directory. **Django default:** `BASE_DIR` |
+| `enabled` | `bool` | `True` | Master switch. When false nothing is recorded or stored. Django: the middleware stays installed but every request passes straight through. FastAPI: `install()` adds no middleware and no SQLAlchemy listeners. The UI still serves stored traces |
+| `storage_path` | `str` or `os.PathLike` (converted to `str`) | `".redline/redline.db"` | The SQLite file. Parent directories are created. `":memory:"` works. **Django default:** `<BASE_DIR>/.redline/redline.db`. See [Storage](storage.md) |
+| `project_root` | `str`, `os.PathLike` or `None` | `None` | Directory that marks "your code" for [callsite capture](how-it-works.md#callsites). `None` means the working directory. **Django default:** `BASE_DIR` |
 
 ## Sampling: what gets stored
 
@@ -69,7 +69,7 @@ See [How it works: sampling](how-it-works.md#sampling).
 |---|---|---|---|
 | `sample_rate` | `float`, 0 to 1 | `1.0` | Fraction of requests kept at random. **Django default:** `1.0` when `DEBUG` is true and **`0.1` when `DEBUG` is false** (and the check `django_redline.W005` fires if you set `1.0` in production) |
 | `always_keep_slower_than_ms` | `float`, 0 or more | `500` | A request at least this slow is kept regardless of the dice. `0` keeps everything |
-| `always_keep_errors` | `bool` | `True` | Keep requests that raised an unhandled exception or returned status 500 or above, regardless of the dice |
+| `always_keep_errors` | `bool` | `True` | Keep requests that returned status 500 or above, or raised an unhandled exception, regardless of the dice. A **4xx is never an error**, even when it was raised as an exception (Django's `Http404`, `PermissionDenied`): those traces have `error: null` and are kept only by the dice or the slow rule |
 | `ignore_paths` | list of `str` | `["/static/", "/media/", "/favicon.ico"]` | Paths never recorded. An entry starting with `^` is a **regular expression** (matched with `re.search` on the path); anything else is a **path prefix**. Redline's own mount is always added |
 
 ## Capture and redaction
@@ -114,23 +114,25 @@ See [Storage](storage.md).
 
 | Setting | Type | Default | Description |
 |---|---|---|---|
-| `max_rows` | `int`, 0 or more | `10000` | Keep at most this many traces; the oldest beyond it are pruned. **`0` deletes everything on the next prune**, it does not mean unlimited |
-| `max_age_days` | `int`, 0 or more | `7` | Prune traces older than this. **`0` disables age-based pruning** (only `max_rows` applies) |
+| `max_rows` | `int` (0 or more) or `None` | `10000` | Keep at most this many traces; the oldest beyond it are pruned. **`0` or `None` disables the row cap** |
+| `max_age_days` | `int` (0 or more) or `None` | `7` | Prune traces older than this. **`0` or `None` disables age-based pruning** |
+| `max_spans_per_trace` | `int` (0 or more) or `None` | `2000` | Spans stored per request. Beyond it spans are **counted, not stored**: `query_count`, `query_ms` and the N+1 and slow-query issues still cover every query, and the trace is marked `truncated` (the UI shows a notice). `middleware` and `view` spans are always kept. **`0` or `None` disables the cap**. See [Performance](performance.md#memory) |
 | `writer_queue_size` | `int` | `1000` (minimum 1) | Bound of the in-memory queue between requests and the writer thread. When full, new traces are **dropped and counted** (`storage.dropped` in `api/meta`) |
 
-!!! warning "`max_rows = 0` and `max_age_days = 0` do opposite things"
-
-    This is a sharp edge of the current implementation. If you want "no row limit" use a
-    very large `max_rows`, not `0`. To disable age-based pruning `0` is correct.
+For every limit above, `0` and `None` mean the same thing, "no limit", and a negative value
+is an error. To delete everything use **Clear all**, `DELETE api/traces` or
+`manage.py redline_clear`, never a zero.
 
 ## Django-only
 
 | Setting | Type | Default | Description |
 |---|---|---|---|
 | `PERMISSION` | callable `(request) -> bool` or a dotted path to one | active staff users (`user.is_active and user.is_staff`) | Who may open the UI and the API. See [Django: access control](django.md#access-control) |
+| `STORE` | a `Store` instance, a callable (or class) taking the core `Settings` and returning one, or a dotted path to either | `None` (`SQLiteStore.from_settings(settings)`) | Where traces are kept: Django's counterpart of FastAPI's `install(store=...)`. See [Extending: the Store protocol](extending.md#the-store-protocol) |
 
-`PERMISSION` is read by the Django adapter before the rest is handed to the core, so it is
-not a core setting and `FastAPI` does not accept it (use `dependencies`).
+`PERMISSION` and `STORE` are read by the Django adapter before the rest is handed to the
+core, so they are not core settings and FastAPI does not accept them in `settings` (use
+`dependencies` and `install(store=...)`).
 
 ## Adapter defaults at a glance
 
@@ -169,8 +171,8 @@ not a core setting and `FastAPI` does not accept it (use `dependencies`).
     }
     ```
 
-    `STORAGE_PATH` and `PROJECT_ROOT` must be **strings**: a `pathlib.Path` is rejected
-    (`Redline setting 'storage_path' must be a string`), so wrap it in `str(...)`.
+    `STORAGE_PATH` and `PROJECT_ROOT` accept a `pathlib.Path` (any `os.PathLike`) as well
+    as a string; it is converted to `str`.
 
 === "FastAPI"
 

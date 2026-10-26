@@ -11,21 +11,21 @@
 
 | mode | median ms (0 q) | p95 ms (0 q) | median ms (20 q) | p95 ms (20 q) | overhead / request (0 q) | overhead / query |
 |---|---|---|---|---|---|---|
-| off | 0.039 | 0.047 | 0.107 | 0.123 | baseline | baseline |
-| disabled | 0.044 | 0.053 | 0.120 | 0.268 | +0.005 ms | +0.4 us |
-| sample0 | 0.081 | 0.100 | 0.406 | 0.535 | +0.042 ms | +12.9 us |
-| full | 0.103 | 0.195 | 0.657 | 1.120 | +0.064 ms | +24.3 us |
-| profile | 0.233 | 0.263 | 1.123 | 1.473 | +0.194 ms | +41.1 us |
+| off | 0.039 | 0.045 | 0.107 | 0.124 | baseline | baseline |
+| disabled | 0.043 | 0.050 | 0.119 | 0.141 | +0.004 ms | +0.4 us |
+| sample0 | 0.078 | 0.093 | 0.397 | 0.422 | +0.039 ms | +12.5 us |
+| full | 0.102 | 0.137 | 0.618 | 1.132 | +0.063 ms | +22.4 us |
+| profile | 0.234 | 0.285 | 1.140 | 1.499 | +0.195 ms | +41.9 us |
 
 ## fastapi
 
 | mode | median ms (0 q) | p95 ms (0 q) | median ms (20 q) | p95 ms (20 q) | overhead / request (0 q) | overhead / query |
 |---|---|---|---|---|---|---|
-| off | 0.025 | 0.029 | 0.321 | 0.338 | baseline | baseline |
-| disabled | 0.034 | 0.039 | 0.422 | 0.454 | +0.009 ms | +4.6 us |
-| sample0 | 0.052 | 0.059 | 0.854 | 0.944 | +0.027 ms | +25.3 us |
-| full | 0.071 | 0.082 | 1.247 | 1.824 | +0.046 ms | +44.1 us |
-| profile | 0.252 | 0.302 | 2.409 | 2.975 | +0.227 ms | +93.1 us |
+| off | 0.025 | 0.027 | 0.321 | 0.340 | baseline | baseline |
+| disabled | 0.031 | 0.035 | 0.335 | 0.360 | +0.006 ms | +0.4 us |
+| sample0 | 0.053 | 0.057 | 0.861 | 0.905 | +0.028 ms | +25.6 us |
+| full | 0.073 | 0.080 | 1.251 | 1.796 | +0.048 ms | +44.1 us |
+| profile | 0.254 | 0.287 | 2.373 | 2.837 | +0.229 ms | +91.2 us |
 
 Overhead = median with Redline minus median of the `off` baseline, same query count.
 Per-query overhead = (overhead at 20 queries - overhead at 0 queries) / 20.
@@ -40,5 +40,34 @@ Notes:
 - `full` storage writes happen on a background thread; the table counts only what the
   request thread pays, plus GIL contention seen by the timed requests.
 - The FastAPI baseline query is a SQLAlchemy Core `text()` select (about 15 us); its
-  per-query overhead includes SQLAlchemy event-listener dispatch (`disabled` shows the cost
-  of the listeners existing at all).
+  per-query overhead includes SQLAlchemy event-listener dispatch.
+- `disabled` on FastAPI installs neither the middleware nor the SQLAlchemy listeners
+  (before this run it installed both, which cost +4.6 us per query); what remains is the
+  mounted UI routes being matched first.
+- The span cap (`max_spans_per_trace`, default 2000) is not reached at 20 queries, so
+  these numbers are the uncapped path.
+
+## Storage size and writer throughput (`benchmarks/storage.py`)
+
+- Date: 2026-10-26
+- Python: 3.13.15 (CPython) on Darwin arm64
+- Reproduce with `uv run python benchmarks/storage.py` (about a minute).
+- Shape: browser-like headers, `?page=2`, a JSON response of about 1 KB, every
+  query from one loop line (so 20 and 200 queries carry an N+1 issue with its
+  fix suggestion). Request bodies off (a GET). Retention off while measuring.
+
+| queries / trace | traces | bytes / trace on disk | issues |
+|---|---|---|---|
+| 0 | 2000 | 1.6 KiB | none |
+| 20 | 2000 | 30.9 KiB | n_plus_one |
+| 200 | 500 | 260.9 KiB | n_plus_one |
+
+Profile (pyinstrument, ~20 ms request): 1.6 KiB of speedscope JSON per profiled trace (whole profiled trace: 32.8 KiB).
+
+| queries / trace | writer throughput (traces/s) |
+|---|---|
+| 0 | 53,635 |
+| 20 | 3,803 |
+| 200 | 442 |
+
+Memory per in-flight SQL span (tracemalloc, 2000 queries in one request): 1,543 bytes; the default `max_spans_per_trace = 2000` caps a request at about 2.9 MiB of spans.

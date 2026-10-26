@@ -24,8 +24,9 @@ What that means in practice:
 - **The API may still move.** Setting names, the JSON API shape and the extension protocols
   are not frozen. Pin an exact version.
 - **There is no upgrade guarantee**: no migrations for the store, no deprecation cycle.
-- **Not yet measured.** The overhead is described by a cost model, not benchmarks. See
-  [Performance and overhead](performance.md).
+- **Measured on one machine.** Overhead benchmarks exist (`benchmarks/`) and were run on an
+  Apple M2 Pro; see [Performance and overhead](performance.md#measured-numbers). Your
+  application is not that benchmark, so A/B it.
 - **Not yet proven in production.** It is designed to be usable there with sampling, but
   multi-process behaviour in particular has not been exercised. See
   [Production](production.md).
@@ -94,9 +95,10 @@ all.**
 
 ## Does it slow my application down?
 
-It adds work. How much has **not been measured yet**: see
-[Performance and overhead](performance.md) for the cost model and what each setting
-controls. The headline facts are that disk I/O is off the request path, the cost when
+It adds work: on an Apple M2 Pro, about **0.04 to 0.06 ms per request plus 12 to 44 µs
+per SQL query** while recording (a few µs in total when disabled). See
+[Performance and overhead](performance.md) for the measurements, the cost model and what
+each setting controls. The headline facts are that disk I/O is off the request path, the cost when
 nothing is recording is a `ContextVar.get()`, and **`sample_rate` reduces analysis and
 disk but not the per-query recording cost**.
 
@@ -185,8 +187,10 @@ startup). In both: the work ran in a bare thread, which is not attributed to a r
 
 ## Can I turn it off without removing it?
 
-Yes: `enabled: false` (`REDLINE["ENABLED"] = False`). The middleware stays but passes every
-request straight through.
+Yes: `enabled: false` (`REDLINE["ENABLED"] = False`). On Django the middleware stays but
+passes every request straight through; on FastAPI `install()` then adds no middleware and
+no SQLAlchemy listeners at all. Measured, a disabled install costs a few µs per request and
+under 1 µs per query. The UI still shows what is already stored.
 
 ## Can I record only some requests?
 

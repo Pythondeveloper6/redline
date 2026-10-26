@@ -54,10 +54,14 @@ It returns a `Redline` handle (also available as `app.state.redline`) and raises
    Redline never records itself.
 2. Creates the store (`SQLiteStore.from_settings(...)`) and a `SQLAlchemyFixSuggester`, and
    configures the process-wide recorder.
-3. Instruments every engine you passed.
+3. Instruments every engine you passed (registers them for EXPLAIN either way).
 4. Mounts the UI and API router under `prefix` and **moves its routes to the front** of the
    app's route list, so a catch-all route you declared earlier cannot swallow it.
 5. Adds the pure-ASGI `RedlineMiddleware`.
+
+With `settings={"enabled": False}` steps 3 and 5 are skipped: no SQLAlchemy listeners and
+no middleware, so a disabled install costs nothing per query (measured: under 1 µs, the
+same as not installed). The UI still serves the traces already in the store.
 6. **Wraps your lifespan**: on shutdown it flushes the pending traces and closes the store.
    An existing `lifespan=` keeps working and runs first.
 
@@ -70,7 +74,7 @@ It returns a `Redline` handle (also available as `app.state.redline`) and raises
 | `redline.recorder` | the process recorder |
 | `redline.api` | the `RedlineAPI` (call `redline.api.dispatch(...)` from a script or test) |
 | `redline.engines` | the `{alias: engine}` mapping |
-| `redline.add_engine(engine, alias=None)` | instrument another engine later; returns its alias |
+| `redline.add_engine(engine, alias=None)` | instrument another engine later (only registered for EXPLAIN when disabled); returns its alias |
 | `redline.close()` | flush and close the store (called by the lifespan wrapper) |
 
 ## Engines
@@ -205,9 +209,18 @@ instrumented.
 
 ### The default: loopback only
 
-With no `dependencies`, a built-in `local_only` dependency allows only loopback clients
-(`127.0.0.0/8`, `::1`, IPv4-mapped IPv6 loopback, unix sockets, and Starlette's
-`TestClient`). Anyone else gets `403` and a startup warning is logged:
+With no `dependencies`, a built-in `local_only` dependency allows a request only when
+**both** of these hold:
+
+- the **client** is loopback: `127.0.0.0/8`, `::1`, IPv4-mapped IPv6 loopback, unix
+  sockets, or Starlette's `TestClient`;
+- the **`Host` header** names loopback: `localhost`, any `*.localhost`, a `127.x.x.x`
+  address or `[::1]`, with any port. This is what stops **DNS rebinding**: a malicious
+  page that points its own domain at `127.0.0.1` reaches your server, but its requests
+  say `Host: evil.example` and are refused.
+
+Anyone else gets `403` with `{"error": {"code": "forbidden", "message": ...}}`, and a
+startup warning is logged:
 
 ```text
 Redline is mounted at /_redline with no auth dependency: only loopback clients are allowed.
@@ -220,6 +233,16 @@ Pass install(app, dependencies=[...]) before exposing it.
     looks like localhost and the default check lets the **whole internet** in. Either pass
     real dependencies, or run uvicorn with `--proxy-headers` and
     `--forwarded-allow-ips` so `request.client` is the real client address.
+
+To reach a local server through another name (a hosts-file alias, a tunnel), keep the
+loopback rules and allow that name explicitly:
+
+```python
+from fastapi import Depends
+from fastapi_redline import install, loopback_guard
+
+install(app, engine=engine, dependencies=[Depends(loopback_guard(allowed_hosts=["devbox"]))])
+```
 
 ### Your own dependency
 
@@ -264,13 +287,17 @@ Pass install(app, dependencies=[...]) before exposing it.
 network.
 
 The dependencies apply to **everything** under the prefix: the page, assets and the API.
+An `HTTPException` they raise is answered in Redline's error shape,
+`{"error": {"code": "unauthorized", "message": "..."}}` for a `401` (`forbidden` for
+`403`), with its headers (`WWW-Authenticate`) kept, so the UI can show it. See
+[HTTP API: errors](http-api.md#error-codes).
 
 ### CSRF and Origin
 
 The mutating endpoints (`DELETE api/traces...`, `POST api/explain`) are always protected
 by a guard, whatever your dependencies:
 
-- a request with `Sec-Fetch-Site: cross-site` is rejected;
+- a request with `Sec-Fetch-Site: cross-site` is rejected (`403 csrf_failed`);
 - a request with an `Origin` header must match the request's `Host` (or
   `X-Forwarded-Host`); `Origin: null` is rejected;
 - a request **without** `Origin` (curl, scripts) is allowed, because a web page cannot
@@ -304,15 +331,19 @@ transaction that is always rolled back (and `SET TRANSACTION READ ONLY` on Postg
 
 Each worker process has its own store connection and writer thread, and all write to the
 **same** SQLite file. SQLite serialises writers (WAL mode, a 10-second busy timeout), so
-this is intended to work, but multi-worker deployments are **not covered by the test
-suite** and each worker prunes independently. For anything beyond a development
+this is intended to work. The store is **fork-safe**: with gunicorn `--preload` the store
+built by `install()` in the master reopens its connection and starts its own writer in
+each worker (see [Production: process models](production.md#process-models)). Busy
+multi-worker deployments have not been load-tested, and each worker prunes independently. For anything beyond a development
 `--workers 2`, prefer a single worker for the profiler, or per-worker `storage_path`s
 (use the PID). A shared store for production is planned for [v1.0](roadmap.md).
 
 ## Testing your app with Redline installed
 
-Starlette's `TestClient` reports its host as `testclient`, which the loopback check
-accepts, so a test can open the UI without extra setup. To keep test runs from writing a
+Starlette's `TestClient` reports its client address as `testclient`, which the loopback
+check accepts, but it sends `Host: testserver`, which the DNS-rebinding check refuses.
+Give the client a loopback base URL to open the UI in a test:
+`TestClient(app, base_url="http://localhost")`. To keep test runs from writing a
 file, set `storage_path` to `":memory:"`:
 
 ```python
@@ -325,7 +356,8 @@ Or leave Redline out of the app under test, and install it only in your dev entr
 
 | Symptom | Likely cause |
 |---|---|
-| `403 Redline is only reachable from localhost` | you are not on loopback; pass `dependencies` |
+| `403 forbidden`: "only reachable from localhost" | you are not on loopback; pass `dependencies` |
+| `403 forbidden`: "only answers requests addressed to localhost" | the `Host` header is not a loopback name (a hosts-file alias, a tunnel). Use `loopback_guard(allowed_hosts=[...])` |
 | UI loads, but no requests appear | `install()` ran on a different app object than the one served; or the path is in `ignore_paths` |
 | Requests appear with no SQL | the engine was not passed to `install()`/`add_engine()` |
 | Requests have a `route` of `None` and group by raw path | the request matched no route (404), or a catch-all `Mount` swallowed routing |
