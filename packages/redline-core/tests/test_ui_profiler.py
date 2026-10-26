@@ -69,3 +69,49 @@ def test_request_profiler_roundtrip():
     p2 = profiler.RequestProfiler()
     p2.start()
     p2.abort()
+
+
+def _doc(files):
+    frames = [{"name": f"f{i}", "file": f, "line": 1} for i, f in enumerate(files)]
+    n = len(files)
+    events = [{"type": "O", "at": 0.0, "frame": i} for i in range(n)]
+    events += [{"type": "C", "at": 1.0, "frame": i} for i in reversed(range(n))]
+    return {"shared": {"frames": frames}, "profiles": [{"type": "evented", "events": events}]}
+
+
+def test_collapse_framework_frames_keeps_total_and_app_frames():
+    doc = _doc(
+        [
+            "/x/django/utils/deprecation.py",
+            "/x/django/core/handlers/exception.py",
+            "/x/django_redline/middleware.py",
+            "/x/shop/views.py",
+            "/x/django/db/models/query.py",
+        ]
+    )
+    assert profiler.collapse_framework_frames(doc) == 3
+    events = doc["profiles"][0]["events"]
+    names = [doc["shared"]["frames"][e["frame"]]["name"] for e in events if e["type"] == "O"]
+    assert names == ["[framework] 3 frames", "f3", "f4"]
+    assert events[0]["at"] == 0.0 and events[-1]["at"] == 1.0 and events[-1]["type"] == "C"
+    assert sum(e["type"] == "O" for e in events) == sum(e["type"] == "C" for e in events)
+
+
+def test_collapse_framework_frames_noop_without_framework_root():
+    doc = _doc(["/x/shop/views.py", "/x/django/core/handlers/base.py"])
+    before = [dict(e) for e in doc["profiles"][0]["events"]]
+    assert profiler.collapse_framework_frames(doc) == 0
+    assert doc["profiles"][0]["events"] == before
+
+
+def test_profile_title_is_the_request():
+    pytest.importorskip("pyinstrument")
+    from redline_core.conf import Settings
+    from redline_core.recorder import Recorder
+
+    rec = Recorder(Settings(profile="all"))
+    b = rec.start_trace(method="GET", path="/orders/")
+    sum(range(200000))
+    t = rec.finish_trace(b, status=200, route="/orders/", view="shop.views.order_list")
+    want = "GET /orders/ — shop.views.order_list"
+    assert t.profile["name"] == want and t.profile["profiles"][0]["name"] == want

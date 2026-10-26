@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Iterable, Mapping, Sequence
+from functools import lru_cache
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -62,9 +63,12 @@ class Redactor:
         self.settings = settings or Settings()
         self._headers = frozenset(h.lower() for h in self.settings.redact_headers)
         self._keys = [re.compile(p) for p in self.settings.redact_keys]
+        # Column and field names repeat endlessly (every query binds the same few), so the
+        # regex scan is memoised per distinct name.
+        self.is_secret_key = lru_cache(maxsize=2048)(self._is_secret_key)
 
     # keys ------------------------------------------------------------------
-    def is_secret_key(self, key: str) -> bool:
+    def _is_secret_key(self, key: str) -> bool:
         return any(p.search(key) for p in self._keys)
 
     def headers(self, headers: Mapping[str, Any] | Iterable[tuple[Any, Any]] | None) -> dict:
@@ -186,19 +190,24 @@ class Redactor:
                 out.append(json_safe(value))
         return out
 
-    def _param_columns(self, sql: str) -> list[str | None]:
-        insert = _INSERT.search(sql)
-        if insert:
-            cols = [c.strip().strip('"`[]') for c in insert.group("cols").split(",")]
-            n = len(_PLACEHOLDER.findall(insert.group("rows")))
-            prefix = sql[: insert.start("rows")]
-            head: list[str | None] = [
-                self._column_at(prefix, m.start()) for m in _PLACEHOLDER.finditer(prefix)
-            ]
-            return head + [cols[i % len(cols)] if cols else None for i in range(n)]
-        return [self._column_at(sql, m.start()) for m in _PLACEHOLDER.finditer(sql)]
-
     @staticmethod
-    def _column_at(sql: str, pos: int) -> str | None:
-        m = _COLUMN_BEFORE.search(sql[max(0, pos - 120) : pos])
-        return m.group(2) if m else None
+    def _param_columns(sql: str) -> tuple[str | None, ...]:
+        return _param_columns(sql)
+
+
+def _column_at(sql: str, pos: int) -> str | None:
+    m = _COLUMN_BEFORE.search(sql[max(0, pos - 120) : pos])
+    return m.group(2) if m else None
+
+
+@lru_cache(maxsize=1024)
+def _param_columns(sql: str) -> tuple[str | None, ...]:
+    """Column each placeholder of ``sql`` is bound to; memoised as SQL text repeats."""
+    insert = _INSERT.search(sql)
+    if insert:
+        cols = [c.strip().strip('"`[]') for c in insert.group("cols").split(",")]
+        n = len(_PLACEHOLDER.findall(insert.group("rows")))
+        prefix = sql[: insert.start("rows")]
+        head = [_column_at(prefix, m.start()) for m in _PLACEHOLDER.finditer(prefix)]
+        return tuple(head + [cols[i % len(cols)] if cols else None for i in range(n)])
+    return tuple(_column_at(sql, m.start()) for m in _PLACEHOLDER.finditer(sql))

@@ -38,7 +38,8 @@ DEFAULT_REDACT_HEADERS: tuple[str, ...] = (
     "proxy-authorization",
 )
 DEFAULT_REDACT_KEYS: tuple[str, ...] = (
-    r"(?i)pass(word)?|secret|token|api[_-]?key|auth(?!or)|session|csrf|card|cvv|ssn",
+    r"(?i)pass(word)?|secret|token|api[_-]?key|(?<![a-z])auth(orization)?(?![a-z])"
+    r"|session|csrf|card|cvv|ssn|private[_-]?key",
 )
 
 

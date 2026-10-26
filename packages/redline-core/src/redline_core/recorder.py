@@ -282,13 +282,16 @@ class Recorder:
         end = _perf()
         builder.finished = True
         _reset(builder)
+        builder.set_route(route, view)
         profile = None
         if builder.profiler is not None:
+            title = f"{builder.method} {builder.route or builder.path}"
+            if builder.view:
+                title += f" \u2014 {builder.view}"
             try:
-                profile = builder.profiler.stop()
+                profile = builder.profiler.stop(title)
             except Exception as exc:  # pragma: no cover - defensive
                 builder.tags["profile_error"] = f"{type(exc).__name__}: {exc}"[:200]
-        builder.set_route(route, view)
         duration = (end - builder.t0) * 1000.0
         trace = Trace(
             id=builder.id,

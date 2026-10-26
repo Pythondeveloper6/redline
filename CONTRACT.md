@@ -214,7 +214,7 @@ PlanNode `flags` are `seq_scan`, `full_scan`, `sort_spill`, `hash_spill`, `neste
 | capture_request_body / capture_response_body | bool | True / True |
 | max_body_bytes | int | 20_000 |
 | redact_headers | list[str] | authorization, cookie, set-cookie, x-api-key, proxy-authorization |
-| redact_keys | list[str] regex | (?i)pass(word)?\|secret\|token\|api[_-]?key\|auth(?!or)\|session\|csrf\|card\|cvv\|ssn (`auth(?!or)` so `author`/`author_id` stay visible) |
+| redact_keys | list[str] regex | (?i)pass(word)?\|secret\|token\|api[_-]?key\|(?<![a-z])auth(orization)?(?![a-z])\|session\|csrf\|card\|cvv\|ssn\|private[_-]?key (`auth`/`authorization` only as a whole word, so `authenticated`/`author`/`author_id`/`authority`/`oauth_provider` stay visible) |
 | n_plus_one_threshold | int | 5 |
 | duplicate_threshold | int | 2 |
 | slow_query_ms | float | 100 |

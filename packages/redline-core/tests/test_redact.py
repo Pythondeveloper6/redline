@@ -82,3 +82,15 @@ def test_json_safe():
         None,
     ]
     assert json_safe("x" * 1000).endswith("…")
+
+
+def test_default_keys_mask_secrets_but_not_auth_lookalikes():
+    red = r()
+    for key in (
+        "auth", "Authorization", "auth_token", "x-auth", "password", "passwd", "secret",
+        "token", "api_key", "apikey", "session", "sessionid", "csrf", "card", "card_number",
+        "cvv", "ssn", "private_key",
+    ):  # fmt: skip
+        assert red.is_secret_key(key), key
+    for key in ("authenticated", "author", "author_id", "authority", "oauth_provider", "name"):
+        assert not red.is_secret_key(key), key
