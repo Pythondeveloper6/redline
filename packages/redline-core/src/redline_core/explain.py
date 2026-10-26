@@ -132,7 +132,7 @@ def run_explain(
     except Exception as exc:
         raise ExplainError("explain_failed", f"{type(exc).__name__}: {exc}", 422) from exc
     plan = _raw_plan(vendor, rows)
-    analysis = analyze_plan(vendor, plan, sql)
+    analysis = analyze_plan(vendor, plan, sql, params)
     return ExplainResult(
         vendor=vendor,
         analyzed=analyze,

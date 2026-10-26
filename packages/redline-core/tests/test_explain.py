@@ -348,7 +348,7 @@ def test_live_postgres_explain(pg):
     with pg.cursor() as cur:
         cur.execute(
             "CREATE TEMP TABLE redline_t AS "
-            "SELECT g AS id, g % 100 AS k FROM generate_series(1, 20000) g"
+            "SELECT g AS id, g % 100 AS k FROM generate_series(1, 500000) g"
         )
         cur.execute("ANALYZE redline_t")
 
@@ -364,3 +364,152 @@ def test_live_postgres_explain(pg):
     r = run_explain("SELECT * FROM redline_t WHERE k = %s", [5], "postgresql", executor)
     assert "seq_scan" in flags(r.tree)
     assert r.suggested_indexes == ["CREATE INDEX redline_t_k_idx ON redline_t (k);"]
+
+
+# ── index advice that must not be wrong ───────────────────────────────────────
+
+
+def _sqlite_advice(sql, params):
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE audit_log (id INTEGER PRIMARY KEY, message TEXT, actor TEXT)")
+    return run_explain(sql, params, "sqlite", lambda s, p: conn.execute(s, p).fetchall())
+
+
+def _pg_seq(table, filt):
+    return [
+        {
+            "Plan": {
+                "Node Type": "Seq Scan",
+                "Relation Name": table,
+                "Alias": table,
+                "Total Cost": 5000.0,
+                "Plan Rows": 200000,
+                "Filter": filt,
+            }
+        }
+    ]
+
+
+LIKE_SQL = "SELECT count(*) FROM audit_log WHERE audit_log.message LIKE ?"
+
+
+def test_sqlite_leading_wildcard_like_no_btree_index():
+    r = _sqlite_advice(LIKE_SQL, ["%refund%"])
+    assert r.suggested_indexes == []
+    f = next(f for f in r.findings if "can serve LIKE" in f.title)
+    assert "fts5" in f.detail.lower() and "not a drop-in" in f.detail
+
+
+def test_postgres_leading_wildcard_like_suggests_trigram_alternative():
+    plan = _pg_seq("audit_log", "((message)::text ~~ '%refund%'::text)")
+    a = analyze_postgres(plan, LIKE_SQL.replace("?", "%s"), ["%refund%"])
+    assert a.suggested_indexes == []
+    f = next(f for f in a.findings if "can serve LIKE" in f.title)
+    assert "CREATE EXTENSION IF NOT EXISTS pg_trgm" in f.detail
+    assert "USING gin (message gin_trgm_ops)" in f.detail
+
+
+def test_mysql_leading_wildcard_like_suggests_fulltext():
+    plan = {
+        "query_block": {
+            "select_id": 1,
+            "table": {
+                "table_name": "audit_log",
+                "access_type": "ALL",
+                "rows_examined_per_scan": 50000,
+                "attached_condition": "(`db`.`audit_log`.`message` like '%refund%')",
+            },
+        }
+    }
+    a = analyze_mysql(plan, "SELECT * FROM audit_log WHERE message LIKE '%refund%'")
+    assert a.suggested_indexes == []
+    f = next(f for f in a.findings if "can serve LIKE" in f.title)
+    assert "FULLTEXT" in f.detail and "MATCH(message) AGAINST" in f.detail
+
+
+def test_pattern_from_literal_without_params():
+    plan = _pg_seq("audit_log", "((message)::text ~~ '%x'::text)")
+    a = analyze_postgres(plan, "SELECT * FROM audit_log WHERE message LIKE '%x'")
+    assert a.suggested_indexes == []
+
+
+def test_prefix_like_still_gets_btree_with_collation_note():
+    plan = _pg_seq("audit_log", "((message)::text ~~ 'abc%'::text)")
+    a = analyze_postgres(plan, LIKE_SQL.replace("?", "%s"), ["abc%"])
+    assert a.suggested_indexes == ["CREATE INDEX audit_log_message_idx ON audit_log (message);"]
+    note = next(f for f in a.findings if "text_pattern_ops" in f.title)
+    assert "C collation" in note.detail
+
+
+def test_unknown_pattern_keeps_old_behaviour():
+    plan = _pg_seq("audit_log", "((message)::text ~~ 'x'::text)")
+    a = analyze_postgres(plan, LIKE_SQL.replace("?", "%s"))
+    assert a.suggested_indexes == ["CREATE INDEX audit_log_message_idx ON audit_log (message);"]
+
+
+def test_mixed_predicates_keep_the_usable_column():
+    sql = "SELECT * FROM audit_log WHERE actor = %s AND message LIKE %s"
+    plan = _pg_seq("audit_log", "((actor = 'a') AND ((message)::text ~~ '%x'::text))")
+    a = analyze_postgres(plan, sql, ["a", "%x"])
+    assert a.suggested_indexes == ["CREATE INDEX audit_log_actor_idx ON audit_log (actor);"]
+    assert any("can serve LIKE" in f.title for f in a.findings)
+
+
+def test_ilike_and_function_wrapped_column():
+    plan = _pg_seq("audit_log", "(lower((actor)::text) = 'bob'::text)")
+    a = analyze_postgres(plan, "SELECT * FROM audit_log WHERE lower(actor) = %s", ["bob"])
+    assert a.suggested_indexes == []
+    f = next(f for f in a.findings if "cannot use a plain index" in f.title)
+    assert "audit_log (lower(actor))" in f.detail
+    plan = _pg_seq("audit_log", "((actor)::text ~~* 'bob%'::text)")
+    a = analyze_postgres(plan, "SELECT * FROM audit_log WHERE actor ILIKE %s", ["bob%"])
+    assert a.suggested_indexes == []
+    assert any("ILIKE" in f.title for f in a.findings)
+
+
+def test_django_upper_wrapper_like():
+    sql = 'SELECT 1 FROM "audit_log" WHERE UPPER("audit_log"."message"::text) LIKE UPPER(%s)'
+    plan = _pg_seq("audit_log", "(upper((message)::text) ~~ '%REFUND%'::text)")
+    a = analyze_postgres(plan, sql, ["%refund%"])
+    assert a.suggested_indexes == []
+    assert any("plain index" in f.title for f in a.findings)
+
+
+def test_not_equal_and_not_in_get_no_index():
+    for where, filt in (
+        ("level != %s", "((level)::text <> 'info'::text)"),
+        ("level NOT IN (%s, %s)", "((level)::text <> ALL ('{a,b}'::text[]))"),
+        ("level IS NOT NULL", "(level IS NOT NULL)"),
+    ):
+        a = analyze_postgres(
+            _pg_seq("audit_log", filt), f"SELECT * FROM audit_log WHERE {where}", ["info", "x"]
+        )
+        assert a.suggested_indexes == [], where
+        assert any(f.severity == "info" and "audit_log.level" in f.title for f in a.findings)
+
+
+def test_equality_unchanged_and_is_null_still_indexed():
+    plan = _pg_seq("audit_log", "((actor)::text = 'a'::text)")
+    a = analyze_postgres(plan, "SELECT * FROM audit_log WHERE actor = %s", ["a"])
+    assert a.suggested_indexes == ["CREATE INDEX audit_log_actor_idx ON audit_log (actor);"]
+
+
+def test_or_across_columns_gets_separate_indexes():
+    sql = "SELECT * FROM audit_log WHERE (actor = %s OR level = %s)"
+    plan = _pg_seq("audit_log", "((actor = 'a') OR (level = 'b'))")
+    a = analyze_postgres(plan, sql, ["a", "b"])
+    assert a.suggested_indexes == [
+        "CREATE INDEX audit_log_actor_idx ON audit_log (actor);",
+        "CREATE INDEX audit_log_level_idx ON audit_log (level);",
+    ]
+    sql = "SELECT * FROM audit_log WHERE actor = %s AND level = %s"
+    a = analyze_postgres(_pg_seq("audit_log", "((actor = 'a') AND (level = 'b'))"), sql, ["a", "b"])
+    assert a.suggested_indexes == [
+        "CREATE INDEX audit_log_actor_level_idx ON audit_log (actor, level);"
+    ]
+
+
+def test_run_explain_passes_params_to_analysis():
+    plan = json.dumps(_pg_seq("audit_log", "((message)::text ~~ '%refund%'::text)"))
+    r = run_explain(LIKE_SQL.replace("?", "%s"), ["%refund%"], "postgresql", lambda s, p: [(plan,)])
+    assert r.suggested_indexes == [] and r.findings

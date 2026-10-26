@@ -1,0 +1,230 @@
+# Continuous integration for the whole monorepo.
+#
+# Three distributions live here and ship in lockstep, so one workflow tests them all:
+#
+#   lint      ruff (check + format --check) and the lockstep-version check.
+#   core      redline-core on every interpreter it claims (3.10 - 3.14).
+#   django    django-redline across Python x Django.
+#   fastapi   fastapi-redline across Python.
+#   postgres  the EXPLAIN tests that need a real PostgreSQL server (they skip elsewhere).
+#   frontend  builds the React UI and fails if the committed bundle is stale.
+#   docs      the MkDocs site, built with --strict.
+#   package   builds all three distributions, installs the wheels into an empty
+#             virtualenv and imports them, checking the bundled UI actually shipped.
+#
+# There is deliberately no release, publish or Pages-deploy job: the repository is private
+# and nothing in it is ever published from CI.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  FORCE_COLOR: "1"
+
+jobs:
+  lint:
+    name: ruff
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.2
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+          python-version: "3.13"
+      - run: uv sync --all-packages --frozen
+      - run: uv run --no-sync ruff check .
+      - run: uv run --no-sync ruff format --check --diff .
+
+  core:
+    name: core / py${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.2
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+          python-version: ${{ matrix.python-version }}
+      - run: uv sync --all-packages --frozen
+      - name: Test
+        working-directory: packages/redline-core
+        run: uv run --no-sync pytest
+
+  django:
+    name: django / py${{ matrix.python-version }} / Django ${{ matrix.django }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13", "3.14"]
+        django: ["5.2", "6.0", "6.1"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.2
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+          python-version: ${{ matrix.python-version }}
+      - run: uv sync --all-packages --frozen
+      # Replace the locked Django with this cell's. The adapter allows Django>=5.2,<6.2,
+      # so each spec stays inside it.
+      - name: Pin Django ${{ matrix.django }}
+        run: |
+          case "${{ matrix.django }}" in
+            5.2) spec="django>=5.2,<6.0" ;;
+            6.0) spec="django>=6.0,<6.1" ;;
+            6.1) spec="django>=6.1,<6.2" ;;
+            *)   echo "::error::unknown Django cell '${{ matrix.django }}'"; exit 1 ;;
+          esac
+          uv pip install "$spec"
+          uv run --no-sync python -c "import django; print('Django', django.get_version())"
+      - name: Test
+        working-directory: packages/django-redline
+        run: uv run --no-sync pytest
+
+  fastapi:
+    name: fastapi / py${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.2
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+          python-version: ${{ matrix.python-version }}
+      - run: uv sync --all-packages --frozen
+      - name: Test
+        working-directory: packages/fastapi-redline
+        run: uv run --no-sync pytest
+
+  # The live-EXPLAIN tests skip themselves without a server, so the matrix jobs above
+  # never exercise them. Core's fixture reads REDLINE_TEST_POSTGRES_DSN (and also needs
+  # psycopg importable); django-redline's settings add a `pg` database when
+  # REDLINE_TEST_PG is set. fastapi-redline has no server-backed tests.
+  postgres:
+    name: postgres EXPLAIN tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: redline
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      REDLINE_TEST_POSTGRES_DSN: postgresql://postgres:postgres@localhost:5432/redline
+      REDLINE_TEST_PG: postgresql://postgres:postgres@localhost:5432/redline
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.2
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+          python-version: "3.13"
+      - run: uv sync --all-packages --frozen
+      - name: Install the PostgreSQL driver
+        run: uv pip install "psycopg[binary]>=3.2"
+      # -rs prints skip reasons; a skipped test is a failure here, since the whole point
+      # of this job is that the server is reachable.
+      - name: Core - live EXPLAIN
+        working-directory: packages/redline-core
+        shell: bash
+        run: |
+          uv run --no-sync pytest tests/test_explain.py -k live_postgres -rs -v | tee "$RUNNER_TEMP/core.log"
+          ! grep -qi skipped "$RUNNER_TEMP/core.log"
+      - name: django-redline - EXPLAIN on PostgreSQL
+        working-directory: packages/django-redline
+        shell: bash
+        run: |
+          uv run --no-sync pytest tests/test_explain.py -k postgres -rs -v | tee "$RUNNER_TEMP/django.log"
+          ! grep -qi skipped "$RUNNER_TEMP/django.log"
+
+  frontend:
+    name: frontend bundle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v5
+        with:
+          node-version: lts/*
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Build
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+      # The bundle is committed so the wheels ship without Node. Vite names assets by
+      # content hash and the build has no timestamps, so a rebuild from the same sources
+      # and lockfile is byte-identical; any difference means the committed bundle is stale.
+      - name: Committed bundle is up to date
+        run: |
+          status="$(git status --porcelain -- packages/redline-core/src/redline_core/ui/static)"
+          if [ -n "$status" ]; then
+            echo "::error::The committed UI bundle is stale. Run scripts/build_ui.sh and commit the result."
+            echo "$status"
+            git diff --stat -- packages/redline-core/src/redline_core/ui/static
+            exit 1
+          fi
+
+  docs:
+    name: docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.2
+        with:
+          enable-cache: true
+          python-version: "3.13"
+      - run: uv run --no-project --with mkdocs-material mkdocs build --strict
+
+  package:
+    name: build and install-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.2
+        with:
+          enable-cache: true
+          python-version: "3.13"
+      - name: Lockstep versions
+        run: python3 scripts/check_versions.py
+      - name: Build all three distributions
+        run: uv build --all-packages --out-dir dist
+      - name: Check metadata
+        run: uvx twine check dist/*
+      - name: Install from the wheels alone and smoke-test
+        run: |
+          uv venv "$RUNNER_TEMP/wheelcheck"
+          # The distributions resolve from dist/ only (none is on any index); their
+          # third-party dependencies come from PyPI as a user would get them.
+          VIRTUAL_ENV="$RUNNER_TEMP/wheelcheck" uv pip install --find-links dist \
+            --prerelease=if-necessary django-redline fastapi-redline
+          "$RUNNER_TEMP/wheelcheck/bin/python" scripts/smoke_wheels.py
