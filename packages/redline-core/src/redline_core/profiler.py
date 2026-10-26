@@ -62,15 +62,27 @@ class RequestProfiler:
         self._profiler.start()
         self._running = True
 
-    def stop(self) -> dict[str, Any] | None:
-        """Stop and export; ``None`` if it never started or recorded nothing."""
+    def stop(self, name: str | None = None, *, trim: bool = True) -> dict[str, Any] | None:
+        """Stop and export; ``None`` if it never started or recorded nothing.
+
+        ``name`` titles the profile (e.g. ``"GET /orders/ — shop.views.order_list"``). With
+        ``trim`` the leading run of framework-internal frames is collapsed into one
+        synthetic ``[framework] N frames`` root (see :func:`collapse_framework_frames`).
+        """
         if not self._running:
             return None
         self._running = False
         session = self._profiler.stop()
         if session is None or not getattr(session, "sample_count", 1):
             return None
-        return to_speedscope(self._profiler)
+        doc = to_speedscope(self._profiler)
+        if trim:
+            collapse_framework_frames(doc)
+        if name:
+            doc["name"] = name
+            for prof in doc.get("profiles", ()):
+                prof["name"] = name
+        return doc
 
     def abort(self) -> None:
         """Stop without exporting (used on error paths)."""
@@ -87,3 +99,65 @@ def to_speedscope(profiler: Any) -> dict[str, Any]:
     from pyinstrument.renderers import SpeedscopeRenderer
 
     return json.loads(profiler.output(SpeedscopeRenderer()))
+
+
+#: Path fragments of frames that are plumbing rather than application code.
+_FRAMEWORK_MARKERS: tuple[str, ...] = (
+    "/django/core/handlers/",
+    "/django/utils/deprecation.py",
+    "/django/contrib/",
+    "/django/middleware/",
+    "/django_redline/",
+    "/fastapi_redline/",
+    "/redline_core/",
+    "/starlette/",
+    "/fastapi/",
+    "/anyio/",
+    "/asyncio/",
+    "/uvicorn/",
+    "/asgiref/",
+)
+
+
+def _is_framework_frame(frame: dict[str, Any]) -> bool:
+    file = (frame.get("file") or "").replace("\\", "/")
+    return any(marker in file for marker in _FRAMEWORK_MARKERS)
+
+
+def collapse_framework_frames(doc: dict[str, Any]) -> int:
+    """Collapse the leading framework-internal run of the root stack into one frame.
+
+    Walks down the chain of frames that span the whole profile (Django middleware
+    ``__call__``/``inner``/``_get_response``, the Starlette/FastAPI middleware stack, Redline's
+    own frames) until the first application frame, and replaces them with a single
+    ``[framework] N frames`` root covering the same time, so totals are unchanged.
+    Returns the number of frames collapsed (0 leaves ``doc`` untouched).
+    """
+    frames = doc.get("shared", {}).get("frames", [])
+    for prof in doc.get("profiles", ()):
+        events = prof.get("events")
+        if prof.get("type") != "evented" or not events:
+            continue
+        k = 0
+        while 2 * (k + 1) <= len(events):
+            opened, closed = events[k], events[-1 - k]
+            if (
+                opened["type"] != "O"
+                or closed["type"] != "C"
+                or opened["frame"] != closed["frame"]
+                or not _is_framework_frame(frames[opened["frame"]])
+            ):
+                break
+            k += 1
+        if k == 0:
+            continue
+        frames.append({"name": f"[framework] {k} frame{'s' if k != 1 else ''}"})
+        idx = len(frames) - 1
+        first, last = events[0], events[-1]
+        prof["events"] = [
+            {"type": "O", "at": first["at"], "frame": idx},
+            *events[k : len(events) - k],
+            {"type": "C", "at": last["at"], "frame": idx},
+        ]
+        return k
+    return 0

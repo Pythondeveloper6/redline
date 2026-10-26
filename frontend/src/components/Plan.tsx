@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { api, ApiError } from '../api'
 import { ms } from '../lib/format'
-import type { ExplainResult, PlanNode, Span } from '../types'
+import type { ExplainResult, Meta, PlanNode, Span } from '../types'
 import { CopyButton, Drawer, Pill, Sev, Spinner, Sql, ErrorBox, sevTone, Icon, I } from './ui'
 import { useEffect } from 'react'
 
@@ -38,6 +38,13 @@ export function ExplainDrawer({ traceId, span, onClose }: { traceId: string; spa
   const [err, setErr] = useState<ApiError | Error | null>(null)
   const [loading, setLoading] = useState(false)
   const [showRaw, setShowRaw] = useState(false)
+  const [meta, setMeta] = useState<Meta | null>(null)
+  useEffect(() => { api.meta().then(setMeta, () => {}) }, [])
+  // Unknown (meta not loaded) counts as enabled; the API still enforces it with a 403.
+  const analyzeOff = meta?.settings?.explain_analyze_enabled === false
+  const analyzeHint = meta?.framework?.toLowerCase().includes('django')
+    ? 'ANALYZE executes the query. Enable it with REDLINE = {"EXPLAIN_ANALYZE": True} in Django settings.'
+    : 'ANALYZE executes the query. Enable it with install(app, settings={"explain_analyze": True}) in FastAPI.'
 
   const run = async (analyze: boolean) => {
     if (!span) return
@@ -62,7 +69,7 @@ export function ExplainDrawer({ traceId, span, onClose }: { traceId: string; spa
         <>
           <div className="flex items-center gap-2">
             <div className="text-[12px] font-semibold flex-1">Plan</div>
-            {!res.analyzed && <button className="btn" onClick={() => run(true)} disabled={loading}>Run with ANALYZE</button>}
+            {!res.analyzed && <button className="btn" onClick={() => run(true)} disabled={loading || analyzeOff} title={analyzeOff ? analyzeHint : 'Runs the query for real to get actual timings'}>Run with ANALYZE</button>}
           </div>
           <div className="card p-3"><Node n={res.tree} depth={0} maxCost={maxOf(res.tree)} /></div>
           {res.findings.length > 0 && (

@@ -25,6 +25,7 @@ import sysconfig
 import threading
 from collections.abc import Iterable
 from types import FrameType
+from typing import Any
 
 from .model import Callsite, Frame
 
@@ -38,6 +39,7 @@ __all__ = [
 
 #: How many project frames a :class:`Callsite` keeps (innermost last).
 MAX_STACK = 12
+_MISS: Any = object()
 _MAX_WALK = 128  # never walk deeper than this, whatever the recursion depth
 
 _REDLINE_PACKAGES = ("redline_core", "django_redline", "fastapi_redline")
@@ -114,12 +116,16 @@ class CallsiteCapturer:
             except ValueError:
                 return None
         classify = self.classify
+        cached = self._cache.get
         found: list[tuple[str, int, str]] = []
         depth = 0
         f: FrameType | None = frame
         while f is not None and depth < _MAX_WALK:
             code = f.f_code
-            display = classify(code.co_filename)
+            # inline the memoised verdict: this loop runs once per recorded query
+            display = cached(code.co_filename, _MISS)
+            if display is _MISS:
+                display = classify(code.co_filename)
             if display is not None:
                 found.append((display, f.f_lineno or 0, code.co_name))
                 if len(found) >= MAX_STACK:
