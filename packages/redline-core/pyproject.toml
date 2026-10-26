@@ -1,0 +1,74 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "redline-core"
+version = "0.1.0a1"
+description = "Framework-agnostic request profiler engine: span tracing, SQL fingerprinting, N+1 detection, EXPLAIN analysis, storage and the Redline web UI."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Mahmoud Ahmed", email = "pythondeveloper6@gmail.com" }]
+maintainers = [{ name = "Mahmoud Ahmed", email = "pythondeveloper6@gmail.com" }]
+keywords = [
+    "profiler",
+    "profiling",
+    "performance",
+    "apm",
+    "n+1",
+    "sql",
+    "explain",
+    "flamegraph",
+    "load-testing",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Debuggers",
+    "Topic :: System :: Monitoring",
+    "Typing :: Typed",
+]
+# Deliberately empty. The core is imported into the request path of an application and
+# must never pull a framework (or anything else) into it uninvited. Storage is stdlib
+# sqlite3; the flamegraph profiler is an opt-in extra.
+dependencies = []
+
+[project.optional-dependencies]
+profile = ["pyinstrument>=5.0,<6.0"]
+
+[project.urls]
+Homepage = "https://github.com/Pythondeveloper6/redline"
+Documentation = "https://pythondeveloper6.github.io/redline/"
+Source = "https://github.com/Pythondeveloper6/redline"
+Issues = "https://github.com/Pythondeveloper6/redline/issues"
+Changelog = "https://github.com/Pythondeveloper6/redline/blob/main/CHANGELOG.md"
+
+[dependency-groups]
+dev = ["pytest>=8.3", "pytest-asyncio>=0.24", "ruff>=0.8", "pyinstrument>=5.0"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/redline_core"]
+exclude = ["**/__pycache__", "**/*.py[cod]", "**/.DS_Store"]
+
+[tool.hatch.build.targets.sdist]
+include = ["/src/redline_core", "/tests", "/README.md", "/LICENSE"]
+exclude = ["**/__pycache__", "**/*.py[cod]", "**/.DS_Store"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--strict-markers -q"
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.ruff]
+extend = "../../pyproject.toml"

@@ -1,0 +1,48 @@
+# The repository root is a *virtual* uv workspace: it is not itself a distribution.
+# The three distributions live under packages/ and are released in lockstep:
+#
+#   packages/redline-core     -> redline-core     (redline_core)     engine + bundled UI
+#   packages/django-redline   -> django-redline   (django_redline)   Django adapter
+#   packages/fastapi-redline  -> fastapi-redline  (fastapi_redline)  FastAPI + SQLAlchemy adapter
+#
+# `uv sync --all-packages` installs all three, editable, plus the dev group below.
+# Each package's tests run from its own directory (`cd packages/<dist> && uv run pytest`)
+# because each has its own pytest configuration (pytest-django needs a settings module,
+# the others must not see it).
+
+[tool.uv.workspace]
+members = ["packages/*"]
+
+[dependency-groups]
+dev = [
+    "uvicorn>=0.29",
+    "pytest>=8.3",
+    "pytest-django>=4.9",
+    "pytest-asyncio>=0.24",
+    "pytest-cov>=6.0",
+    "ruff>=0.8",
+    "httpx>=0.27",
+    "aiosqlite>=0.20",
+    "greenlet>=3.0",
+    "pyinstrument>=5.0",
+]
+docs = ["mkdocs-material>=9.5"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+extend-exclude = ["site", "frontend", "examples/**/migrations", "*.md"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "C4", "RUF", "DJ"]
+# B008: FastAPI's `Depends(...)` in argument defaults is the framework's idiom.
+# RUF012: declarative class attributes (Django Meta, admin options) are the idiom.
+# RUF001-003: prose in docstrings and comments uses real typography (en dashes, arrows).
+ignore = ["B008", "RUF012", "RUF001", "RUF002", "RUF003"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["redline_core", "django_redline", "fastapi_redline"]
+
+[tool.ruff.lint.per-file-ignores]
+"**/migrations/*.py" = ["E501", "RUF012"]
+"**/tests/**/*.py" = ["DJ008"]
