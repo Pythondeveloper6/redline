@@ -1,0 +1,96 @@
+/* Brand: Redline red. The logo mark is #e5392f; text and fills that must carry white
+   text or sit on a page background use the darker steps below so WCAG AA holds
+   (white on #c62828 is 5.6:1; #ff8a80 on the dark page is 8:1). */
+:root,
+[data-md-color-scheme="default"] {
+  --md-primary-fg-color: #c62828;
+  --md-primary-fg-color--light: #e57373;
+  --md-primary-fg-color--dark: #b71c1c;
+  --md-accent-fg-color: #c62828;
+  --md-typeset-a-color: #c0281e;
+}
+
+[data-md-color-scheme="slate"] {
+  --md-primary-fg-color: #c62828;
+  --md-primary-fg-color--light: #ff8a80;
+  --md-primary-fg-color--dark: #991b1b;
+  --md-accent-fg-color: #ff8a80;
+  --md-typeset-a-color: #ff8a80;
+  --md-default-bg-color: #0c0c0e;
+}
+
+.md-header,
+.md-tabs {
+  background: linear-gradient(90deg, #b71c1c, #d32f2f);
+}
+
+[data-md-color-scheme="slate"] .md-header,
+[data-md-color-scheme="slate"] .md-tabs {
+  background: linear-gradient(90deg, #8f1717, #b52424);
+}
+
+.md-typeset h1 {
+  color: var(--md-default-fg-color);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.md-typeset h2 {
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+/* ── home page ──────────────────────────────────────────────────────────── */
+
+.rl-hero {
+  text-align: center;
+  padding: 1.5rem 0 0.5rem;
+}
+
+.rl-hero h1 {
+  font-size: 2.6rem;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  line-height: 1.15;
+  margin: 0 0 0.75rem;
+}
+
+.rl-hero .rl-tagline {
+  font-size: 1.15rem;
+  color: var(--md-default-fg-color--light);
+  max-width: 40rem;
+  margin: 0 auto 1.5rem;
+}
+
+.rl-hero .md-button {
+  margin: 0.25rem;
+}
+
+@media screen and (max-width: 44.9375em) {
+  .rl-hero h1 {
+    font-size: 1.9rem;
+  }
+
+  .rl-hero .rl-tagline {
+    font-size: 1rem;
+  }
+}
+
+.rl-shot {
+  border-radius: 0.75rem;
+  box-shadow: 0 20px 50px -12px rgb(15 23 42 / 0.35), 0 0 0 1px rgb(15 23 42 / 0.08);
+  margin: 1.5rem 0;
+}
+
+[data-md-color-scheme="default"] .rl-only-dark,
+[data-md-color-scheme="slate"] .rl-only-light {
+  display: none;
+}
+
+.md-typeset .grid.cards > ul > li {
+  border-radius: 0.6rem;
+}
+
+.md-typeset .grid.cards > ul > li:hover {
+  border-color: var(--md-accent-fg-color);
+}

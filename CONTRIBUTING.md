@@ -4,7 +4,7 @@ Thank you for considering it. This document is the whole of what you need: how t
 working environment, how to run the checks, how the packages relate, and the conventions
 the codebase enforces.
 
-By participating you agree to the [Code of Conduct](CODE_OF_CONDUCT.md).
+By participating you agree to the [Code of Conduct](https://github.com/Pythondeveloper6/redline/blob/main/CODE_OF_CONDUCT.md).
 
 ---
 
