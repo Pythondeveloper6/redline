@@ -1,0 +1,1 @@
+<ul>{% for order in orders %}<li>{{ order.id }}: {% for item in order.items.all %}{{ item.qty }} {% endfor %}</li>{% endfor %}</ul>

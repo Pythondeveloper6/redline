@@ -1,0 +1,12 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Redline demo shop</title>
+<style>body{font-family:system-ui,sans-serif;max-width:46rem;margin:3rem auto;padding:0 1rem;line-height:1.5}
+code{background:#f3f3f3;padding:.1rem .3rem;border-radius:4px}a{color:#c62828}</style></head>
+<body>
+<h1>Redline demo shop</h1>
+<p>Every endpoint below is deliberately inefficient. Hit a few, then open
+<a href="/redline/">/redline/</a> (log in as <code>admin</code> / <code>admin</code> – demo only).</p>
+<ul>{% for url, what in endpoints %}<li><a href="{{ url }}"><code>{{ url }}</code></a> – {{ what }}</li>{% endfor %}</ul>
+</body>
+</html>

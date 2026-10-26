@@ -1,0 +1,11 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Orders</title></head>
+<body>
+<h1>Latest orders</h1>
+<ul>
+{% for order in orders %}
+  <li>Order #{{ order.id }} – {% for item in order.items.all %}{{ item.quantity }}× product {{ item.product_id }}{% if not forloop.last %}, {% endif %}{% endfor %}</li>
+{% endfor %}
+</ul>
+</body>
+</html>
