@@ -33,6 +33,22 @@ function wantsMock() {
   } catch { return false }
 }
 
+// CSRF for mutating calls. The Django adapter embeds
+// <meta name="redline-csrf" content="<token>" data-header="X-CSRFToken"> in the page;
+// otherwise fall back to Django's default `csrftoken` cookie. Adapters that need no
+// token simply ignore the header.
+function csrfHeaders(method: string): Record<string, string> {
+  if (method === 'GET' || method === 'HEAD') return {}
+  try {
+    const meta = document.querySelector('meta[name="redline-csrf"]')
+    const token = meta?.getAttribute('content')
+    if (token) return { [meta!.getAttribute('data-header') || 'X-CSRFToken']: token }
+    const m = document.cookie.match(/(?:^|;\s*)csrftoken=([^;]+)/)
+    if (m) return { 'X-CSRFToken': decodeURIComponent(m[1]) }
+  } catch { /* no DOM */ }
+  return {}
+}
+
 async function raw(method: string, url: string, body?: unknown): Promise<{ status: number; json: any }> {
   if (import.meta.env.DEV) {
     if (!mockReady) mockReady = wantsMock() ? initMock(true) : Promise.resolve()
@@ -43,7 +59,8 @@ async function raw(method: string, url: string, body?: unknown): Promise<{ statu
   try {
     res = await fetch(url, {
       method,
-      headers: body ? { 'Content-Type': 'application/json' } : undefined,
+      headers: { ...(body ? { 'Content-Type': 'application/json' } : {}), ...csrfHeaders(method) },
+      credentials: 'same-origin',
       body: body ? JSON.stringify(body) : undefined,
     })
   } catch (e) {
