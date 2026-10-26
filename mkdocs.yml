@@ -1,0 +1,124 @@
+site_name: Redline
+site_description: "A request profiler and backend analyzer for Django and FastAPI. N+1 detection with fix diffs, one-click EXPLAIN, flamegraphs and a fast web UI."
+site_author: Mahmoud Ahmed
+site_url: https://pythondeveloper6.github.io/redline/
+repo_url: https://github.com/Pythondeveloper6/redline
+repo_name: Pythondeveloper6/redline
+edit_uri: edit/main/docs/
+copyright: Copyright &copy; 2026 Mahmoud Ahmed &middot; MIT licence
+
+strict: true
+validation:
+  links:
+    anchors: warn
+
+theme:
+  name: material
+  logo: assets/logo-mark.svg
+  favicon: assets/favicon.svg
+  icon:
+    repo: fontawesome/brands/github
+  font:
+    text: Inter
+    code: JetBrains Mono
+  palette:
+    - media: "(prefers-color-scheme)"
+      toggle:
+        icon: material/brightness-auto
+        name: Switch to light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-night
+        name: Follow the system
+  features:
+    - navigation.instant
+    - navigation.instant.progress
+    - navigation.tracking
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - navigation.indexes
+    - toc.follow
+    - search.suggest
+    - search.highlight
+    - search.share
+    - content.code.copy
+    - content.code.annotate
+    - content.tabs.link
+    - content.action.edit
+
+extra_css:
+  - stylesheets/extra.css
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/Pythondeveloper6/redline
+
+markdown_extensions:
+  - abbr
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+      # GitHub's heading ids, so an anchor link works on github.com and here alike.
+      slugify: !!python/object/apply:pymdownx.slugs.slugify
+        kwds:
+          case: lower
+  - pymdownx.details
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.keys
+  - pymdownx.snippets
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+
+nav:
+  - Home: index.md
+  - Guide:
+      - Getting started: getting-started.md
+      - How it works: how-it-works.md
+      - The UI: the-ui.md
+      - N+1 detection: n-plus-one.md
+      - EXPLAIN: explain.md
+      - Flamegraphs: flamegraphs.md
+      - Custom spans: custom-spans.md
+      - Issues and endpoints: issues-and-endpoints.md
+  - Integrations:
+      - Django: django.md
+      - FastAPI: fastapi.md
+      - The HTTP API: http-api.md
+      - Extending: extending.md
+  - Operations:
+      - Settings reference: settings.md
+      - Production: production.md
+      - Security: security.md
+      - Storage: storage.md
+      - Performance and overhead: performance.md
+  - Roadmap: roadmap.md
+  - FAQ: faq.md
+  - About:
+      - Changelog: changelog.md
+      - Contributing: contributing.md
