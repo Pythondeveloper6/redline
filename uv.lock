@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.12"
 
 [manifest]
@@ -469,7 +469,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.110,<1.0" },
     { name = "redline-core", editable = "packages/redline-core" },
     { name = "redline-core", extras = ["profile"], marker = "extra == 'profile'", editable = "packages/redline-core" },
-    { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0,<3.0" },
+    { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.1.6,<3.0" },
 ]
 provides-extras = ["profile"]
 
