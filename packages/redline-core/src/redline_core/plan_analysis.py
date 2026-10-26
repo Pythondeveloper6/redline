@@ -28,6 +28,10 @@ Index suggestions (``CREATE INDEX …``) are derived from the plan's filter/join
 when the plan exposes them (PostgreSQL ``Filter``/``Hash Cond``, MySQL
 ``attached_condition``) and otherwise from the SQL's ``WHERE``/``ON`` columns. They are
 suggestions: nothing here ever runs DDL.
+
+Columns a plain B-tree index cannot serve (leading-wildcard ``LIKE``, ``ILIKE``,
+``lower(col)``, ``!=``/``NOT IN``, ``IS NOT NULL``; see :mod:`redline_core.predicates`) get an
+explanatory finding (with a per-vendor alternative) instead of a ``CREATE INDEX``.
 """
 
 from __future__ import annotations
@@ -38,6 +42,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from . import predicates as predmod
 from . import sql as sqlmod
 
 __all__ = [
@@ -107,12 +112,14 @@ class Analysis:
 
 
 class _Collector:
-    def __init__(self, vendor: str, sql: str) -> None:
+    def __init__(self, vendor: str, sql: str, params: Any = None) -> None:
         self.vendor = vendor
         self.sql = sql
+        self.params = params
         self.findings: list[Finding] = []
         self.indexes: list[str] = []
         self._sql_cols: dict[str, list[str]] | None = None
+        self._preds: dict[str, list[predmod.Predicate]] | None = None
 
     def finding(self, node: PlanNode, flag: str, severity: str, title: str, detail: str) -> None:
         if flag not in node.flags:
@@ -127,17 +134,164 @@ class _Collector:
                 self._sql_cols = {}
         return list(self._sql_cols.get(table, []))
 
+    def predicates(self, table: str) -> list[predmod.Predicate]:
+        if self._preds is None:
+            self._preds = predmod.analyze_predicates(self.sql, self.params) if self.sql else {}
+        return self._preds.get(table, [])
+
     def index(self, table: str, columns: Sequence[str]) -> str | None:
+        """Record ``CREATE INDEX`` suggestions for ``columns``; returns them joined.
+
+        Columns whose every predicate is one a plain B-tree cannot serve (leading-wildcard
+        ``LIKE``, ``lower(col) = ?``, ``col != ?`` …) are dropped and explained in a
+        finding instead; columns used under different ``OR`` branches get one index each.
+        """
         cols = [c for c in dict.fromkeys(columns) if c]
         if not table or not cols:
             return None
-        stmt = create_index_sql(table, cols[:3], self.vendor)
-        if stmt not in self.indexes:
-            self.indexes.append(stmt)
-        return stmt
+        preds = self.predicates(table)
+        usable: list[str] = []
+        for c in cols:
+            mine = [p for p in preds if p.column == c]
+            reasons = [predmod.blocked_reason(p) for p in mine]
+            if mine and all(reasons):
+                self._explain_blocked(table, c, mine)
+            else:
+                usable.append(c)
+                self._prefix_note(table, c, mine)
+        if not usable:
+            return None
+        clusters: list[list[str]] = []
+        members: list[list[predmod.Predicate]] = []
+        for c in usable:
+            mine = [p for p in preds if p.column == c and not predmod.blocked_reason(p)]
+            for group, gp in zip(clusters, members, strict=True):
+                if all(predmod.compatible(a, b) for a in mine for b in gp):
+                    group.append(c)
+                    gp.extend(mine)
+                    break
+            else:
+                clusters.append([c])
+                members.append(list(mine))
+        out = []
+        for group in clusters:
+            stmt = create_index_sql(table, group[:3], self.vendor)
+            if stmt not in self.indexes:
+                self.indexes.append(stmt)
+            out.append(stmt)
+        return " ".join(out)
+
+    def _add(self, severity: str, title: str, detail: str) -> None:
+        if not any(f.title == title for f in self.findings):
+            self.findings.append(Finding(severity, title, detail))
+
+    def _explain_blocked(self, table: str, column: str, preds: list[predmod.Predicate]) -> None:
+        p = next((q for q in preds if predmod.blocked_reason(q) == "leading_wildcard"), preds[0])
+        reason = predmod.blocked_reason(p)
+        where = f"{table}.{column}"
+        if reason == "leading_wildcard":
+            op = "ILIKE" if p.op == "ilike" else "LIKE"
+            self._add(
+                "warning",
+                f"No B-tree index can serve {op} '{p.pattern}' on {where}",
+                f"A leading-wildcard pattern ({p.pattern!r}) cannot use a B-tree index, so a "
+                f"plain index on {where} would not be used. "
+                + _text_search_alternative(self.vendor, table, column, p),
+            )
+        elif reason == "function":
+            self._add(
+                "warning",
+                f"Filter on {p.expr} cannot use a plain index on {where}",
+                f"The column is wrapped in a function, so a plain index on {where} is "
+                "ignored. Only an expression index matches: "
+                + _expression_index(self.vendor, table, p)
+                + " (the query must use exactly the same expression).",
+            )
+        elif reason == "ilike":
+            self._add(
+                "info",
+                f"ILIKE on {where} cannot use a B-tree index",
+                f"B-tree indexes are case-sensitive. Index lower({column}) and compare "
+                f"lower({column}) LIKE lower(?), or use a pg_trgm GIN index.",
+            )
+        elif reason == "not_null":
+            self._add(
+                "info",
+                f"{where} IS NOT NULL is rarely helped by an index",
+                "It usually matches most rows, so the planner scans the table anyway. If "
+                "few rows are non-null, a partial index (… WHERE col IS NOT NULL) can help.",
+            )
+        else:
+            self._add(
+                "info",
+                f"Negated filter on {where} is not index-friendly",
+                f"`{column} != ?`, NOT IN and NOT LIKE match most rows, so the planner "
+                "reads the table anyway. Filter on the positive set instead, or add a "
+                "partial index if the excluded value is the common one.",
+            )
+
+    def _prefix_note(self, table: str, column: str, preds: list[predmod.Predicate]) -> None:
+        prefix = [
+            p
+            for p in preds
+            if p.op == "like" and p.pattern is not None and not predmod.blocked_reason(p)
+        ]
+        if not prefix:
+            return
+        if self.vendor == "postgresql":
+            name = re.sub(r"\W+", "_", f"{table}_{column}_prefix_idx")
+            self._add(
+                "info",
+                f"Prefix LIKE on {table}.{column} needs text_pattern_ops",
+                "LIKE 'abc%' can use a B-tree only if the database uses the C collation or "
+                f"the index has an operator class: CREATE INDEX {name} ON {table} "
+                f"({column} text_pattern_ops);",
+            )
+        elif self.vendor == "sqlite":
+            self._add(
+                "info",
+                f"Prefix LIKE on {table}.{column} and SQLite collation",
+                "SQLite's LIKE is case-insensitive, so a plain index is used only if it is "
+                f"declared COLLATE NOCASE (or PRAGMA case_sensitive_like=ON): "
+                f"CREATE INDEX ... ON {table} ({column} COLLATE NOCASE);",
+            )
 
     def result(self, tree: PlanNode) -> Analysis:
         return Analysis(tree, self.findings, self.indexes)
+
+
+def _text_search_alternative(vendor: str, table: str, column: str, p: predmod.Predicate) -> str:
+    target = p.expr if p.wrapped else column
+    if vendor == "postgresql":
+        name = re.sub(r"\W+", "_", f"{table}_{column}_trgm_idx")
+        return (
+            "Alternative (not a drop-in; adds write overhead and needs the extension): "
+            f"CREATE EXTENSION IF NOT EXISTS pg_trgm; "
+            f"CREATE INDEX {name} ON {table} USING gin ({target} gin_trgm_ops); "
+            "pg_trgm serves LIKE/ILIKE '%…%'."
+        )
+    if vendor == "mysql":
+        return (
+            "Alternative (not a drop-in; word-based, not substring matching): "
+            f"ALTER TABLE {table} ADD FULLTEXT INDEX {table}_{column}_ft ({column}); then "
+            f"query with MATCH({column}) AGAINST ('term' IN BOOLEAN MODE)."
+        )
+    if vendor == "sqlite":
+        return (
+            "Alternative (not a drop-in; changes the query): an FTS5 table, e.g. "
+            f"CREATE VIRTUAL TABLE {table}_fts USING fts5({column}, content='{table}', "
+            "tokenize='trigram'); queried with MATCH. The trigram tokenizer (SQLite 3.34+) "
+            "also accelerates substring LIKE."
+        )
+    return "Consider a full-text or trigram index."  # pragma: no cover
+
+
+def _expression_index(vendor: str, table: str, p: predmod.Predicate) -> str:
+    expr = p.expr
+    name = re.sub(r"\W+", "_", f"{table}_{p.column}_expr_idx").strip("_")
+    if vendor == "mysql":
+        return f"CREATE INDEX {name} ON {table} (({expr}));  -- MySQL 8.0.13+"
+    return f"CREATE INDEX {name} ON {table} ({expr});"
 
 
 _SIMPLE_IDENT = re.compile(r"[a-z_][a-z0-9_]*")
@@ -237,7 +391,7 @@ def _pg_columns(cond: str) -> list[str]:
     return [m.group(2) for m in _PG_COND_COL.finditer(cond or "") if not m.group(2).isdigit()]
 
 
-def analyze_postgres(plan: Any, sql: str = "") -> Analysis:
+def analyze_postgres(plan: Any, sql: str = "", params: Any = None) -> Analysis:
     """Analyse PostgreSQL ``EXPLAIN (FORMAT JSON)`` output (str, list or dict)."""
     if isinstance(plan, (bytes, str)):
         plan = json.loads(plan)
@@ -246,7 +400,7 @@ def analyze_postgres(plan: Any, sql: str = "") -> Analysis:
     if isinstance(plan, list):  # some drivers wrap twice: [[{...}]]
         plan = plan[0] if plan else {}
     root = plan.get("Plan", plan) if isinstance(plan, dict) else {}
-    col = _Collector("postgresql", sql)
+    col = _Collector("postgresql", sql, params)
     aliases: dict[str, str] = {}
     scanned: dict[str, tuple[PlanNode, str]] = {}  # alias -> (node, relation) for seq scans
 
@@ -379,13 +533,13 @@ _MYSQL_COL_RHS = re.compile(
 )
 
 
-def analyze_mysql(plan: Any, sql: str = "") -> Analysis:
+def analyze_mysql(plan: Any, sql: str = "", params: Any = None) -> Analysis:
     """Analyse MySQL ``EXPLAIN FORMAT=JSON`` output (str or dict)."""
     if isinstance(plan, (bytes, str)):
         plan = json.loads(plan)
     if isinstance(plan, list):
         plan = plan[0] if plan else {}
-    col = _Collector("mysql", sql)
+    col = _Collector("mysql", sql, params)
     block = plan.get("query_block", plan) if isinstance(plan, dict) else {}
 
     def table_node(t: dict[str, Any], *, joined: bool) -> PlanNode:
@@ -514,9 +668,9 @@ _SQLITE_SEARCH = re.compile(
 _SQLITE_NOT_TABLES = {"CONSTANT", "SUBQUERY"}
 
 
-def analyze_sqlite(rows: Sequence[Any], sql: str = "") -> Analysis:
+def analyze_sqlite(rows: Sequence[Any], sql: str = "", params: Any = None) -> Analysis:
     """Analyse ``EXPLAIN QUERY PLAN`` rows ``(id, parent, notused, detail)``."""
-    col = _Collector("sqlite", sql)
+    col = _Collector("sqlite", sql, params)
     aliases = sqlmod.table_aliases(sql) if sql else {}
     root = PlanNode(label="QUERY PLAN")
     nodes: dict[int, PlanNode] = {0: root}
@@ -585,12 +739,12 @@ def _sqlite_check(node: PlanNode, detail: str, aliases: dict[str, str], col: _Co
         )
 
 
-def analyze_plan(vendor: str, plan: Any, sql: str = "") -> Analysis:
+def analyze_plan(vendor: str, plan: Any, sql: str = "", params: Any = None) -> Analysis:
     """Dispatch on ``vendor`` (``postgresql`` / ``mysql`` / ``sqlite``)."""
     if vendor == "postgresql":
-        return analyze_postgres(plan, sql)
+        return analyze_postgres(plan, sql, params)
     if vendor == "mysql":
-        return analyze_mysql(plan, sql)
+        return analyze_mysql(plan, sql, params)
     if vendor == "sqlite":
-        return analyze_sqlite(plan, sql)
+        return analyze_sqlite(plan, sql, params)
     raise ValueError(f"Unsupported vendor for plan analysis: {vendor!r}")

@@ -44,7 +44,7 @@ classifiers = [
 dependencies = [
     "redline-core==0.1.0a1",
     "fastapi>=0.110,<1.0",
-    "sqlalchemy>=2.0,<3.0",
+    "sqlalchemy[asyncio]>=2.0,<3.0",
 ]
 
 [project.optional-dependencies]
