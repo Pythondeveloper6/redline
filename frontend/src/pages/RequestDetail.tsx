@@ -133,8 +133,8 @@ function ProfileTab({ trace }: { trace: Trace }) {
       <p>Profiles are opt-in because they add overhead. Re-run the request with <code>?_redline=profile</code> or send the header <code>X-Redline-Profile: 1</code>. It needs the <code>redline-core[profile]</code> extra.</p>
     </Empty></div>
   }
-  if (p.loading) return <Spinner />
   if (p.error) return <ErrorBox error={p.error} onRetry={p.reload} />
+  if (p.loading || !p.data) return <Spinner />
   return (
     <div>
       <div className="flex justify-end mb-2 -mt-1"><a className="btn" href={api.profileUrl(trace.id)} download={`redline-${trace.id}.speedscope.json`}><Icon d={I.down} size={12} />Download speedscope JSON</a></div>
