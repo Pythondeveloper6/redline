@@ -112,7 +112,21 @@ def test_disabled(client, latest):
     assert latest() is None
 
 
-def test_profile_opt_in(client, latest, rt):
+@pytest.fixture
+def fine_profiler(monkeypatch):
+    """Sample every 0.1 ms: the stock 1 ms interval can miss a ~1 ms request entirely, in
+    which case the profiler (rightly) records nothing and the test would be flaky."""
+    from redline_core.profiler import RequestProfiler
+
+    original = RequestProfiler.__init__
+    monkeypatch.setattr(
+        RequestProfiler,
+        "__init__",
+        lambda self, interval=0.0001, async_mode="enabled": original(self, interval, async_mode),
+    )
+
+
+def test_profile_opt_in(client, latest, rt, fine_profiler):
     client.get("/plain/?_redline=profile")
     trace = latest()
     assert rt.store.has_profile(trace.id)
@@ -120,7 +134,7 @@ def test_profile_opt_in(client, latest, rt):
     assert profile["profiles"]
 
 
-def test_profile_header(client, latest, rt):
+def test_profile_header(client, latest, rt, fine_profiler):
     client.get("/plain/", HTTP_X_REDLINE_PROFILE="1")
     assert rt.store.has_profile(latest().id)
 
