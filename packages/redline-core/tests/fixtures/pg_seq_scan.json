@@ -1,0 +1,78 @@
+[
+  {
+    "Plan": {
+      "Node Type": "Sort",
+      "Parallel Aware": false,
+      "Startup Cost": 2041.5,
+      "Total Cost": 2041.75,
+      "Plan Rows": 98,
+      "Plan Width": 40,
+      "Actual Startup Time": 21.3,
+      "Actual Total Time": 21.4,
+      "Actual Rows": 97,
+      "Actual Loops": 1,
+      "Sort Key": ["o.created_at DESC"],
+      "Sort Method": "external merge",
+      "Sort Space Type": "Disk",
+      "Sort Space Used": 4096,
+      "Plans": [
+        {
+          "Node Type": "Hash Join",
+          "Parent Relationship": "Outer",
+          "Join Type": "Inner",
+          "Startup Cost": 30.0,
+          "Total Cost": 2038.2,
+          "Plan Rows": 98,
+          "Plan Width": 40,
+          "Actual Total Time": 20.9,
+          "Actual Rows": 97,
+          "Actual Loops": 1,
+          "Hash Cond": "(i.order_id = o.id)",
+          "Plans": [
+            {
+              "Node Type": "Seq Scan",
+              "Parent Relationship": "Outer",
+              "Relation Name": "shop_orderitem",
+              "Alias": "i",
+              "Startup Cost": 0.0,
+              "Total Cost": 1693.0,
+              "Plan Rows": 100000,
+              "Plan Width": 16,
+              "Actual Total Time": 9.1,
+              "Actual Rows": 100000,
+              "Actual Loops": 1
+            },
+            {
+              "Node Type": "Hash",
+              "Parent Relationship": "Inner",
+              "Startup Cost": 29.0,
+              "Total Cost": 29.0,
+              "Plan Rows": 1,
+              "Plan Width": 24,
+              "Hash Batches": 1,
+              "Plans": [
+                {
+                  "Node Type": "Seq Scan",
+                  "Parent Relationship": "Outer",
+                  "Relation Name": "shop_order",
+                  "Alias": "o",
+                  "Startup Cost": 0.0,
+                  "Total Cost": 1829.0,
+                  "Plan Rows": 1,
+                  "Plan Width": 24,
+                  "Actual Total Time": 8.2,
+                  "Actual Rows": 1,
+                  "Actual Loops": 1,
+                  "Filter": "((customer_id = 42) AND ((status)::text = 'paid'::text))",
+                  "Rows Removed by Filter": 99999
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "Planning Time": 0.2,
+    "Execution Time": 21.6
+  }
+]
