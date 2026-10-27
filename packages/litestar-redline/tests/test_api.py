@@ -8,7 +8,7 @@ import pytest
 from litestar import Litestar, get
 from litestar.exceptions import NotAuthorizedException
 
-from .conftest import client
+from .conftest import allow_all, client
 
 
 def basic(user="admin", password="pw"):
@@ -139,7 +139,7 @@ def test_warning_logged_without_guards(make_env, caplog):
 
     with caplog.at_level(logging.WARNING, logger="redline"):
         make_env(guards=None)
-    assert "no guards" in caplog.text
+    assert "with access='local'" in caplog.text
 
 
 def test_basic_auth_guard(make_env):
@@ -329,7 +329,7 @@ def test_disabled_installs_no_listeners_and_no_middleware(tmp_path):
     plugin = RedlinePlugin(
         engine=engine,
         settings={"enabled": False, "storage_path": str(tmp_path / "r.db")},
-        guards=[],
+        guards=[allow_all],
     )
     app = Litestar(route_handlers=[q], plugins=[plugin])
     try:

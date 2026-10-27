@@ -69,10 +69,12 @@ def basic(user="ann", password="pw"):
 
 
 def test_loopback_and_host_helpers():
-    for addr in ("127.0.0.1", "127.9.9.9", "::1", "::ffff:127.0.0.1", "[::1]:80", None, ""):
+    for addr in ("127.0.0.1", "127.9.9.9", "::1", "::ffff:127.0.0.1", "[::1]:80"):
         assert is_loopback(addr), addr
-    for addr in ("10.0.0.1", "2001:db8::1", "evil.com", "0.0.0.0", "::ffff:8.8.8.8"):
+    for addr in ("10.0.0.1", "2001:db8::1", "evil.com", "0.0.0.0", "::ffff:8.8.8.8", None, ""):
         assert not is_loopback(addr), addr
+    # a unix-socket peer counts only when trusted (trust_unix_socket)
+    assert is_loopback(None, unix_socket=True) and is_loopback("", unix_socket=True)
     for host in ("localhost", "LOCALHOST:1", "a.localhost", "127.0.0.1:9", "[::1]", None, ""):
         assert is_local_host(host), host
     for host in ("evil.example", "localhost.evil.com", "10.0.0.1", "[2001:db8::1]:80"):
@@ -115,7 +117,7 @@ def test_password_hashing():
 
 @pytest.mark.parametrize("ip", ["127.0.0.1", "::1", "::ffff:127.0.0.1", None, "fe80::1%lo0"])
 def test_local_allows_loopback(ip):
-    g = gate()
+    g = gate(trust_unix_socket=ip is None)
     d = g.check(req(ip=ip))
     if ip == "fe80::1%lo0":
         assert not d.allowed  # link-local is not loopback

@@ -13,7 +13,7 @@ Django-only keys:
 
 ``PERMISSION``
     Who may open the UI and the API: a callable ``(request) -> bool`` or its dotted path.
-    Default: active staff users (:func:`default_permission`).
+    Default: active superusers (:func:`default_permission`; staff before 0.2).
 ``STORE``
     Where traces go (the counterpart of FastAPI's ``install(store=...)``): a
     :class:`~redline_core.storage.Store` instance, a callable (or class) taking the core
@@ -59,7 +59,18 @@ Permission = Callable[[HttpRequest], bool]
 
 
 def default_permission(request: HttpRequest) -> bool:
-    """Active staff users only (the default ``PERMISSION``)."""
+    """Active superusers only (the default ``PERMISSION``; before 0.2 it was staff).
+
+    Staff status is often handed out for the admin of a single model; Redline shows every
+    captured request (headers, SQL, bodies) of every user, so the default asks for more.
+    Use ``REDLINE = {"PERMISSION": "django_redline.conf.staff_permission"}`` (or your own
+    callable) for the old behaviour."""
+    user = getattr(request, "user", None)
+    return bool(user is not None and user.is_active and user.is_superuser)
+
+
+def staff_permission(request: HttpRequest) -> bool:
+    """Active staff users (the default ``PERMISSION`` before 0.2)."""
     user = getattr(request, "user", None)
     return bool(user is not None and user.is_active and user.is_staff)
 
@@ -89,8 +100,8 @@ def get_resolved_config() -> ResolvedConfig:
 
     Adapter defaults (below a preset, the config file and ``REDLINE_*`` variables):
     ``sample_rate`` 0.1 without ``DEBUG``, ``storage_path``/``project_root`` from
-    ``BASE_DIR``, and ``access="framework"`` (the ``PERMISSION`` check, default staff
-    users) unless ``ACCESS`` is set explicitly.
+    ``BASE_DIR``, and ``access="framework"`` (the ``PERMISSION`` check, default active
+    superusers) unless ``ACCESS`` is set explicitly.
 
     Raises :class:`~django.core.exceptions.ImproperlyConfigured` for unknown keys or bad
     values (the core's message, including its "did you mean" hint).

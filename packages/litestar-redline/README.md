@@ -23,7 +23,8 @@ engine = create_async_engine("sqlite+aiosqlite:///app.db")
 
 app = Litestar(
     route_handlers=[...],
-    plugins=[RedlinePlugin(engine=engine)],   # UI at http://localhost:8000/_redline/
+    # access="local": localhost only (unset, Redline answers 404 outside debug mode)
+    plugins=[RedlinePlugin(engine=engine, settings={"access": "local"})],  # UI at http://localhost:8000/_redline/
 )
 ```
 
@@ -142,7 +143,7 @@ exactly as in the FastAPI adapter.
 
 The UI exposes your SQL, request bodies and EXPLAIN, so treat it like an admin tool.
 
-**Default.** With no `guards`, the `access` setting decides (default `local`): only loopback clients (127.0.0.0/8, `::1`, unix sockets) that
+**Default.** With no `guards`, the `access` setting decides (default `local`, served only in debug mode until you set `access`): only loopback clients (127.0.0.0/8, `::1`; unix sockets only with `trust_unix_socket`) that
 address the server by a loopback name (`Host: localhost`, `127.0.0.1`, `[::1]`, any port;
 this blocks DNS rebinding) are served, and a warning is logged at startup. Refusals are
 JSON `{"error": {"code": "forbidden" | "unauthorized" | ..., "message"}}`. Use
@@ -164,7 +165,7 @@ def require_admin(connection, _handler):
 RedlinePlugin(engine=engine, guards=[require_admin])
 ```
 
-`guards=[]` leaves it open on purpose. Don't, outside a private network.
+`guards=[]` is the same as passing none.
 
 **CSRF.** The mutating endpoints (`DELETE` traces, `POST explain`) reject browser requests
 whose `Origin` does not match the request host, `Origin: null`, and

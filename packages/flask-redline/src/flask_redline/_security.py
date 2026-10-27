@@ -60,6 +60,23 @@ def is_local_host_header(header: str | None, extra: Iterable[str] = ()) -> bool:
     return is_local_host(header, extra)
 
 
+def environ_info(environ: dict[str, Any]) -> RequestInfo:
+    """A :class:`RequestInfo` from a WSGI environ (for the profile-flag check)."""
+    headers = [
+        (key[5:].replace("_", "-"), value)
+        for key, value in environ.items()
+        if key.startswith("HTTP_") and isinstance(value, str)
+    ]
+    return RequestInfo.build(
+        method=environ.get("REQUEST_METHOD", "GET"),
+        path="",
+        client_ip=environ.get("REMOTE_ADDR"),
+        headers=headers,
+        scheme=environ.get("wsgi.url_scheme", "http"),
+        mount=environ.get("SCRIPT_NAME", "") or "/",
+    )
+
+
 def request_info(request: Any, mount: str) -> RequestInfo:
     """The framework-neutral description of a Flask ``request`` under ``mount``."""
     full = request.path  # without the script root

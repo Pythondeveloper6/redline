@@ -28,7 +28,8 @@ engine = create_async_engine("sqlite+aiosqlite:///app.db")
 
 app = Litestar(
     route_handlers=[...],
-    plugins=[RedlinePlugin(engine=engine)],   # UI at http://localhost:8000/_redline/
+    # access="local": localhost only (unset, Redline answers 404 outside debug mode)
+    plugins=[RedlinePlugin(engine=engine, settings={"access": "local"})],  # UI at http://localhost:8000/_redline/
 )
 ```
 
@@ -115,7 +116,8 @@ RedlinePlugin(engine={"main": main_engine, "analytics": analytics_engine})
   is not timed separately.
 - Sync handlers (`sync_to_thread=True`) are attributed to the right request.
 - Your own spans: `with redline_core.span("pricing.compute"): ...`.
-- `X-Redline-Run: <id>;step=<n>` becomes tags (used by the [load tester](load-testing.md)).
+- `X-Redline-Run: <id>;step=<n>` becomes tags (used by the [load tester](load-testing.md)),
+  for a run that is running in the store.
 
 Requests that match no route (404) and `405 Method Not Allowed` never reach a route-level
 middleware, so Litestar does not run Redline for them.
@@ -133,7 +135,9 @@ Other clients (`requests`), Redis and psycopg are covered in [Integrations](inte
 ## Profiling
 
 Flamegraphs are opt-in per request: `?_redline=profile` or the header
-`X-Redline-Profile: 1`. See [Flamegraphs](flamegraphs.md).
+`X-Redline-Profile: 1`, honoured with `Litestar(debug=True)` or from a request with valid
+Redline credentials (see [Forcing capture](security.md#forcing-capture)). See
+[Flamegraphs](flamegraphs.md).
 
 ## Fix suggestions
 
@@ -170,9 +174,13 @@ and closes after five minutes; the UI reconnects with the last `seq`.
 The UI exposes your SQL, request bodies and EXPLAIN, so treat it like an admin tool.
 
 **Default.** With no `guards`, the [`access` policy](access-control.md) decides, and the
-default is `local`: only loopback clients (`127.0.0.0/8`, `::1`, unix sockets) that address
-the server by a loopback name (`Host: localhost`, `127.0.0.1`, `[::1]`, any port; this
-blocks DNS rebinding) are served, and a warning is logged at startup. Refusals are JSON:
+default is `local`: only loopback clients (`127.0.0.0/8`, `::1`; a unix-socket peer only
+with `trust_unix_socket`) that address the server by a loopback name (`Host: localhost`,
+`127.0.0.1`, `[::1]`, any port; this blocks DNS rebinding) are served, and a warning is
+logged at startup. **While `access` is not set** (code, `redline.toml`, `REDLINE_ACCESS`),
+that default applies only with `Litestar(debug=True)`; otherwise every Redline URL answers
+`404` and an error is logged. Set `settings={"access": "local"}` on a development machine
+or `"token"` on a server. Refusals are JSON:
 `{"error": {"code": "forbidden" | "unauthorized" | ..., "message": "..."}}`. Add other
 host names with the `allowed_hosts` setting (or `guards=[loopback_guard(allowed_hosts=["devbox"])]`).
 
@@ -191,7 +199,7 @@ def require_admin(connection, _handler):
 RedlinePlugin(engine=engine, guards=[require_admin])
 ```
 
-`guards=[]` leaves the UI open on purpose. Do not do that outside a private network.
+`guards=[]` is the same as not passing any (since 0.2: it used to leave the UI open).
 
 For tokens, basic auth, IP allow-lists, trusted proxies and read-only mode, use the
 `access` family of settings. They behave the same on every framework: see

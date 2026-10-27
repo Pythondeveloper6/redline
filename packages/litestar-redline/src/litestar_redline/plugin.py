@@ -23,7 +23,7 @@ from redline_core.load.control import run_hooks
 from redline_core.storage import SQLiteStore, Store
 
 from ._middleware import EXCEPTION_KEY, RedlineMiddleware
-from ._security import redline_guard
+from ._security import redline_guard, scope_info
 from ._sqlalchemy import (
     EngineLike,
     alias_for,
@@ -81,9 +81,10 @@ class RedlinePlugin(InitPluginProtocol):
     ``guards``
         Litestar guards protecting the UI and API, e.g. ``[require_admin]``; giving them
         implies ``access="framework"`` unless the ``access`` setting is set explicitly.
-        When omitted, the ``access`` setting decides (default ``local``: loopback clients
-        addressing ``localhost``/``127.0.0.1``/``[::1]``); ``[]`` deliberately leaves it
-        open. ``HTTPException`` raised by guards is answered in the API's error shape.
+        When omitted (or ``[]``), the ``access`` setting decides; when that is not set
+        either, Redline answers 404 unless the app is in debug mode (then ``local``:
+        loopback clients addressing ``localhost``/``127.0.0.1``/``[::1]``).
+        ``HTTPException`` raised by guards is answered in the API's error shape.
     ``store``
         A custom ``Store``; default is the SQLite file at ``storage_path``.
 
@@ -99,7 +100,9 @@ class RedlinePlugin(InitPluginProtocol):
         guards: Sequence[Any] | None = None,
         store: Store | None = None,
     ) -> None:
-        self.config = resolve_settings(settings, native_hook=guards is not None)
+        # An empty list is no hook: the normal default rules apply, not "framework" with
+        # nothing to check.
+        self.config = resolve_settings(settings, native_hook=bool(guards))
         cfg = self.config.settings
         path = path if path is not None else (cfg.mount_path or "/_redline")
         path = "/" + path.strip("/")
@@ -110,7 +113,7 @@ class RedlinePlugin(InitPluginProtocol):
             cfg = cfg.replace(ignore_paths=[*cfg.ignore_paths, own])
         self.path = path
         self.settings = cfg
-        self.access = Access(cfg)
+        self.access = Access(cfg, access_explicit=self.config.access_explicit)
         self.guards = guards
         self._engine_arg = engine
         self.engines: dict[str, EngineLike] = {}
@@ -175,18 +178,22 @@ class RedlinePlugin(InitPluginProtocol):
             self.add_engine(eng, alias)
 
         guards = [redline_guard(self.access, self.path), *(self.guards or [])]
-        if self.settings.access == "local":
-            logger.warning(
-                "Redline is mounted at %s with no guards (access='local'): only loopback "
-                "clients are allowed. Set access='token' or 'basic', or pass "
-                "RedlinePlugin(guards=[...]) before exposing it.",
-                self.path,
-            )
+        self.access.debug = lambda: bool(app_config.debug)
+        self.access.log_startup(self.path, "pass RedlinePlugin(guards=[...])")
         app_config.route_handlers.append(build_router(self, self.path, guards))
 
         if self.settings.enabled:  # disabled: no middleware and no SQLAlchemy listeners
+            access = self.access
+
+            def force_ok(scope: Any) -> bool:
+                debug = bool(getattr(scope.get("app"), "debug", False))
+                return access.may_force(scope_info(scope), debug=debug)
+
             app_config.middleware.insert(
-                0, DefineMiddleware(RedlineMiddleware, recorder=self.recorder, mount=self.path)
+                0,
+                DefineMiddleware(
+                    RedlineMiddleware, recorder=self.recorder, mount=self.path, force_ok=force_ok
+                ),
             )
             app_config.after_exception.append(self._after_exception)
         app_config.on_shutdown.append(self._on_shutdown)

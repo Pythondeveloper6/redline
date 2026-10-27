@@ -10,7 +10,7 @@ from flask import Blueprint, Response, request
 from werkzeug.exceptions import HTTPException
 
 from redline_core import stream, ui
-from redline_core.api import RawResponse
+from redline_core.api import RawResponse, own_base_url
 from redline_core.storage import FilterError
 
 from ._security import request_info
@@ -159,7 +159,11 @@ def build_blueprint(runtime: Any, url_prefix: str) -> Blueprint:
             params[key] = values[0] if len(values) == 1 else values
         body = request.get_data() if request.method == "POST" else None
         # PUT/PATCH reach the core, which answers 405 `method_not_allowed`.
-        base_url = request.root_url.rstrip("/")  # the app's own origin + script root
+        # the server's own listening port (SERVER_PORT), never the Host header
+        environ = request.environ
+        base_url = own_base_url(
+            environ.get("wsgi.url_scheme"), environ.get("SERVER_PORT"), request.script_root
+        )
         return _respond(
             runtime.api.dispatch(request.method, f"api/{path}", params, body, base_url=base_url)
         )

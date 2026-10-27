@@ -14,7 +14,8 @@ from fastapi_redline import install
 app = FastAPI()
 engine = create_async_engine("sqlite+aiosqlite:///app.db")
 
-install(app, engine=engine)      # UI at http://localhost:8000/_redline/
+# access="local": localhost only (unset, Redline answers 404 outside debug mode)
+install(app, engine=engine, settings={"access": "local"})  # UI at http://localhost:8000/_redline/
 ```
 
 Requirements: Python 3.10+, FastAPI 0.110+ (below 1.0), SQLAlchemy 2.x, and
@@ -45,7 +46,7 @@ install(
 | `engine` | `Engine`, `AsyncEngine`, list, or `{alias: engine}` | `None` | Engines to record SQL from and run EXPLAIN on. See [Engines](#engines) |
 | `settings` | `dict` or `redline_core.Settings` | `None` (defaults) | Any [setting](settings.md); keys are case-insensitive; unknown keys raise `SettingsError` |
 | `prefix` | `str` or `None` | `None` | Where the UI and API are mounted. `None` means the `mount_path` setting, then `"/_redline"`. Must be a sub-path; `"/"` raises `ValueError` |
-| `dependencies` | sequence of callables or `Depends(...)` | `None` | Protects the UI and API; passing them implies `access = "framework"`. `None` means the `access` policy decides (default `local`: **loopback only**, plus a warning). See [Access control](#access-control) |
+| `dependencies` | sequence of callables or `Depends(...)` | `None` | Protects the UI and API; a non-empty list implies `access = "framework"`. `None` or `[]` means the `access` policy decides (default `local`: **loopback only**, and only with `app.debug` until `access` is set). See [Access control](#access-control) |
 | `models` | declarative `Base`, `registry`, mapped class, or an iterable of those | `None` | Where the fix suggester looks for relationships. Default: every registry SQLAlchemy knows |
 | `store` | a `Store` | `None` | Replace the SQLite store. See [Extending](extending.md#the-store-protocol) |
 
@@ -166,7 +167,8 @@ buffers streaming responses.
 | Response body | A size-capped copy. A stream is never buffered beyond `max_body_bytes` |
 | Unhandled exceptions | Recorded with the traceback, then **re-raised untouched** |
 | Client cancellation | Recorded with status 499 when the client disconnects mid-request |
-| `X-Redline-Run` | becomes the `run_id` and `step` tags |
+| `X-Redline-Run` | becomes the `run_id` and `step` tags (only for a run that is running in the store) |
+| `?_redline=profile` / `X-Redline-Profile: 1` | runs the profiler, only with `app.debug` or valid Redline credentials (see [Forcing capture](security.md#forcing-capture)) |
 
 What it does **not** do:
 
@@ -225,13 +227,22 @@ instrumented.
 
     Treat it as an admin tool. Decide who can reach it before you deploy.
 
-### The default: loopback only
+### The default: loopback only, in debug mode
 
-With no `dependencies`, the `access` setting decides, and its default `local` allows a
-request only when **both** of these hold:
+With no `dependencies`, the `access` setting decides. **While you have not set it**
+(in code, `redline.toml` or `REDLINE_ACCESS`), Redline serves its `local` default only when
+`app.debug` is on (`FastAPI(debug=True)`); otherwise every Redline URL answers `404` and an
+error is logged at startup. Most apps run under plain `uvicorn` without `debug`, so set it:
 
-- the **client** is loopback: `127.0.0.0/8`, `::1`, IPv4-mapped IPv6 loopback, unix
-  sockets, or Starlette's `TestClient`;
+```python
+install(app, engine=engine, settings={"access": "local"})      # your laptop
+install(app, engine=engine, settings={"access": "token", "token": "..."})  # a server
+```
+
+`local` allows a request only when **both** of these hold:
+
+- the **client** is loopback: `127.0.0.0/8`, `::1`, IPv4-mapped IPv6 loopback, or
+  Starlette's `TestClient` (a unix-socket peer only with `trust_unix_socket = true`);
 - the **`Host` header** names loopback: `localhost`, any `*.localhost`, a `127.x.x.x`
   address or `[::1]`, with any port. This is what stops **DNS rebinding**: a malicious
   page that points its own domain at `127.0.0.1` reaches your server, but its requests
@@ -241,8 +252,9 @@ Anyone else gets `403` with `{"error": {"code": "forbidden", "message": ...}}`, 
 startup warning is logged:
 
 ```text
-Redline is mounted at /_redline with no auth dependency: only loopback clients are allowed.
-Pass install(app, dependencies=[...]) before exposing it.
+Redline is mounted at /_redline with access='local': only loopback clients addressing
+localhost are allowed. Set access='token' or 'basic', or pass install(app, dependencies=[...]),
+before exposing it.
 ```
 
 !!! warning "Behind a reverse proxy, 'loopback' may be everyone"
@@ -260,9 +272,7 @@ install(app, engine=engine, settings={"allowed_hosts": ["devbox"]})
 ```
 
 (`loopback_guard(allowed_hosts=[...])` is still exported for use as an explicit
-dependency.) The `local` policy treats Starlette's `TestClient` as loopback, but
-`POST api/runs` from a `TestClient` targets `http://testserver`, which is not a loopback
-name: set `base_url` if a test starts a load run.
+dependency.) The `local` policy treats Starlette's `TestClient` as loopback.
 
 ### Your own dependency
 
@@ -303,8 +313,13 @@ name: set `base_url` if a test starts a load run.
     install(app, engine=engine, dependencies=[only_staff])   # wrapped in Depends for you
     ```
 
-`dependencies=[]` leaves the UI **open on purpose** (it implies `access = "framework"` and
-nothing checks). Do not do that outside a private network. For tokens, basic auth,
+Refuse by **raising** `HTTPException` (the FastAPI way). A dependency that *returns*
+`False` (`return user.is_admin`) is refused with `403` too, since FastAPI itself would
+ignore the return value and let the request in; `None` and other values pass.
+
+`dependencies=[]` is the same as not passing any (since 0.2: it used to leave the UI open).
+To open it to everyone on a private network, use a dependency that returns nothing, or
+`access = "open"` with `REDLINE_ALLOW_OPEN=1`. For tokens, basic auth,
 `allowed_ips`, `read_only` and the rest, use the [`access` settings](access-control.md);
 with an explicit policy other than `framework` your dependencies still run, after the gate.
 
