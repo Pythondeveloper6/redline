@@ -47,7 +47,7 @@ from ..histogram import Histogram
 from .analysis import StepResult, analyze
 from .profile import Profile, StepPlan, parse_profile
 from .scenario import Scenario, ScenarioError, load_scenario, validate_base_url
-from .sinks import MultiSink, RunMeta, RunSink
+from .sinks import MultiSink, RunMeta, RunSink, redact_config
 
 __all__ = ["RunResult", "default_workers", "run"]
 
@@ -188,7 +188,7 @@ def run(
     n_workers = max(1, min(n_workers, math.ceil(prof.max_rps)))
     run_id = run_id or uuid.uuid4().hex
     run_name = name or sc.name
-    config = sc.to_dict()
+    config = redact_config(sc.to_dict())  # what sinks/results keep: never raw secrets
     config["workers"] = n_workers
     created_at = time.time()
     meta = RunMeta(id=run_id, name=run_name, created_at=created_at, config=config)

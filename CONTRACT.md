@@ -63,7 +63,7 @@ Span `data` by kind:
 |---|---|
 | sql | `sql` (raw, params substituted NOT done), `params` (list, redacted, JSON-safe reprs), `fingerprint` (str), `db_alias` (str), `vendor` ("postgresql"\|"mysql"\|"sqlite"\|"other"), `rows` (int\|None), `many` (bool), `explainable` (bool: SELECT/WITH…SELECT only) |
 | cache | `op` (get/set/delete/get_many/...), `key`, `hit` (bool\|None), `backend` |
-| http_out | `method`, `url` (query string redacted), `status` |
+| http_out | `method`, `url` (query string redacted; a userinfo password becomes `%5Bredacted%5D`, see §6), `status` |
 | template | `template` (name) |
 | middleware / view / custom | anything JSON-safe |
 
@@ -238,6 +238,18 @@ PlanNode `flags` are `seq_scan`, `full_scan`, `sort_spill`, `hash_spill`, `neste
 
 Adapter-only settings: Django `REDLINE["PERMISSION"]` (callable or dotted path) and `REDLINE["STORE"]` (a `Store` instance, a callable/class taking the core `Settings` and returning one, or the dotted path of either; mirrors FastAPI's `install(store=...)`). FastAPI's `install(dependencies=None)` uses `local_only`: loopback client **and** a loopback `Host` (`localhost`, `*.localhost`, `127.0.0.0/8`, `[::1]`, any port), against DNS rebinding; `loopback_guard(allowed_hosts=[...])` builds a variant. With `enabled=False` FastAPI adds no middleware and no SQLAlchemy listeners.
 
+**Redaction rules** (`redline_core.redact.Redactor`, mask `"[redacted]"`):
+
+- `url(u)`: secret query keys masked; `scheme://user:password@host` → `user:%5Bredacted%5D@host` (the mask is
+  percent-encoded so the URL still parses); a URL with nothing to mask is returned unchanged.
+- `text(t)` (log messages, exception locals): URL-looking tokens (`scheme://…`) go through `url()` first; then every
+  `key<sep>value` pair (`=` or `:`, key optionally quoted) whose key matches `redact_keys` has its value masked. A
+  quoted value is masked inside its quotes; an unquoted one (optionally `Bearer|Basic|Token|Digest ` + token) is
+  masked up to the next whitespace, `,` `;` `&` `)` `}` `]` or quote. A non-secret key's unquoted value stops at
+  `= ? & :` as well and the scan resumes *at* that value, so `url=https://h/?api_key=x`, `Cookie: sessionid=x`,
+  `redirect: /cb?token=x` and `user=bob:password=x` all mask `x`. The whole-word `auth` rule applies
+  (`author=bob`, `authenticated=true` stay visible).
+
 `Settings.from_mapping(dict)` matches keys case-insensitively (`SAMPLE_RATE` works). Unknown keys raise `SettingsError` with a "did you mean" hint. `ignore_paths` entries that start with `^` are regular expressions; all other entries are path prefixes. Adapters append their own mount prefix.
 
 ## 7. UI
@@ -283,8 +295,12 @@ Issue.extra: dict[str, Any] = {}            # kind-specific facts (rows, resolve
 ```
 
 `Trace.error` (when `capture_locals` is on) gains `"frames": [{"file", "line", "function", "code", "locals": {name: repr}}]`:
-project frames only (innermost last, at most 20), at most 30 locals per frame, each `repr` capped at 300 chars,
-names matching `redact_keys` replaced by `"[redacted]"`.
+project frames only (innermost last, at most 20), at most 30 locals per frame, each `repr` capped at 300 chars.
+Redaction of locals: a local whose *name* matches `redact_keys` is `"[redacted]"` whatever its value; otherwise
+dicts/lists/tuples are walked (depth 4, 50 items per container, the rest shown as `…`) and values under secret
+keys masked; `str`/`bytes` values that parse as JSON are masked like a JSON body, all other text goes through
+`Redactor.text`; finally the whole `repr` goes through `Redactor.text` (e.g. an `HttpRequest` repr with
+`?token=…`).
 
 Span `data` for the new kinds and new keys:
 
@@ -335,7 +351,7 @@ is set and the title reads `N+1: 24 queries on shop_customer from resolver order
 | large_result_rows / unbounded_rows | int | 1_000 / 200 |
 | slow_serializer_ms / long_transaction_ms / slow_external_ms | float | 50 / 200 / 500 |
 | capture_logs | bool | True |
-| log_level | str | "INFO" (minimum level captured into a trace) |
+| log_level | str | "INFO" (minimum level captured into a trace; capture follows the app's logger levels – see below) |
 | max_logs_per_trace | int | 200 |
 | capture_locals | bool | True (redacted by `redact_keys`) |
 | editor | str | "vscode" – one of vscode, cursor, pycharm, idea, sublime, none, or a template containing `{file}` and `{line}` (`{file}` is absolute) |
@@ -344,6 +360,14 @@ is set and the title reads `N+1: 24 queries on shop_customer from resolver order
 | release | str \| None | None → auto: env `REDLINE_RELEASE`, else `GIT_SHA`/`SOURCE_VERSION`/`RENDER_GIT_COMMIT`/`HEROKU_SLUG_COMMIT`, else `git rev-parse --short HEAD` in `project_root` (once, 1 s timeout), else None |
 | history_retention_days | int \| None | 90 (rollups/issue index/runs; independent of `max_age_days`) |
 | load_from_ui | bool | False – allow `POST api/runs` |
+
+Log level rule: the capture handler sits on the root logger, so it only sees records the app's loggers let
+through. When the app configured logging (the root logger has a handler of its own when Redline installs) levels
+are never touched. When logging is unconfigured (no root handler) and the root level (Python's default WARNING) is
+above `log_level`, the root level is lowered to `log_level` (restored when the handler is uninstalled); console
+output stays exactly as before: records below WARNING have no handler that prints them, and WARNING and above
+still reach `logging.lastResort` (stderr) because the capture handler stands in for it when no other handler is on
+the record's path.
 
 ## 11. Storage additions
 
@@ -553,12 +577,17 @@ adding `X-Redline-Replay-Of: <trace id>`; the recorder turns that header into th
 - **Open model**: arrivals are scheduled at the target rate independent of responses (fixed interval or `poisson: true`); latency is measured from the *scheduled* time (coordinated-omission corrected), with a per-worker in-flight cap (beyond it: counted `dropped`). Workers are separate **processes** (asyncio + httpx each) sending per-second histograms to the parent.
 - Every request carries `X-Redline-Run: <run_id>;step=<n>` so app-side traces are tagged; the run (steps, histograms) is written to the same store the app uses (`--store`, default `.redline/redline.db`) and appears in the UI.
 - Knee: the first step whose p95 > 2× the first step's, or error rate > 1 %, or achieved < 90 % of target. `summary.knee_step`, `summary.max_ok_rps`.
+- Run config redaction: the config kept in `runs.config` (store, `GET api/runs`, JSON results, `RunResult.config`)
+  is `load.sinks.redact_config(config)`: scenario and per-request header values whose name is in `redact_headers`
+  or matches `redact_keys`, secret keys of `json`/form `body`, and secrets in `base_url`/`path`/request `name` are
+  masked. Only the background process sees raw values, through `runs/<id>.scenario.json`, written with mode 0600
+  and removed (with the pid/stop files) when the run ends.
 - Scenario generators: OpenAPI (FastAPI/Litestar/Ninja), captured traffic (store; top endpoints, concrete paths, no bodies with redacted values), Django URLconf (`manage.py redline_scenario`), Flask `url_map` (`flask redline scenario`).
 
 ## 14. Integrations (`redline_core.contrib.*`, lazy: never imported by `redline_core/__init__`)
 
 - `contrib.sqlalchemy`: `instrument_engine(engine)` (moved from fastapi-redline, which re-exports it), `SQLAlchemyFixSuggester`, `explain_executor_factory`, plus `transaction` spans (begin/commit/rollback events) and `pool_wait` spans (checkout time ≥ 1 ms).
-- `contrib.httpx` (moved), `contrib.requests`, `contrib.redis` (redis-py sync + asyncio → `cache` spans with `op` = command, `key`, `hit` for GET-like commands), `contrib.asyncpg`, `contrib.psycopg` (psycopg 3 without an ORM → `sql` spans).
+- `contrib.httpx` (moved), `contrib.requests`, `contrib.redis` (redis-py sync + asyncio → `cache` spans with `op` = command, `key`, `hit` for GET-like commands; credential-carrying commands – `AUTH`, `HELLO`, `CONFIG [SET]`, `MIGRATE`, `ACL [SETUSER]` – get `key` None and name = the command, e.g. `auth`), `contrib.asyncpg`, `contrib.psycopg` (psycopg 3 without an ORM → `sql` spans).
 - `contrib.strawberry` (`RedlineExtension`) and `contrib.graphene` (`RedlineMiddleware`) → `resolver` spans.
 - `contrib.asgi`: async helpers shared by ASGI adapters (event-loop lag monitor, Server-Timing/badge body injection).
   The lag monitor itself is zero-dependency core: `redline_core.blocking.track_request(builder)` (sync + async context manager, re-exported by `contrib.asgi`) watches the running loop while the request is in flight (no-op without a running loop, for an inert builder or with `detect_blocking` off); stalls still in progress are flushed through `TraceBuilder.on_finish` callbacks, which `finish_trace` runs first. SQL hooks of *sync* drivers call `redline_core.blocking.note_sync_call(span, call)` after recording. `redline_core.transactions.begin_transaction(builder, callsite)` / `end_transaction(state, db_alias=, outcome=)` build `transaction` spans (empty transactions and control statements such as `SAVEPOINT` are not counted/recorded).

@@ -18,10 +18,11 @@ import json
 import logging
 import os
 import tempfile
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
+from ..redact import MASK
 from .analysis import StepResult
 
 __all__ = [
@@ -31,12 +32,61 @@ __all__ = [
     "RunMeta",
     "RunSink",
     "StoreSink",
+    "redact_config",
     "store_supports_runs",
 ]
 
 log = logging.getLogger("redline.load")
 
 STORE_RUN_METHODS = ("save_run", "save_run_step", "finish_run")
+
+
+def redact_config(config: Mapping[str, Any], redactor: Any = None) -> dict[str, Any]:
+    """A run config (a scenario dict) safe to store and serve: header values whose name is
+    in ``redact_headers`` or matches ``redact_keys`` (scenario and per-request headers),
+    secret keys of JSON/form bodies, and secrets in ``base_url``/``path``/``name`` are
+    masked.
+
+    Only the background process gets the raw values (``<id>.scenario.json``, mode 0600,
+    deleted when the run ends).
+    """
+    from ..redact import Redactor
+
+    r = redactor if redactor is not None else Redactor()
+    out = dict(config)
+
+    def headers(value: Any) -> Any:
+        if not isinstance(value, Mapping):
+            return value
+        masked = r.headers(value)
+        return {k: MASK if r.is_secret_key(k) else v for k, v in masked.items()}
+
+    if "headers" in out:
+        out["headers"] = headers(out["headers"])
+    if isinstance(out.get("base_url"), str):
+        out["base_url"] = r.url(out["base_url"])
+    requests = out.get("requests")
+    if isinstance(requests, (list, tuple)):
+        items = []
+        for item in requests:
+            if isinstance(item, Mapping):
+                item = dict(item)
+                if "headers" in item:
+                    item["headers"] = headers(item["headers"])
+                if isinstance(item.get("path"), str):
+                    item["path"] = r.url(item["path"])
+                if isinstance(item.get("name"), str):  # defaults to "METHOD path"
+                    item["name"] = r.text(item["name"])
+                if "json" in item:
+                    item["json"] = r.mapping(item["json"])
+                if isinstance(item.get("body"), str):
+                    hdrs = item.get("headers")
+                    hdrs = hdrs if isinstance(hdrs, Mapping) else {}
+                    ctype = next((v for k, v in hdrs.items() if k.lower() == "content-type"), None)
+                    item["body"] = r.body(item["body"], ctype)[0]
+            items.append(item)
+        out["requests"] = items
+    return out
 
 
 @dataclass

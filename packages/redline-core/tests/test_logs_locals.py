@@ -442,3 +442,85 @@ def test_mapping_error_has_no_frames():
     b = rec.start_trace(method="GET", path="/")
     trace = rec.finish_trace(b, status=500, error={"type": "X", "message": "m", "traceback": ""})
     assert "frames" not in trace.error
+
+
+class FakeRequest:  # what a Django HttpRequest repr looks like
+    def __repr__(self):
+        return "<WSGIRequest: GET '/cb?code=1&token=SECRET-R'>"
+
+
+def _leaky():
+    body = b'{"user": "bob", "password": "SECRET-B"}'
+    form = "user=bob&password=SECRET-F"
+    next_url = "/cb?token=SECRET-U"
+    dsn = "postgres://app:SECRET-D@db/app"
+    nested = [{"name": "x", "auth": ("bob", "SECRET-N")}, ({"api_key": "SECRET-K"},)]
+    request = FakeRequest()
+    credentials_token = {"anything": "SECRET-T"}
+    plain = {"user": "bob", "n": 1}
+    raise ValueError("boom")
+
+
+def test_exception_locals_values_are_redacted_not_only_names():
+    rec = make()
+    with pytest.raises(ValueError):
+        with rec.recording(method="GET", path="/boom"):
+            _leaky()
+    loc = rec.last_trace.error["frames"][-1]["locals"]
+    assert "SECRET" not in repr(loc), loc
+    assert loc["credentials_token"] == "[redacted]"  # secret name: fully masked
+    assert loc["body"] == """b'{"user": "bob", "password": "[redacted]"}'"""
+    assert loc["form"] == "'user=bob&password=[redacted]'"
+    assert loc["next_url"] == "'/cb?token=[redacted]'"
+    assert loc["dsn"] == "'postgres://app:%5Bredacted%5D@db/app'"
+    assert loc["nested"] == "[{'name': 'x', 'auth': '[redacted]'}, ({'api_key': '[redacted]'},)]"
+    assert loc["request"] == "<WSGIRequest: GET '/cb?code=1&token=[redacted]'>"
+    assert loc["plain"] == "{'user': 'bob', 'n': 1}"
+
+
+def test_log_level_follows_a_configured_app():
+    """Logging configured by the app (pytest's handlers on root here): levels untouched."""
+    root = logging.getLogger()
+    assert any(h is not _log_handler for h in root.handlers)
+    root.setLevel(logging.WARNING)
+    rec = make(log_level="INFO")
+
+    def work():
+        log.info("quiet")
+        log.warning("loud")
+
+    assert [r.message for r in run(rec, work).logs] == ["loud"]
+    assert root.level == logging.WARNING
+
+
+UNCONFIGURED = """
+import logging
+from redline_core.conf import Settings
+from redline_core.recorder import Recorder, _uninstall_log_handler
+
+assert not logging.getLogger().handlers and logging.getLogger().level == logging.WARNING
+rec = Recorder(Settings.from_mapping({"log_level": "INFO"}))
+log = logging.getLogger("shop")
+log.info("outside-info")
+with rec.recording(method="GET", path="/x"):
+    log.debug("in-debug")
+    log.info("in-info")
+    log.warning("in-warning")
+print([r.message for r in rec.last_trace.logs])
+_uninstall_log_handler()
+print(logging.getLogger().level)
+"""
+
+
+def test_log_level_in_an_unconfigured_app_captures_info_without_new_output():
+    import subprocess
+    import sys
+
+    out = subprocess.run(
+        [sys.executable, "-c", UNCONFIGURED], capture_output=True, text=True, check=True
+    )
+    captured, level = out.stdout.strip().splitlines()
+    assert captured == "['in-info', 'in-warning']"
+    assert level == str(logging.WARNING)  # restored on uninstall
+    # stderr is exactly what Python prints with no handler at all: WARNING and above
+    assert out.stderr == "in-warning\n"

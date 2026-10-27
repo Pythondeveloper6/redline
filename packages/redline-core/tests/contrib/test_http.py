@@ -45,6 +45,25 @@ def test_requests_span(tracer, req_instrumented):
     assert span.callsite is not None
 
 
+def test_outbound_url_userinfo_password_is_masked(tracer, req_instrumented):
+    s = requests.Session()
+    s.mount("http://", FakeAdapter())
+    assert instrument_httpx()
+    try:
+        b = tracer.start()
+        s.get("http://bob:hunter2@api.example.com/v1")
+        transport = httpx.MockTransport(lambda r: httpx.Response(200))
+        with httpx.Client(transport=transport) as c:
+            c.get("http://bob:hunter2@h.test/a")
+        spans = tracer.finish(b)
+    finally:
+        uninstrument_httpx()
+    assert len(spans) == 2
+    for span in spans:
+        assert "hunter2" not in span.data["url"] and "hunter2" not in span.name
+        assert "bob:%5Bredacted%5D@" in span.data["url"]
+
+
 def test_requests_exception_has_no_status(tracer, req_instrumented):
     class Boom(FakeAdapter):
         def send(self, request, **kwargs):

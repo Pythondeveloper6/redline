@@ -5,9 +5,11 @@ What gets masked (replaced by :data:`MASK`):
 * **headers** whose name is in ``Settings.redact_headers`` (case-insensitive);
 * **query string, form and JSON body keys** matching any ``Settings.redact_keys`` regex,
   at any nesting depth;
-* **URLs** (outbound HTTP spans): the same key rule on their query string;
-* **free text** (captured log messages): ``key=value`` and ``"key": "value"`` pairs whose
-  key matches ``redact_keys`` have the value masked (:meth:`Redactor.text`);
+* **URLs** (outbound HTTP spans): the same key rule on their query string, and the
+  password of ``scheme://user:password@host``;
+* **free text** (captured log messages, exception locals): ``key=value``, ``key: value``
+  and ``"key": "value"`` pairs whose key matches ``redact_keys`` have the value masked,
+  and URL-looking tokens go through :meth:`Redactor.url` (:meth:`Redactor.text`);
 * **SQL parameters** bound to a column whose name matches ``redact_keys``
   (``… SET "password" = %s`` or ``INSERT … ("token") VALUES (%s)``).
 
@@ -32,12 +34,20 @@ MASK = "[redacted]"
 _MAX_PARAM_CHARS = 500
 
 #: ``password=hunter2``, ``"token": "abc"``, ``Authorization: Bearer abc`` inside free text.
+#: An unquoted value also stops at ``= ? & :``, so a harmless ``url=…?token=x``,
+#: ``Cookie: sessionid=x`` or ``user=bob:password=x`` cannot swallow the secret pair that
+#: follows; a *secret* key's value is then extended by :data:`_SECRET_TAIL`.
 _TEXT_PAIR = re.compile(
     r"""(?P<q>["']?)(?P<key>[A-Za-z_][\w.\-]*)(?P=q)(?P<sep>\s*[:=]\s*)"""
     r"""(?P<val>"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'"""
-    r"""|(?:(?:Bearer|Basic|Token)\s+)?[^\s,;&)}\]"']+)""",
+    r"""|(?:(?:Bearer|Basic|Token|Digest)\s+)?[^\s,;&)}\]"'=?:]+)""",
     re.IGNORECASE,
 )
+_SECRET_TAIL = re.compile(r"""[^\s,;&)}\]"']*""")
+#: ``scheme://…`` inside free text (run through :meth:`Redactor.url` for userinfo/query).
+_URL_TOKEN = re.compile(r"""\b[A-Za-z][A-Za-z0-9+.\-]*://[^\s"'<>`]+""")
+#: The password of ``scheme://user:password@host``, percent-encoded so the URL still parses.
+_USERINFO_MASK = "%5Bredacted%5D"
 
 _PLACEHOLDER = re.compile(r"%\([^)]*\)s|%s|\?|\$\d+|(?<![:\w]):[A-Za-z_]\w*")
 _COLUMN_BEFORE = re.compile(
@@ -82,17 +92,40 @@ class Redactor:
         return any(p.search(key) for p in self._keys)
 
     def text(self, text: str) -> str:
-        """``text`` with the values of secret-looking ``key=value`` / ``"key": "v"`` masked."""
+        """``text`` with the values of secret-looking ``key=value`` / ``"key": "v"`` masked.
 
-        def mask(m: re.Match[str]) -> str:
-            if not self.is_secret_key(m.group("key")):
-                return m.group(0)
+        URL-looking tokens go through :meth:`url` first (userinfo password, query keys).
+        """
+        if not text:
+            return text
+        if "://" in text:
+            text = _URL_TOKEN.sub(lambda m: self.url(m.group(0)), text)
+        out: list[str] = []
+        pos = 0
+        while True:
+            m = _TEXT_PAIR.search(text, pos)
+            if m is None:
+                break
+            val_start = m.start("val")
+            if not self.is_secret_key(m.group("key")) or text.startswith(MASK, val_start):
+                # The value may itself start the next pair (``Cookie: sessionid=x``).
+                out.append(text[pos:val_start])
+                pos = val_start
+                continue
             val = m.group("val")
-            quote = val[0] if len(val) > 1 and val[0] in "\"'" and val[-1] == val[0] else ""
-            q = m.group("q")
-            return f"{q}{m.group('key')}{q}{m.group('sep')}{quote}{MASK}{quote}"
-
-        return _TEXT_PAIR.sub(mask, text)
+            end = m.end()
+            if val[0] in "\"'" and len(val) > 1 and val[-1] == val[0]:
+                masked = f"{val[0]}{MASK}{val[0]}"
+            else:
+                masked = MASK
+                tail = _SECRET_TAIL.match(text, end)
+                if tail is not None:
+                    end = tail.end()
+            out.append(text[pos:val_start])
+            out.append(masked)
+            pos = end
+        out.append(text[pos:])
+        return "".join(out)
 
     def headers(self, headers: Mapping[str, Any] | Iterable[tuple[Any, Any]] | None) -> dict:
         """Header dict with sensitive values masked. Accepts ASGI ``[(b"k", b"v")]`` too."""
@@ -142,18 +175,33 @@ class Redactor:
         return self.mapping(dict(query))
 
     def url(self, url: str) -> str:
-        """``url`` with secret query-string values masked."""
+        """``url`` with a userinfo password and secret query-string values masked.
+
+        ``https://bob:pw@host`` becomes ``https://bob:%5Bredacted%5D@host`` (the mask is
+        percent-encoded so the result still parses). A URL with nothing to mask is
+        returned unchanged.
+        """
         try:
             parts = urlsplit(url)
         except ValueError:
             return url
-        if not parts.query:
+        netloc, query = parts.netloc, parts.query
+        changed = False
+        if "@" in netloc:
+            userinfo, _, host = netloc.rpartition("@")
+            user, colon, password = userinfo.partition(":")
+            if colon and password != _USERINFO_MASK:
+                netloc = f"{user}:{_USERINFO_MASK}@{host}"
+                changed = True
+        if query:
+            pairs = parse_qsl(query, keep_blank_values=True)
+            if any(self.is_secret_key(k) for k, _ in pairs):
+                masked = [(k, MASK if self.is_secret_key(k) else v) for k, v in pairs]
+                query = urlencode(masked, safe="[]")
+                changed = True
+        if not changed:
             return url
-        pairs = [
-            (k, MASK if self.is_secret_key(k) else v)
-            for k, v in parse_qsl(parts.query, keep_blank_values=True)
-        ]
-        return urlunsplit(parts._replace(query=urlencode(pairs, safe="[]")))
+        return urlunsplit(parts._replace(netloc=netloc, query=query))
 
     # bodies ----------------------------------------------------------------
     def body(

@@ -2,7 +2,8 @@
 
 Files live in ``<store directory>/runs/`` (``.redline/runs/`` for the default store):
 
-``<id>.scenario.json``  the scenario the background run was started with
+``<id>.scenario.json``  the scenario the background run was started with (raw header
+                        values: mode 0600, removed when the run ends)
 ``<id>.pid``            pid of the ``redline load`` process (removed when it ends)
 ``<id>.stop``           created by :func:`stop_run`; the running process polls for it
                         (every 0.1 s) and stops gracefully with status ``stopped``
@@ -121,7 +122,7 @@ def launch_background(
     rdir = runs_dir(store)
     rdir.mkdir(parents=True, exist_ok=True)
     scenario_path = rdir / f"{_safe_id(run_id)}.scenario.json"
-    scenario_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    _write_private(scenario_path, json.dumps(data, indent=2))
     cmd = [
         python or sys.executable,
         "-m",
@@ -150,6 +151,18 @@ def launch_background(
         log.close()
     (rdir / f"{run_id}.pid").write_text(str(proc.pid), encoding="ascii")
     return run_id
+
+
+def _write_private(path: Path, text: str) -> None:
+    """Write ``text`` to a new file only its owner can read (mode 0600): the scenario holds
+    the raw header values (e.g. a bearer token) the background run must send."""
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(text)
 
 
 def _pid_alive(pid: int) -> bool:
@@ -219,9 +232,10 @@ def write_pid(run_id: str, store_path: str | os.PathLike[str] | None) -> Path:
 
 
 def cleanup(run_id: str, store_path: str | os.PathLike[str] | None) -> None:
-    """Remove the pid and stop files of a finished run (results and logs stay)."""
+    """Remove the pid, stop and scenario files of a finished run (results and logs stay;
+    the scenario file holds raw header values)."""
     rdir = runs_dir(store_path)
-    for suffix in (".pid", ".stop"):
+    for suffix in (".pid", ".stop", ".scenario.json"):
         try:
             (rdir / f"{_safe_id(run_id)}{suffix}").unlink()
         except FileNotFoundError:
@@ -247,14 +261,20 @@ def run_hooks(store: Any, settings: Any) -> tuple[Any, Any]:
         return None, None
 
     def launcher(config: dict[str, Any], base_url: str | None) -> str:
+        from ..redact import Redactor
         from ..runs import Run
+        from .sinks import redact_config
 
         if not base_url:
             raise ValueError("cannot tell the application's own URL for this request")
         run_id = launch_background(config, base_url, path)
         try:
             store.save_run(
-                Run(id=run_id, name=str(config.get("name") or "UI run"), config=dict(config))
+                Run(
+                    id=run_id,
+                    name=str(config.get("name") or "UI run"),
+                    config=redact_config(config, Redactor(settings)),
+                )
             )
         except Exception:  # pragma: no cover - the child writes it anyway
             pass
