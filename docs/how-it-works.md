@@ -5,23 +5,20 @@
 Redline is a small pipeline. Understanding it explains every setting and every
 limitation, so this page is worth reading once.
 
-```text
- request ──► adapter middleware ──► your app ──► response
-                  │                    │
-        start_trace()           hooks: SQL, cache,
-                  │             template, httpx, span()
-                  ▼                    │
-              TraceBuilder  ◄──────────┘   (state in contextvars)
-                  │
-            finish_trace()
-                  │
-   sampling decision (keep? why?)
-                  │ kept
-   redact ► detect issues ► suggest fixes
-                  │
-        Store.save()  ── queue ──►  writer thread ──► .redline/redline.db
-                                                          │
-                                  JSON API  ◄── UI  ◄─────┘
+```mermaid
+flowchart TD
+    req([request]) --> mw[adapter middleware]
+    mw --> app[your app]
+    app --> res([response])
+    mw -- "start_trace()" --> tb[TraceBuilder]
+    app -- "hooks: SQL, cache, template, httpx, span()" --> tb
+    tb -- "state in contextvars" --> fin["finish_trace()"]
+    fin --> samp{"sampling decision<br/>keep? why?"}
+    samp -- kept --> proc["redact, detect issues, suggest fixes"]
+    proc --> save["Store.save()"]
+    save -- queue --> wr[writer thread]
+    wr --> db[(".redline/redline.db")]
+    db --> ui["JSON API and UI"]
 ```
 
 Five packages share this pipeline:
