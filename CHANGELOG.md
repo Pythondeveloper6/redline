@@ -192,6 +192,20 @@ store is migrated in place when 0.2 first opens it, and every new field has a de
   when `trusted_proxies` is empty with `token`/`basic` (one shared login rate-limit bucket
   behind a proxy).
 - `GET api/config` masks userinfo in `base_url`.
+- Session ids and API tokens are no longer stored: cache keys after a session prefix
+  (`django.contrib.sessions.cache…`, `session:`) or a secret-looking name are masked, and
+  SQL parameters are masked when their table looks secret (DRF `authtoken_token`,
+  `django_session`), inside function calls (`crypt(%s, …)`), in `INSERT … VALUES`,
+  `ON CONFLICT … SET` and every item of an `IN (…)` list.
+- Exception messages, tracebacks (chained ones included) and frame source lines go through
+  the free-text redaction rule, which now also masks JWTs, Luhn-valid card numbers and
+  `<key>value</key>` elements.
+- Request capture: headers whose name looks secret (`X-Auth-Token`, `X-CSRFToken`, …) are
+  masked; multipart bodies are parsed (secret fields masked, files reduced to
+  `[file: name, N bytes]`); text, GraphQL and XML bodies use the free-text rule.
+- Secret route parameters (`token`, `uidb64`, `key`, `signature`, `code`, or a
+  `redact_keys` match) are masked in the stored path, e.g. Django's
+  `/reset/[redacted]/[redacted]/`; high-entropy segments of unmatched paths are masked too.
 
 ## 0.1.0a1
 
