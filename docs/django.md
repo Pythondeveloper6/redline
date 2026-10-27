@@ -162,15 +162,17 @@ changes in `MIDDLEWARE` or `urls.py`.
 
 ## Access control
 
-<!-- verify: access control -->
-Django's default access policy is `framework`: the permission check below. The other policies
+Django's default access policy is `framework`: the permission check below, and it stays the
+default under the `production` preset (a preset does not change it). The other policies
 (`token`, `basic`, IP allow-lists, `read_only`, ...) are available through the same `REDLINE`
 dict and are described on [Access control](access-control.md). When `ACCESS` is not
 `"framework"`, `PERMISSION` is not consulted.
 
-Every view, page, assets and API, first checks `REDLINE["PERMISSION"]`. Before that, it
-calls `request.get_host()`, so `ALLOWED_HOSTS` is enforced on Redline's views even without
-`CommonMiddleware` (a defence against [DNS rebinding](security.md#dns-rebinding)).
+Every view, page, assets and API, first checks `ALLOWED_HOSTS` (it calls
+`request.get_host()`, so this holds even without `CommonMiddleware`, a defence against
+[DNS rebinding](security.md#dns-rebinding)) and then the access gate, with
+`REDLINE["PERMISSION"]` as the framework hook. Top-level files such as `badge.js` skip
+`PERMISSION` but not the network rules.
 
 | | Default | |
 |---|---|---|
@@ -216,7 +218,10 @@ data-header="...">`, and the SPA sends it back. Because the token is in the page
 not read from a cookie, this works with `CSRF_COOKIE_HTTPONLY = True` and with
 `CSRF_USE_SESSIONS = True`.
 
-Scripts calling the API must log in, keep the session cookie, and send the token.
+Scripts calling the API must log in, keep the session cookie, and send the token. The
+exception is `ACCESS = "token"`: a request carrying `Authorization: Bearer <token>` skips
+Django's CSRF check. The gate's own CSRF rule (`Sec-Fetch-Site: cross-site` or `same-site`,
+or a mismatched `Origin`, refused with `403 csrf_failed`) applies as well.
 
 ## How it hooks in
 
@@ -340,7 +345,7 @@ Redline is enabled; the others always run.
 | `manage.py redline_clear [--noinput]` | Deletes every recorded trace. Asks for confirmation (`Delete all N Redline traces? [y/N]`) unless `--noinput` or `--no-input` |
 | `manage.py redline_prune [--max-age-days N] [--max-rows N]` | Applies [retention](storage.md#retention) now. Defaults to the `MAX_AGE_DAYS` and `MAX_ROWS` settings. `0` disables that rule for this run (it never deletes everything: that is `redline_clear`). Negative values are an error |
 | `manage.py redline_scan [PATHS] [--json] [--fail] [--dialect django\|jinja] [--no-drf]` | [Static N+1 scan](static-scan.md): templates that read a relation in a loop, and DRF serializers whose queryset lacks the matching `select_related` / `prefetch_related`. `--fail` exits 1 on findings |
-| `manage.py redline_scenario` | Writes a [load-test scenario](load-testing.md#generating-scenarios) from your URLconf <!-- verify: redline_scenario --> |
+| `manage.py redline_scenario [-o FILE] [--base-url URL] [--force]` | Writes a [load-test scenario](load-testing.md#generating-scenarios) from your URLconf (stdout without `-o`) |
 
 `redline_clear` and `redline_prune` build the runtime, flush pending writes, and print how
 many traces they removed. `redline_clear` keeps [history](history.md). Run

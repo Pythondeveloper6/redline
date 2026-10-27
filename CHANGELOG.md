@@ -54,7 +54,14 @@ store is migrated in place when 0.2 first opens it, and every new field has a de
   scenario generators.
 - Runs are stored with per-step histograms and shown on the Load page with a per-step
   bottleneck analysis (`GET api/runs`, `GET api/runs/{id}/bottlenecks`).
-- Optional start-from-the-UI (`load_from_ui`, off by default; target is always the app).
+- Optional start-from-the-UI (`load_from_ui`, off by default). It sends only paths, to the
+  `base_url` setting or a loopback / `allowed_hosts` address; capped at one hour, 5 000 rps
+  and 200 steps; run statuses `running`, `done`, `stopped`, `failed`; stopping a run from any
+  worker.
+- `redline load --ui-url` sets the Redline UI address printed after a run (default from
+  `mount_path`, else `/_redline`).
+- The knee rule: the first complete step with p95 above 2x the first step's, an error rate
+  above 1%, or an achieved rate below 90% of the target; partial steps never decide it.
 
 ### Added: history
 
@@ -78,12 +85,49 @@ store is migrated in place when 0.2 first opens it, and every new field has a de
   `open` (needs `REDLINE_ALLOW_OPEN=1`); `allowed_ips`, `allowed_hosts`, `trusted_proxies`,
   `read_only`, per-feature switches, `ui_enabled`, `mount_path`, login with a scoped cookie
   and a rate limit.
+- Layers: defaults, adapter, preset, file, environment, framework. A native hook (Django
+  staff check or `PERMISSION`, FastAPI `dependencies=`, Flask `permission=`, Litestar
+  `guards=`) implies `access = "framework"`. `REDLINE_*` values are parsed by type (bools,
+  JSON or comma lists, `k=v` tables, `none`); an unknown variable or file key is an error
+  with a "did you mean" hint.
+- Settings: `preset`, `access`, `access_check`, `allowed_ips` (widens `local`, restricts the
+  other policies), `allowed_hosts`, `trusted_proxies`, `token`, `token_file`, `basic_users`,
+  `secret_key`, `read_only`, `features`, `ui_enabled`, `mount_path`, `session_ttl_s`,
+  `max_login_attempts`, `base_url`.
 - `redline config`, `redline doctor`, `redline hash-password`; `GET api/config`,
-  `POST api/login`, `POST api/logout`; a login screen and a Settings page.
+  `POST api/login` and `POST api/logout` (both answer `200` JSON), `X-Redline-UI: 1`; a
+  login screen and a Settings page. Under `token` and `basic` the UI shell is public and
+  every `api/` call needs credentials. Sessions need `secret_key` with several workers.
+- Live mode resumes by `seq` (`after=` or `Last-Event-ID`); the stream closes after five
+  minutes on ASGI and about 25 seconds on WSGI servers and the UI reconnects.
+- `GET api/indexes` returns candidates with `kind`, `confidence`, `verified`, plus
+  `already_indexed`, `explained`, `unused_error` and `cached`; cached for 30 seconds,
+  `refresh=1` recomputes; unused indexes are PostgreSQL only.
 
 ### Changed
 
-- Storage schema version 2 (migrated in place, backfilled from existing traces).
+- **Behaviour changes to know about when upgrading from 0.1:**
+  - `server_timing` now defaults to `"auto"` (on in debug mode only). It used to be on
+    whenever recording was; set `server_timing = True` to keep the old behaviour.
+  - `Sec-Fetch-Site: same-site` is refused on non-GET requests, like `cross-site`.
+  - Under `local`, a loopback peer that sends `X-Forwarded-For`, `X-Real-IP` or `Forwarded`
+    without being in `trusted_proxies` is refused (`403 forbidden`), so a reverse proxy on
+    the same host no longer makes every visitor local.
+  - `POST api/runs` needs the `base_url` setting unless the request's host is loopback or in
+    `allowed_hosts` (`400 invalid_body` otherwise).
+  - FastAPI's `install(prefix=)`, Flask's `url_prefix` and Litestar's `path` default to
+    `None` (then `mount_path`, then `/_redline`).
+  - Under `token` and `basic` the API needs credentials on every `api/` call.
+  - Starlette's `TestClient` addresses `http://testserver`, which is not a loopback name:
+    set `base_url` in tests that start a load run through the UI API.
+  - `GET api/stream` events carry an `id` (the trace's `seq`) and the server closes the
+    stream periodically.
+  - Log capture uses a log-record factory and follows your loggers' levels; Redline never
+    adds a root handler or changes a level, and `log_level` is an extra minimum.
+  - Replay refuses paths that point at another origin.
+- Storage schema version 3 (migrated in place from 0.1 or 2): `saved_seq` gives the live
+  stream an insertion order; writes use `BEGIN IMMEDIATE`; requests that matched no route
+  are filed as `(unmatched)` in the history.
 - The default `redact_keys` pattern matches `auth` / `authorization` only as whole words and
   also covers `private_key`.
 - Documentation is published to GitHub Pages.
@@ -91,8 +135,19 @@ store is migrated in place when 0.2 first opens it, and every new field has a de
 
 ### Security
 
-- New error codes for access and safety: `login_required`, `read_only`, `load_disabled`.
-- Starting a load run from the UI accepts only paths, never a host.
+- New error codes for access and safety: `login_required`, `invalid_credentials`,
+  `read_only`, `load_disabled`, `feature_disabled`, `open_refused`, `too_many_requests`.
+- Starting a load run from the UI accepts only paths, never a host, and a forged `Host`
+  header can no longer aim it at another machine; UI-started runs are capped.
+- Access control: constant-time token and PBKDF2 password checks, signed `HttpOnly`,
+  `SameSite=Strict` session cookies, a per-IP rate limit on failed credentials, and
+  `X-Forwarded-*` believed only from `trusted_proxies`.
+- CSRF is enforced by one shared gate on every non-GET call, login and logout included.
+- Redaction: passwords in URL userinfo (`user:password@host`) and secret query values are
+  masked in outbound URLs, log messages and exception locals; locals are masked in
+  containers to a depth of four and through the free-text rule; secrets in a stored load
+  run's config are masked.
+- `Server-Timing` is off outside debug mode by default, since it is a side channel.
 
 ## 0.1.0a1
 

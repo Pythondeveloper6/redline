@@ -21,12 +21,13 @@ For every kept request, on local disk, in `.redline/redline.db`:
 | **SQL text** and **parameters** | verbatim SQL; parameters as JSON | parameters bound to a column matching `redact_keys` are masked |
 | **Callsites** | file, line, function and the **source line** | no |
 | **Tracebacks** and exception messages | text | no |
-| **Exception locals** (project frames: names and `repr` of variables) | text, at most 30 per frame, 300 characters each | variables whose **name** matches `redact_keys` are masked; mappings have secret keys masked. Values under innocent names are **not** |
-| **Log records** emitted during the request | level, logger, message, callsite | `key=value` pairs whose key matches `redact_keys` are masked in the message. Free text is not |
+| **Exception locals** (project frames: names and `repr` of variables) | text, at most 30 per frame, 300 characters each | variables whose **name** matches `redact_keys` are masked; containers have secret keys masked to a depth of 4, and the whole `repr` goes through the free-text rule (`key=value` pairs, URLs). Values under innocent names are **not** |
+| **Log records** emitted during the request | level, logger, message (2,000 characters), callsite | the free-text rule: `key=value`, `key: value` and `"key": "value"` pairs whose key matches `redact_keys` are masked, and so are URL passwords and secret query values. Bare secrets in a sentence are not |
 | **Normalised SQL summaries** (`trace_sql`) | statements with literals replaced by `?` | contains no parameter values |
 | **Outbound URL and cache key patterns** | digit runs, UUIDs and long hex strings replaced by `*` | by pattern only; keys and URLs that embed other secrets are stored as seen |
-| **Release name**, load-run definitions | text | no |
-| Outbound **URLs** (`http_out`) | URL | query-string values whose key matches `redact_keys` are masked |
+| **Release name** | text | no |
+| **Load-run definitions** | the scenario | secret-looking header values, body keys and URL secrets are masked |
+| Outbound **URLs** (`http_out`) | URL | the password of `scheme://user:password@host` and query-string values whose key matches `redact_keys` are masked |
 | The request **path** | text | no |
 | Client address | `REMOTE_ADDR` / ASGI client | no |
 
@@ -43,11 +44,11 @@ its value.
 
 | Where | What is masked | Replaced with |
 |---|---|---|
-| Log messages | `key=value` and `"key": "value"` pairs whose key matches `redact_keys` | `[redacted]` |
-| Exception locals | the value of a variable whose name matches `redact_keys`; secret keys of dict values | `[redacted]` |
+| Log messages | `key=value`, `key: value` and `"key": "value"` pairs whose key matches `redact_keys`; URL passwords and secret query values inside the text | `[redacted]` |
+| Exception locals | the value of a variable whose name matches `redact_keys`; secret keys of containers (4 levels deep); and the free-text rule over the whole `repr` | `[redacted]` |
 | Headers | `authorization`, `cookie`, `set-cookie`, `x-api-key`, `proxy-authorization` (case-insensitive) | `[redacted]` |
 | Query strings, form bodies, JSON bodies (any depth) | any key matching `(?i)pass(word)?\|secret\|token\|api[_-]?key\|(?<![a-z])auth(orization)?(?![a-z])\|session\|csrf\|card\|cvv\|ssn\|private[_-]?key` | `[redacted]` |
-| Outbound URLs | the same key rule on the query string | `[redacted]` |
+| Outbound URLs | the same key rule on the query string, and the password in `user:password@host` | `[redacted]`, or `%5Bredacted%5D` in the userinfo so the URL still parses |
 | SQL parameters | values bound to a column whose name matches the same pattern (`SET "password" = %s`, `INSERT ... ("token") VALUES (%s)`) | `[redacted]` |
 | Bodies | cut at `max_body_bytes`, **after** masking, so a cut never exposes half a secret | |
 | Binary bodies | replaced by `<N bytes binary>` | |
@@ -128,7 +129,6 @@ The UI and API expose SQL, bodies, source lines and exception locals, and can ru
 Treat access to them as access to a database console with read-only privileges *and* to the
 traffic.
 
-<!-- verify: access control (unified policy) -->
 From 0.2 there is **one access policy for every framework**, chosen with the `access`
 setting: `local`, `token`, `basic`, `framework` (the adapter's native hook), `custom` or
 `open`. On top of it you can add IP allow-lists, trusted proxies, a `read_only` mode and
@@ -163,32 +163,36 @@ sections below describe the defaults and the threats.
 
 === "FastAPI, Flask and Litestar"
 
-    **Default: loopback only.** Without `dependencies` (FastAPI), `permission` (Flask) or
-    `guards` (Litestar), a request is served only when
+    **Default: `local`, loopback only.** Without `dependencies` (FastAPI), `permission`
+    (Flask) or `guards` (Litestar), a request is served only when
     **both** hold, and a warning is logged at startup:
 
     - the client is loopback (`127.0.0.0/8`, `::1`, unix sockets);
     - the `Host` header names loopback: `localhost`, `*.localhost`, `127.x.x.x` or
       `[::1]`, with any port. This defeats DNS rebinding (below).
 
-    Pass your own hook, or set `access`, for anything else. A refusal is `403` JSON
-    `{"error": {"code": "forbidden", ...}}`. See
+    A loopback peer that sends `X-Forwarded-For`, `X-Real-IP` or `Forwarded` without being
+    in `trusted_proxies` is refused too (it is almost certainly a reverse proxy on the same
+    host). Pass your own hook (it implies `access = "framework"`), or set `access`, for
+    anything else. A refusal is `403` JSON `{"error": {"code": "forbidden", ...}}`. See
     [FastAPI](fastapi.md#access-control), [Flask](flask.md#access-control) and
     [Litestar](litestar.md#access-control).
 
 ### Cross-site request forgery
 
-Reads are `GET`. The mutating calls (`DELETE` on traces and runs, `POST api/explain`,
-`POST api/runs`) are protected:
+Reads are `GET`. Every other method (`DELETE` on traces and runs, `POST api/explain`,
+`POST api/runs`, login and logout) is protected:
 
 - **Django** runs Django's own CSRF machinery on every API request (token in the CSRF
   header, plus the Origin and Referer checks on HTTPS), even if `CsrfViewMiddleware` is not
   installed, and answers `403 csrf_failed` as JSON.
-- **FastAPI, Flask and Litestar** reject cross-site browser requests via `Origin` and
-  `Sec-Fetch-Site`, with `403 csrf_failed` in the same JSON shape. This applies whatever
-  access policy you chose.
-- **Token and basic access** use an HttpOnly, SameSite=Strict, path-scoped session cookie, so
-  a cross-site request does not carry it.
+- The shared access gate (all four adapters) rejects `Sec-Fetch-Site: cross-site` **and
+  `same-site`**, and any `Origin` (including `null`) whose host and port differ from the
+  host the request was addressed to, with `403 csrf_failed` in the same JSON shape. This
+  applies whatever access policy you chose. A request with no `Origin` is not a browser and
+  passes.
+- **Token and basic access** use an HttpOnly, SameSite=Strict session cookie scoped to the
+  mount (`Secure` over https), so a cross-site request does not carry it.
 
 ### DNS rebinding
 
@@ -197,10 +201,9 @@ then sends that page's requests to your local server, as same-origin requests, s
 the CSRF checks do not stop it reading `GET` endpoints. What gives it away is the `Host`
 header, which still says `evil.example`.
 
-- **FastAPI:** the default `local_only` guard refuses any `Host` that is not a loopback
-  name or address (`403 forbidden`). If you reach the app through a hosts-file alias, allow
-  it explicitly:
-  `install(app, dependencies=[Depends(loopback_guard(allowed_hosts=["devbox"]))])`.
+- **FastAPI, Flask, Litestar:** the default `local` policy refuses any `Host` that is not a
+  loopback name or address (`403 forbidden`). If you reach the app through a hosts-file
+  alias, allow it explicitly with `allowed_hosts=["devbox"]` in the settings.
   With your own `dependencies` (real authentication), the attacker's page has no
   credentials for your host (cookies are bound to `evil.example`), so it is refused too.
 - **Django:** every Redline view calls `request.get_host()`, so `ALLOWED_HOSTS` is enforced
@@ -218,36 +221,40 @@ cannot frame it and trick a click on **Clear all**.
 
 !!! warning "Loopback is not a security boundary behind a proxy"
 
-    If a reverse proxy forwards to your app on `127.0.0.1`, the `local` default allows
-    **everyone** the proxy lets through whose `Host` the proxy rewrites to `localhost`
-    (many do). Use `access = "token"`, or set `trusted_proxies` so the real client address is
-    taken from `X-Forwarded-For` **only** when the request comes from your proxy. Without
-    `trusted_proxies` Redline ignores that header, so a client cannot spoof its address. See
+    If a reverse proxy forwards to your app on `127.0.0.1`, every request would look local.
+    Redline refuses a loopback peer that carries forwarding headers unless it is a trusted
+    proxy, but a proxy that strips them is not detectable, so use `access = "token"` and set
+    `trusted_proxies` so the real client address is taken from `X-Forwarded-For` **only**
+    when the request comes from your proxy (read from the right, skipping trusted hops).
+    Without `trusted_proxies` Redline ignores that header, so a client cannot spoof its
+    address. See
     [Access control: behind a reverse proxy](access-control.md#behind-a-reverse-proxy).
 
 ### Badge, Server-Timing and CSP
 
-<!-- verify: adapter wiring (Server-Timing, badge, SSE, snapshot) -->
 - The **floating badge** adds one `<script src>` tag, from Redline's own mount, to HTML pages
-  in development (`badge = "auto"`). It is off in the `production` preset. A strict CSP
-  that allows only nonced scripts will block it; see
+  in debug mode (`badge = "auto"`). It is off in the `production` preset. Under a strict
+  CSP that allows only nonced scripts Redline skips the injection; see
   [Server-Timing and the badge](server-timing-badge.md#content-security-policy).
-- **Server-Timing** exposes timings, a query count and a trace id to anyone who can read the
-  response, including the browser. No SQL or data. Turn it off with `server_timing = False`
-  if you do not want it public.
+- **Server-Timing** (`server_timing`, default `"auto"`: debug mode only) exposes timings, a
+  query count and a trace id to anyone who can read the response, including anonymous
+  clients and the browser, which can be a side channel (for example to tell which accounts
+  exist from query counts). No SQL or data. Outside debug mode leave it off unless you want
+  it, and Redline warns when it is forced on outside `dev`.
 - The **trace id** in `Server-Timing` lets someone who already has UI access find the trace;
   it grants nothing by itself.
 - **Snapshots** are files containing a full trace. Whoever has the file has the data.
 
 ### Load from the UI
 
-<!-- verify: load from UI (POST api/runs) -->
 Starting a load run from the UI is **off by default** (`load_from_ui = False`, `403
-load_disabled`). When on, its safety rests on three rules:
+load_disabled`). When on, its safety rests on these rules:
 
 1. The request list may contain only **paths** (each must start with a single `/`). A scheme
-   or host is rejected with `400 invalid_body`, so the target is always the application that
-   serves the UI. It cannot be used to make your server attack a third party.
+   or host is rejected with `400 invalid_body`. The target is the `base_url` setting, or
+   else the URL the request was addressed to, accepted only for a loopback host or one in
+   `allowed_hosts`; a forged `Host` header cannot aim a run at another machine, and other
+   hosts need `base_url`. Runs are capped at one hour, 5 000 rps and 200 steps.
 2. It is gated by the same access policy, by `read_only` and by the `load` feature switch.
 3. It is a real load: a user who may start runs can make your instance slow. Enable it only
    in environments where that is acceptable, and not in production.

@@ -80,6 +80,10 @@ any of these is true:
 - the error rate is above **1%**;
 - the achieved rate is below **90%** of the target.
 
+The p95 rule compares with the first step, so the first step can only be the knee through
+errors or a missed target. A step cut short by a stop is reported but never decides the
+knee.
+
 ## Quickstart
 
 1. Start your app (with Redline mounted, so the run can be correlated; see below).
@@ -252,7 +256,7 @@ Rendered separately for every request:
 |---|---|
 | `{random_int:A:B}` | a random integer from A to B, inclusive |
 | `{random_choice:a\|b\|c}` | one of the listed values |
-| `{uuid}` | a fresh UUID |
+| `{uuid}` | a fresh random UUID (32 hex digits, no dashes) |
 
 Any other `{...}` in a path is an **error**, so an OpenAPI path such as `/orders/{id}` can
 never be sent by accident.
@@ -296,6 +300,7 @@ SCENARIO = {
 | `--fail-p95-ms X` | exit 1 if the run-wide p95 exceeds X ms |
 | `--fail-error-rate Y` | exit 1 if the error rate exceeds Y (`0.01` or `1%`) |
 | `--quiet`, `-q` | only print the final table |
+| `--ui-url URL` | the Redline UI address printed in the "See bottlenecks in the Redline UI at ..." line after the run. Default: the scenario's host plus the `mount_path` setting (from `redline.toml` or `REDLINE_MOUNT_PATH`), else `/_redline` |
 
 `--rps`, `--ramp` and `--steps` are mutually exclusive. `redline load init` writes
 scenarios; see [Generating scenarios](#generating-scenarios).
@@ -399,17 +404,37 @@ Notes for stable CI numbers:
 
 ## Starting a run from the UI
 
-<!-- verify: load from UI (POST api/runs) -->
 With `load_from_ui = True` the **Load** page has a form that starts a run against the app
-that serves the UI. It is **off by default** and refused with `403 load_disabled`
-otherwise. The target is always the app's own base URL: the request list can contain only
-paths (no scheme or host), so the form cannot be used to point the server at somebody
-else. It is also blocked by `read_only` and the `load` feature switch (see
-[Access control](access-control.md)), and you should turn it on only in environments where
-load is welcome. See [Security](security.md#load-from-the-ui).
+that serves the UI. It is **off by default** (`403 load_disabled`) and needs
+`redline-core[load]`, a file-backed SQLite store, and a store the background process can
+write to. It is also blocked by `read_only` (`403 read_only`) and the `load` feature
+switch (`404 feature_disabled`), and the `production` preset keeps it off. Turn it on only
+in environments where load is welcome. See [Security](security.md#load-from-the-ui).
 
-The same actions are in the API: `POST api/runs`, `POST api/runs/{id}/stop`,
-`DELETE api/runs/{id}` ([HTTP API](http-api.md#runs)).
+**Where the run goes.** The request list can contain only paths (a single leading `/`; no
+scheme or host), so the form cannot aim the server at somebody else. The target is the
+`base_url` setting when you set it. Otherwise it is the URL the request was addressed to,
+and that is accepted only when its host is a loopback name or one in `allowed_hosts`. For
+any other host (a staging domain, a container name) `POST api/runs` answers
+`400 invalid_body` and asks you to set `base_url`:
+
+```toml
+# redline.toml
+base_url = "http://127.0.0.1:8000"      # the application's own address
+```
+
+A `base_url` or `workers` key in the request body is ignored.
+
+**Limits.** Runs started from the UI are capped more tightly than the CLI: at most one
+hour, 5 000 requests per second and 200 steps; the body needs a `name`, a non-empty
+`requests` list, and a `profile` with a `mode` (`constant`, `ramp` or `steps`), a positive
+`duration_s` and the rates that mode needs. A run goes through the same scenario
+validation as a file. It runs in a detached `redline load` process, writes into the same
+store, and is listed with status `running`, then `done`, `stopped` (you stopped it) or
+`failed`. The run's stored config has secret-looking header values, body keys and URL secrets masked (the raw scenario lives in a mode 0600 file that is deleted when the run ends).
+
+The same actions are in the API: `POST api/runs` (`202`), `POST api/runs/{id}/stop`,
+`DELETE api/runs/{id}` (`409 run_active` while it runs) ([HTTP API](http-api.md#runs)).
 
 ## Generating scenarios
 
@@ -420,8 +445,8 @@ starting point and edit it.
 |---|---|---|
 | **OpenAPI** (FastAPI, Litestar, Django Ninja) | `redline load init --from-openapi URL_OR_FILE` | Path parameters get example values. Operations with required query or header parameters, and all non-GET operations, are written with `weight = 0` so you opt in after reviewing |
 | **Captured traffic** | `redline load init --from-traces` | Takes the busiest endpoints from your store (`--top`, `--window`), picks a concrete sample path for each, weights GETs by their share of traffic. Bodies are never copied |
-| **Django URLconf** | `python manage.py redline_scenario` | <!-- verify: redline_scenario --> |
-| **Flask `url_map`** | `flask redline scenario` | <!-- verify: flask redline scenario --> |
+| **Django URLconf** | `python manage.py redline_scenario [-o FILE] [--base-url URL] [--force]` | Every GET route; routes without parameters get `weight = 1`. A parameterised route (`<int:pk>`) is filled with a concrete path from a recent trace of that route, and left out when there is none. The `admin` namespace and Redline's own URLs are skipped. Django Ninja and DRF routes are included. Prints to stdout without `-o` |
+| **Flask `url_map`** | `flask redline scenario [-o FILE] [--base-url URL] [--force]` | The same rule over the `url_map` (static files and Redline's own routes skipped). Default base URL `http://127.0.0.1:5000` |
 
 `redline load init` options:
 

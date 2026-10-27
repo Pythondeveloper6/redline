@@ -24,22 +24,27 @@ and the file and line of the log call (project-relative, clickable if
 
 ### How it is captured
 
-One handler is attached to the root logger the first time a recorder with `capture_logs`
-is created. It files a record under whichever request is active in the current
-`contextvars` context, so concurrent requests and threads do not mix. Outside a request a
-record costs a single `ContextVar.get()`. Records from Redline's own `redline` loggers are
-ignored so it can never recurse. A logger with `propagate = False` never reaches the root
-handler, so its records are not captured.
+Redline installs a log-record factory (it never adds a handler to the root logger and never
+changes a logger's level). Each record your application creates is filed under whichever
+request is active in the current `contextvars` context, so concurrent requests and threads
+do not mix. Outside a request a record costs a single `ContextVar.get()`. Records from
+Redline's own `redline` loggers are ignored so it can never recurse.
+
+Capture **follows your application's logger levels**: a record your logging configuration
+filters out (below the logger's effective level) is never created, so it is never captured.
+To see `DEBUG` records in a trace, enable `DEBUG` for that logger in your logging
+configuration; `log_level` cannot lower the bar, only raise it.
 
 | Setting | Default | Meaning |
 |---|---|---|
 | `capture_logs` | `True` | Master switch |
-| `log_level` | `"INFO"` | Minimum level stored. `"WARNING"` is a good production value |
+| `log_level` | `"INFO"` | An extra minimum level for stored records, on top of your loggers' own levels. `"WARNING"` is a good production value |
 | `max_logs_per_trace` | `200` | Cap per request. Extras are counted in `logs_dropped` and the UI says how many were dropped |
 
 Messages are formatted, **redacted** and capped at 2,000 characters. Redaction looks for
-`key=value` and `"key": "value"` pairs whose key matches `redact_keys` (`password=...`,
-`"token": "..."`) and masks the value. It is the same key-based rule as everywhere else,
+`key=value`, `key: value` and `"key": "value"` pairs whose key matches `redact_keys`
+(`password=...`, `"token": "..."`) and masks the value; passwords inside URLs
+(`https://user:password@host`) and secret query-string values are masked too. It is the same key-based rule as everywhere else,
 so a secret that appears bare in a sentence ("the code is 4821") is **not** masked. See
 [Security](security.md#logs-and-locals).
 

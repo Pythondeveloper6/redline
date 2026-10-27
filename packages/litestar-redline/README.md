@@ -51,7 +51,7 @@ Python 3.10+, Litestar 2.12+ (< 3), SQLAlchemy 2.x.
 RedlinePlugin(
     settings=None,    # dict | redline_core.Settings
     engine=None,      # Engine | AsyncEngine | [engines] | {"alias": engine}
-    path="/_redline", # where the UI and API live; never recorded
+    path=None,        # default: the mount_path setting, else "/_redline"; never recorded
     guards=None,      # Litestar guards for the UI + API (see "Access control")
     store=None,       # custom Store (default: SQLite file at storage_path)
 )
@@ -142,13 +142,15 @@ exactly as in the FastAPI adapter.
 
 The UI exposes your SQL, request bodies and EXPLAIN, so treat it like an admin tool.
 
-**Default.** With no `guards`, only loopback clients (127.0.0.0/8, `::1`, unix sockets) that
+**Default.** With no `guards`, the `access` setting decides (default `local`): only loopback clients (127.0.0.0/8, `::1`, unix sockets) that
 address the server by a loopback name (`Host: localhost`, `127.0.0.1`, `[::1]`, any port;
 this blocks DNS rebinding) are served, and a warning is logged at startup. Refusals are
 JSON `{"error": {"code": "forbidden" | "unauthorized" | ..., "message"}}`. Use
-`guards=[loopback_guard(allowed_hosts=["devbox"])]` to allow another host name. Behind a
-reverse proxy every client may look like localhost: pass real guards, or run uvicorn with
-`--proxy-headers` and `--forwarded-allow-ips`.
+the `allowed_hosts` setting to allow another host name. Passing `guards=` implies
+`access="framework"`. A loopback peer sending `X-Forwarded-For` without being in
+`trusted_proxies` is refused; behind a reverse proxy use `access="token"` and
+`trusted_proxies`. See the
+[access control docs](https://pythondeveloper6.github.io/redline/access-control/).
 
 **Your own guard** (any Litestar guard; it *replaces* the loopback default):
 
@@ -166,7 +168,7 @@ RedlinePlugin(engine=engine, guards=[require_admin])
 
 **CSRF.** The mutating endpoints (`DELETE` traces, `POST explain`) reject browser requests
 whose `Origin` does not match the request host, `Origin: null`, and
-`Sec-Fetch-Site: cross-site`. This is always on, whatever `guards` you pass.
+`Sec-Fetch-Site: cross-site` or `same-site`. This is always on, whatever `guards` you pass.
 
 Redline's own responses carry `X-Frame-Options: DENY`.
 

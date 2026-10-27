@@ -69,11 +69,11 @@ cannot check that a hop is a relation and you triage its findings by hand.
 === "Flask"
 
     ```bash
-    flask redline scan [PATHS...] [--json] [--fail]
+    flask redline scan [--json] [--fail]
     ```
 
-    <!-- verify: flask redline scan -->
-    Runs the Jinja dialect over your template folders. Output and exit codes are the same.
+    Runs the Jinja dialect over the template folders of the app and its blueprints (it takes
+    no paths). Output and exit codes are the same.
 
 Text output is an aligned table:
 

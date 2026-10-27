@@ -105,7 +105,7 @@ See [How it works: sampling](how-it-works.md#sampling).
 | `redact_headers` | list of `str` | `["authorization", "cookie", "set-cookie", "x-api-key", "proxy-authorization"]` | Header names (case-insensitive) whose values are replaced with `[redacted]` |
 | `redact_keys` | list of regex | `["(?i)pass(word)?\|secret\|token\|api[_-]?key\|(?<![a-z])auth(orization)?(?![a-z])\|session\|csrf\|card\|cvv\|ssn\|private[_-]?key"]` | Patterns matched with `re.search` against **key names** in query strings, form and JSON bodies (at any depth), outbound URLs, SQL parameter column names, log messages (`key=value` pairs) and the names of exception locals. A match masks the value. `auth` and `authorization` match only as a whole word, so `author`, `author_id`, `authenticated` and `oauth_provider` stay visible |
 | `capture_logs` | `bool` | `True` | Keep the log records emitted during a request. See [Logs and exceptions](logs-and-exceptions.md) |
-| `log_level` | `str` | `"INFO"` | Minimum level captured into a trace |
+| `log_level` | `str` (`DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`; case-insensitive) | `"INFO"` | An extra minimum level for records stored in a trace. Capture follows your application's own logger levels (Redline never adds a root handler or changes a level), so a record your logging configuration drops is never captured; `log_level` can only raise the bar further |
 | `max_logs_per_trace` | `int` | `200` | Cap per trace; extras are counted, not stored |
 | `capture_locals` | `bool` | `True` | Keep the local variables of project frames in an exception (names matching `redact_keys` are masked). See [Logs and exceptions](logs-and-exceptions.md#exceptions-with-locals) |
 
@@ -150,9 +150,9 @@ See [Flamegraphs](flamegraphs.md). Needs `redline-core[profile]`.
 | Setting | Type | Default | Description |
 |---|---|---|---|
 | `editor` | `"vscode"`, `"cursor"`, `"pycharm"`, `"idea"`, `"sublime"`, `"none"`, or a template string | `"vscode"` | Where callsite links open. A template contains `{file}` (absolute path) and `{line}`. See [Open in editor](the-ui.md#open-in-editor) |
-| `server_timing` | `bool` | `True` | Add a `Server-Timing` header to recorded responses. See [Server-Timing and the badge](server-timing-badge.md) |
-| `badge` | `"auto"` or `bool` | `"auto"` | Inject the floating badge into HTML responses. `auto` means on when the framework is in debug mode |
-| `load_from_ui` | `bool` | `False` | Allow starting a [load run](load-testing.md#starting-a-run-from-the-ui) from the UI (`POST api/runs`) |
+| `server_timing` | `"auto"` or `bool` | `"auto"` | Add a `Server-Timing` header (trace id, query count and time) to recorded responses. `auto` means on when the framework is in debug mode. See [Server-Timing and the badge](server-timing-badge.md) |
+| `badge` | `"auto"` or `bool` | `"auto"` | Inject the floating badge into HTML responses. `auto` means on when the framework is in debug mode (FastAPI, Flask and Litestar: the app's `debug` flag) |
+| `load_from_ui` | `bool` | `False` | Allow starting a [load run](load-testing.md#starting-a-run-from-the-ui) from the UI (`POST api/runs`). Needs `redline-core[load]`. Off whenever `read_only` is on or the `load` feature is off |
 
 ## Storage and retention
 
@@ -172,50 +172,59 @@ is an error. To delete everything use **Clear all**, `DELETE api/traces` or
 
 ## Access control
 
-<!-- verify: access control settings (section 18) -->
 Who may open the UI and API, and how. The policies, recipes and reasoning are on
-[Access control](access-control.md); the table is the reference.
+[Access control](access-control.md); the table is the reference. Secrets (`token`,
+`secret_key`, `basic_users`) are shown as `***` by `GET api/config` and `redline config`.
 
 | Setting | Type | Default | Description |
 |---|---|---|---|
-| `access` | `"local"`, `"token"`, `"basic"`, `"framework"`, `"custom"` or `"open"` | `"local"` (Django: `"framework"`, staff users) | The access policy. `"open"` is refused unless `REDLINE_ALLOW_OPEN=1` is set too |
-| `allowed_ips` | list of IPs or CIDRs | `[]` | Client networks allowed in addition to the policy (for example a VPN range) |
-| `allowed_hosts` | list of `str` | `[]` | Extra `Host` values accepted by the DNS-rebinding check |
-| `trusted_proxies` | list of CIDRs | `[]` | Only requests from these proxies have `X-Forwarded-For` honoured for the client IP |
-| `token` | `str` (secret) | `None` | The token for `access = "token"`. Prefer the environment variable `REDLINE_TOKEN` |
-| `token_file` | path | `None` | Read the token from a file (a mounted secret) |
-| `basic_users` | table of user to hash | `{}` | For `access = "basic"`; make hashes with `redline hash-password` |
-| `access_check` | callable `(request_info) -> bool` | `None` | For `access = "custom"` |
-| `read_only` | `bool` | `False` | Refuse `DELETE`, `POST api/runs` and EXPLAIN ANALYZE (`403 read_only`) |
-| `features` | table of switch to `bool` | all `True` | Turn individual features off: `explain`, `profile`, `replay`, `snapshot`, `load`, `logs`, `locals`, `sse` |
-| `ui_enabled` | `bool` | `True` | Capture without serving the UI or API |
-| `mount_path` | `str` | adapter default | Where the UI and API are served |
-| `session_ttl_s` | `int` | `43200` | Login cookie lifetime in seconds |
-| `max_login_attempts` | `int` | 10 per 5 minutes per IP | Rate limit on `POST api/login` |
+| `access` | `"local"`, `"token"`, `"basic"`, `"framework"`, `"custom"` or `"open"` | `"local"` (Django: `"framework"`, staff users) | The access policy. `"open"` is refused (`403 open_refused`) unless `REDLINE_ALLOW_OPEN=1` is set too. A native hook (FastAPI `dependencies=`, Flask `permission=`, Litestar `guards=`) implies `"framework"` when you did not set `access` yourself |
+| `access_check` | callable `(request_info) -> bool`, or a dotted path (`pkg.mod:fn` or `pkg.mod.fn`) | `None` | For `access = "custom"`. An exception counts as a refusal and is logged |
+| `allowed_ips` | list of IPs or CIDRs (v4 or v6) | `[]` | With `local`: clients allowed **besides** loopback. With every other policy: when non-empty the client **must also** be in it (loopback is not implicit) |
+| `allowed_hosts` | list of `str` | `[]` | Extra `Host` names accepted by `local`'s DNS-rebinding check (ports ignored). Also accepted as targets of UI-started load runs |
+| `trusted_proxies` | list of IPs or CIDRs | `[]` | Only requests whose TCP peer is in this list have `X-Forwarded-For`, `-Proto` and `-Host` believed. A loopback peer sending forwarding headers without being listed is refused under `local` |
+| `token` | `str` (secret) | `None` | The token for `access = "token"`: one string, no whitespace. Outside the `dev` preset it must be at least 24 characters. Prefer `REDLINE_TOKEN` |
+| `token_file` | path | `None` | Read the token from a file once at startup (stripped). Not together with `token` |
+| `basic_users` | table of user to hash (secret) | `{}` | For `access = "basic"`; hashes made by `redline hash-password` (`pbkdf2_sha256$...`). User names may not contain `:` |
+| `secret_key` | `str`, 16 characters or more (secret) | `None` | Signs the login cookie. Unset: a random key per process, so with several workers a login only works on the worker that issued it, and every restart logs everyone out |
+| `read_only` | `bool` | `False` | Refuse every non-GET `api/` call except `api/explain`, `api/login` and `api/logout` with `403 read_only`; `POST api/explain` with `analyze` is refused too |
+| `features` | table of switch to `bool` | all `True` | Turn individual features off: `explain`, `profile`, `replay`, `snapshot`, `load`, `logs`, `locals`, `sse`. An unknown name is an error. Merged per key across layers |
+| `ui_enabled` | `bool` | `True` | `False`: every Redline URL answers `404` while capture continues |
+| `mount_path` | `str` | `None` | Where FastAPI (`prefix`), Flask (`url_prefix`) and Litestar (`path`) serve the UI when that argument is not given; those arguments now default to `None`, and the final default is `/_redline`. Django ignores it (the URLconf decides). Also the default for `redline load --ui-url` |
+| `session_ttl_s` | `int`, 1 or more | `43200` | Login cookie lifetime in seconds |
+| `max_login_attempts` | `int`, 1 or more | `10` | Failed credential attempts per client IP per 300 seconds before `429 too_many_requests` |
+| `base_url` | http(s) URL | `None` | Target of load runs started from the UI. Unset: the URL the request addressed, accepted only for a loopback host or one in `allowed_hosts` |
 
 ## Presets
 
-<!-- verify: presets -->
-`preset` only sets **defaults**. Anything you set elsewhere overrides it.
+`preset` only sets **defaults**. Anything you set elsewhere overrides it. The table is
+exactly what `redline_core.conf.PRESETS` applies:
 
 | | `dev` (default) | `staging` | `production` |
 |---|---|---|---|
-| `sample_rate` | `1.0` | `0.25` | `0.05` (slow requests and errors still kept) |
-| Request and response bodies | captured | captured | not captured |
+| `sample_rate` | `1.0` | `0.25` | `0.05` |
+| `always_keep_errors` | `True` | `True` | `True` (set explicitly) |
+| `capture_request_body` / `capture_response_body` | on | on | off |
 | `capture_locals` | on | off | off |
 | `log_level` | `INFO` | `INFO` | `WARNING` |
-| `access` | `local` | `token` | `token` (required) |
+| `access` | `local` | `token` | `token` |
 | `read_only` | off | off | **on** |
 | `badge` | `auto` | `auto` | off |
+| `server_timing` | `auto` | `auto` | off |
 | `load_from_ui` | off | off | off |
+| `explain_analyze` | off | off | off |
+
+Outside `dev` a token must be at least 24 characters, and `access = "token"` without a
+`token` or `token_file` is always an error. Slow requests are kept in every preset
+(`always_keep_slower_than_ms`, default `500`).
 
 See [Configuration](configuration.md#presets) and [Production](production.md#the-production-preset).
 
 ## Where a value comes from
 
-Layers, last one wins: built-in defaults, preset, config file (`redline.toml` or
-`[tool.redline]`), `REDLINE_<SETTING>` environment variables, then the framework's own
-settings. `redline config` prints the result and the layer of every value. See
+Layers, last one wins: built-in defaults, the adapter's defaults, preset, config file
+(`redline.toml` or `[tool.redline]`), `REDLINE_<SETTING>` environment variables, then the
+framework's own settings. `redline config` prints the result and the layer of every value. See
 [Configuration](configuration.md#layers-and-precedence).
 
 ## Django-only
@@ -238,8 +247,8 @@ Their counterparts are FastAPI's `dependencies` and `store=`, Flask's `permissio
 | `sample_rate` | `1.0` with `DEBUG`, else `0.1` | `1.0` | `1.0` | `1.0` |
 | `storage_path` | `<BASE_DIR>/.redline/redline.db` | `.redline/redline.db` (working directory) | same as FastAPI | same as FastAPI |
 | `project_root` | `BASE_DIR` | working directory | working directory | working directory |
-| Mount prefix | wherever you `include()` the URLs (e.g. `/redline/`) | `prefix`, default `/_redline` | `url_prefix`, default `/_redline` | `path`, default `/_redline` |
-| Access | `PERMISSION`, default staff | `dependencies`, default loopback only | `permission`, default loopback only | `guards`, default loopback only |
+| Mount prefix | wherever you `include()` the URLs (e.g. `/redline/`) | `prefix`, else `mount_path`, else `/_redline` | `url_prefix`, else `mount_path`, else `/_redline` | `path`, else `mount_path`, else `/_redline` |
+| Access | `PERMISSION`, default staff (`framework`) | `local` (loopback only); `dependencies=` implies `framework` | `local`; `permission=` implies `framework` | `local`; `guards=` implies `framework` |
 
 ## A complete example
 

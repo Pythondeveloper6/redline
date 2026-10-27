@@ -19,8 +19,8 @@ redline doctor                        check the setup
 redline hash-password                 make a password hash for access = "basic"
 ```
 
-Exit codes: `0` success, `1` a check or threshold failed, `2` a usage or scenario error,
-`130` interrupted with Ctrl-C.
+Exit codes: `0` success, `1` a check or threshold failed, `2` a usage, configuration or
+scenario error, `130` interrupted with Ctrl-C.
 
 ### `redline load`
 
@@ -46,37 +46,58 @@ See [Generating scenarios](load-testing.md#generating-scenarios).
 
 ### `redline config`
 
-<!-- verify: redline config / doctor / hash-password -->
-Prints the **effective configuration**: every setting's final value, which layer it came
-from (default, preset, file, env or framework) and any warnings. Secrets are shown as
-`***`. Use it first when a setting seems to be ignored.
+Prints the **effective configuration**: every setting's final value, grouped (capture,
+sampling, detectors, storage, access, features, other), which layer it came from (`default`,
+`preset`, `file`, or `env REDLINE_X`) and any warnings. Secrets are shown as `***`. Use it
+first when a setting seems to be ignored.
 
 ```bash
 REDLINE_PRESET=production redline config
+redline config --json                       # the same data as GET api/config
+redline config --project-root ./backend     # where to look for redline.toml
 ```
+
+It reads the file and environment layers only. Settings you give in code
+(`REDLINE = {...}`, `install(settings=...)`) are not visible to a separate command; the
+running app's complete view is the UI's Settings page and `GET api/config`. An invalid
+configuration (for example `access = "token"` without a token, or a misspelled
+`REDLINE_*` variable) prints the error and exits with `2`.
 
 See [Configuration](configuration.md).
 
 ### `redline doctor`
 
-<!-- verify: redline config / doctor / hash-password -->
-Checks that the setup is sound:
+Checks that the setup is sound. Each line is `OK`, `WARN` or `FAIL`; the command exits `1`
+if any check fails or the configuration does not load, and `0` otherwise (warnings do not
+fail it). It takes `--json` and `--project-root DIR` like `redline config`.
 
 | Check | Looks at |
 |---|---|
-| Storage | the store path exists or can be created, and is writable |
-| UI bundle | the prebuilt UI is present in `redline-core` |
-| Access policy | is it safe for the chosen preset? (an open policy under `production`, `read_only` off) |
-| Token strength | a short or guessable token |
-| Proxies | `trusted_proxies` too wide, or a proxy in front but none trusted |
+| `storage` | the store path exists or can be created, and is writable |
+| `ui bundle` | the prebuilt UI is present in `redline-core` |
+| `access` | `open` fails (warns when `REDLINE_ALLOW_OPEN=1` is set); `local` outside the `dev` preset warns, because behind a proxy nobody can reach Redline |
+| `token` | shorter than 24 characters (warn), an unreadable `token_file` (fail), a `token_file` readable by other users (warn) |
+| `basic` | an invalid hash (fail), fewer than 100 000 PBKDF2 iterations (warn) |
+| `sessions` | `token` or `basic` without `secret_key`: logins are per worker process (warn) |
+| `proxies` | a non-`local` policy outside `dev` with `trusted_proxies` empty (warn) |
+| `capture` | the `production` preset capturing request or response bodies or locals (warn) |
+| `retention` | `history_retention_days` off, or `max_rows` and `max_age_days` both off (warn) |
+| `load` | `load_from_ui` on but `httpx` missing (warn) |
 
-Run it in your deploy pipeline and after changing access settings.
+It sees the file and environment layers only, like `redline config`. Run it in your deploy
+pipeline and after changing access settings.
 
 ### `redline hash-password`
 
-<!-- verify: redline config / doctor / hash-password -->
-Prompts for a password and prints a PBKDF2-SHA256 hash to put in `basic_users`. The
-password is never echoed or stored. See [Access control](access-control.md#basic).
+Prompts for a password twice (a mismatch exits `2`) and prints a PBKDF2-SHA256 hash to put
+in `basic_users`. The password is never echoed or stored. When stdin is not a terminal it
+reads one line from stdin instead, so it can be scripted. `--iterations N` sets the cost
+(default 600 000, minimum 1 000). See [Access control](access-control.md#basic).
+
+```bash
+redline hash-password
+echo 'correct horse' | redline hash-password --iterations 800000
+```
 
 ## Django
 
@@ -85,16 +106,16 @@ password is never echoed or stored. See [Access control](access-control.md#basic
 | `manage.py redline_clear [--noinput]` | Delete every recorded trace (asks to confirm unless `--noinput`). History is kept |
 | `manage.py redline_prune [--max-age-days N] [--max-rows N]` | Apply [retention](storage.md#retention) now. `0` disables that rule for this run |
 | `manage.py redline_scan [PATHS] [--json] [--fail] [--dialect django\|jinja] [--no-drf]` | [Static N+1 scan](static-scan.md) of templates and DRF serializers |
-| `manage.py redline_scenario` | Generate a load-test scenario from your URLconf <!-- verify: redline_scenario --> |
+| `manage.py redline_scenario [-o FILE] [--base-url URL] [--force]` | Generate a load-test [scenario](load-testing.md#generating-scenarios) from your URLconf (stdout without `-o`) |
 
 ## Flask
 
 | Command | Does |
 |---|---|
-| `flask redline clear [--yes]` | Delete every recorded trace |
+| `flask redline clear [--yes]` | Delete every recorded trace (asks to confirm unless `--yes`, `-y` or `--noinput`) |
 | `flask redline prune [--max-age-days N] [--max-rows N]` | Apply retention now |
-| `flask redline scan` | Static N+1 scan of Jinja templates <!-- verify: flask redline scan / scenario --> |
-| `flask redline scenario` | Generate a load-test scenario from the `url_map` <!-- verify: flask redline scan / scenario --> |
+| `flask redline scan [--json] [--fail]` | [Static N+1 scan](static-scan.md) of the Jinja templates of the app and its blueprints |
+| `flask redline scenario [-o FILE] [--base-url URL] [--force]` | Generate a load-test [scenario](load-testing.md#generating-scenarios) from the `url_map` (stdout without `-o`; default base URL `http://127.0.0.1:5000`) |
 
 ## FastAPI and Litestar
 

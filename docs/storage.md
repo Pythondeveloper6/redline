@@ -40,9 +40,9 @@ Created on first open with `CREATE TABLE IF NOT EXISTS`.
 | `trace_tags` | `(trace_id, key, value)` | makes `tag=key:value` filters fast |
 | `issues` | one row per issue per trace, with the issue as JSON | Indexed by issue id and time; this is what the Issues page aggregates |
 
-### Schema version 2 (0.2)
+### Schema version 3 (0.2)
 
-Version 0.2 adds a `meta(key, value)` table holding `schema_version` (now `2`) and a set of
+Version 0.2 adds a `meta(key, value)` table holding `schema_version` (now `3`) and a set of
 **derived tables** that are written in the same transaction as the trace, from the same
 batch:
 
@@ -57,6 +57,15 @@ batch:
 | `issue_index` | every issue ever seen: kind, severity, title, route, first and last seen, first and last release, occurrences | `history_retention_days` |
 | `runs`, `run_steps` | [load-test](load-testing.md) runs and their per-step results and histograms | `history_retention_days` |
 
+Version 3 also adds `saved_seq` to `traces`: an insertion-order sequence number (indexed,
+`meta` keeps the high-water mark). The live stream uses it to resume exactly after the last
+event a client saw (`after=` or `Last-Event-ID`), because traces are saved when they
+*finish*, not when they start.
+
+In the rollups and the issue index a request that matched no route (a 404, a scanner
+probing random paths) is filed under the single route key `(unmatched)`, so the long-lived
+history does not grow a row per random path.
+
 The first three power the [Database](database.md), [Cache](cache-efficiency.md) and
 [External calls](external-calls.md) pages and are pruned **with their trace**. The rest
 power [History](history.md) and the Load page and outlive the traces.
@@ -68,7 +77,7 @@ applies to it.
 ### Migration
 
 Migrations are additive and run when the store connects. A 0.1 file (no `schema_version`
-row) is migrated **in place**, inside one `BEGIN IMMEDIATE` transaction that re-checks the
+row) or a version 2 file is migrated **in place**, inside one `BEGIN IMMEDIATE` transaction that re-checks the
 version once it holds the lock, so several workers starting at once migrate it exactly once.
 The new tables are created and **backfilled from the traces already stored**. Traces
 written by 0.1 still load: every new field has a default.
@@ -84,7 +93,9 @@ acceptable fix for a store that will not open.
 each process:
 
 1. takes one item, then drains up to **50** more that are already waiting (a batch);
-2. writes the batch in **one transaction**;
+2. writes the batch in **one transaction**, opened with `BEGIN IMMEDIATE` (as are pruning
+   and migrations), so concurrent worker processes take the write lock up front and wait
+   instead of failing with a busy error halfway through;
 3. every 200 saved traces, runs [retention](#retention);
 4. survives errors: a failed batch is logged on the `redline` logger and the thread
    carries on.
