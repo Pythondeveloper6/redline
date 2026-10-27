@@ -28,6 +28,7 @@ from django.conf import settings
 from django.http import HttpRequest, HttpResponseBase
 from django.urls import NoReverseMatch, reverse
 
+from redline_core.blocking import track_request
 from redline_core.recorder import SpanContext, TraceBuilder
 from redline_core.sampling import profile_requested
 
@@ -97,7 +98,7 @@ class RedlineMiddleware:
         if builder is None:
             return await self.get_response(request)
         try:
-            async with SpanContext("middleware", "middleware"):
+            async with track_request(builder), SpanContext("middleware", "middleware"):
                 response = await self.get_response(request)
         except BaseException as exc:
             self._finish(builder, request, None, exc)
