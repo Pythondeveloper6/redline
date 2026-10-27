@@ -46,7 +46,7 @@ export async function mockFetch(method: string, url: string, body: unknown): Pro
     const q = new URLSearchParams(location.search)
     const ro = q.get('ro') === '1'
     return ok({
-      version: '0.2.0a1', framework: 'django',
+      version: '0.3.0a1', framework: 'django',
       settings: { thresholds: { n_plus_one: 5, slow_query_ms: 100, too_many_queries: 50 }, sampling: { sample_rate: 1 }, profiling_enabled: true, explain_analyze_enabled: false },
       storage: { rows: traces.length, path: '.redline/redline.db' },
       project_root: '/Users/dev/shop', editor: 'vscode', editor_url_template: 'vscode://file/{file}:{line}', release: 'mock-1',

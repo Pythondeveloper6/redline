@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "redline-core"
-version = "0.2.0a1"
+version = "0.3.0a1"
 description = "Framework-agnostic request profiler engine: span tracing, SQL fingerprinting, N+1 detection, EXPLAIN analysis, storage and the Redline web UI."
 readme = "README.md"
 requires-python = ">=3.10"
