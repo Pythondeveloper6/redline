@@ -65,6 +65,7 @@ from .base import (
     encode_cursor,
     percentile,
 )
+from .checks import SCHEMA_V4, CheckStoreMixin
 from .derive import HOUR, Derived, derive, fingerprint_key
 from .private import ensure_private_dir, precreate, tighten
 
@@ -235,11 +236,13 @@ CREATE TABLE IF NOT EXISTS run_steps (
 );
 """
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 #: ``X-Redline-Run`` tags are kept for runs that ended at most this long ago (in-flight
 #: requests of the last step).
 _RUN_TAG_GRACE_S = 60.0
 DEAD_RUN_MESSAGE = "the load process exited unexpectedly"
+#: Tags set from ``X-Redline-Check`` (validated by the writer).
+_CHECK_TAGS = ("check_run_id", "check_req", "check_n")
 #: Tables holding one or more rows per trace, deleted with it.
 _TRACE_TABLES = ("profiles", "trace_tags", "issues", "trace_sql", "trace_ext", "trace_cache")
 #: Long-lived tables, kept across ``clear()`` unless ``history=True``.
@@ -266,7 +269,7 @@ _SUMMARY_COLS = (
 )
 
 
-class SQLiteStore:
+class SQLiteStore(CheckStoreMixin):
     """SQLite-backed :class:`~redline_core.storage.Store`.
 
     :param path: database file; parent directories are created. ``":memory:"`` works.
@@ -315,6 +318,7 @@ class SQLiteStore:
         self._since_prune = 0
         self._closed = False
         self._runs_cache: tuple[float, set[str]] | None = None
+        self._check_cache: tuple[float, set[str]] | None = None
         if path != ":memory:" and not path.startswith("file:"):
             # 0700 + a ".gitignore" of "*" when Redline creates the directory; the
             # database (and so its -wal/-shm files) is created 0600
@@ -489,8 +493,30 @@ class SQLiteStore:
             out.append(t)
         return out
 
+    def _check_check_tags(self, traces: list[Trace]) -> list[Trace]:
+        """The ``X-Redline-Check`` rule (``CONTRACT.md`` §19.2): ``check_*`` tags stay only
+        when that check run exists here and is running (or just ended).
+
+        A trace the sampler would have dropped and kept only because it carried a check tag
+        (``sampled_by == "check"``) is dropped altogether when the tag is not valid, so a
+        made-up header cannot force anything into the store."""
+        if not any("check_run_id" in t.tags for t in traces):
+            return traces
+        known = self.known_check_runs()
+        out = []
+        for t in traces:
+            if "check_run_id" in t.tags and t.tags["check_run_id"] not in known:
+                if t.tags.get("sampled_by") == "check":
+                    continue
+                tags = {k: v for k, v in t.tags.items() if k not in _CHECK_TAGS}
+                t = dataclasses.replace(t, tags=tags)
+            out.append(t)
+        return out
+
     def _write(self, traces: list[Trace]) -> None:
-        traces = self._check_run_tags(traces)
+        traces = self._check_check_tags(self._check_run_tags(traces))
+        if not traces:
+            return
         rows: builtins.list[tuple[Any, ...]] = []
         tags: builtins.list[tuple[str, str, str]] = []
         issues: builtins.list[tuple[Any, ...]] = []
@@ -1555,8 +1581,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
 
     A v0.1 file (no ``meta`` row) is version 1. Version 2 adds the analytics and history
     tables and backfills them from the traces already stored, so the SQL / cache / external
-    pages and the history have data at once. Runs in one ``BEGIN IMMEDIATE`` transaction and
-    re-reads the version inside it, so concurrent processes migrate exactly once.
+    pages and the history have data at once. Version 3 adds the live-tail ``saved_seq``;
+    version 4 the refactor-check tables (``check_suites``, ``check_runs``, ``check_results``).
+    Runs in one ``BEGIN IMMEDIATE`` transaction and re-reads the version inside it, so
+    concurrent processes migrate exactly once.
     """
     if _schema_version(conn) >= SCHEMA_VERSION:
         return
@@ -1578,6 +1606,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
                 "INSERT OR REPLACE INTO meta (key, value) VALUES ('last_seq', "
                 "(SELECT CAST(COALESCE(MAX(saved_seq), 0) AS TEXT) FROM traces))"
             )
+        if version < 4:
+            # Refactor checks (CONTRACT.md §19.5): new tables only.
+            for statement in SCHEMA_V4.split(";"):
+                if statement.strip():
+                    conn.execute(statement)
         conn.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)",
             (str(SCHEMA_VERSION),),

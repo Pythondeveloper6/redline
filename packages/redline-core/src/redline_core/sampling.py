@@ -6,8 +6,9 @@ Recording is cheap, storing is not, so the decision is split in two:
    files, the Redline UI itself), the sample-rate dice are rolled once
    (:meth:`Sampler.roll`) and :meth:`Sampler.wants_profile` decides on profiling.
 2. **At request end** – :meth:`Sampler.keep` stores the trace if the dice said so, *or* it
-   was slow, *or* it failed, *or* it was explicitly profiled. The reason lands in
-   ``trace.tags["sampled_by"]`` (``all`` / ``rate`` / ``slow`` / ``error`` / ``profile``).
+   was slow, *or* it failed, *or* it was explicitly profiled (or, provisionally, is a
+   refactor-check call). The reason lands in ``trace.tags["sampled_by"]`` (``all`` /
+   ``rate`` / ``slow`` / ``error`` / ``profile`` / ``check``).
 
 With the defaults (``sample_rate=1.0``) every request is kept – the development setting.
 In production lower ``sample_rate`` and rely on the slow/error safety nets.
@@ -132,11 +133,15 @@ class Sampler:
         duration_ms: float,
         error: bool = False,
         profiled: bool = False,
+        check: bool = False,
     ) -> str | None:
         """The ``sampled_by`` reason to store the trace, or ``None`` to drop it.
 
         ``error`` is whether the request raised; see :func:`is_error` (a 4xx is never an
-        error, even when raised as an exception).
+        error, even when raised as an exception). ``check`` is whether the request carried
+        an ``X-Redline-Check`` tag and the store validates those tags: it is then kept
+        *provisionally* as ``"check"`` – the store's writer drops it unless the check run
+        exists and is running (``CONTRACT.md`` §19.2), so a client cannot force storage.
         """
         s = self.settings
         if rolled:
@@ -147,4 +152,6 @@ class Sampler:
             return "slow"
         if profiled:
             return "profile"
+        if check:
+            return "check"
         return None
