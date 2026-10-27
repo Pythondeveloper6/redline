@@ -21,6 +21,7 @@ load-test tag, and a pyinstrument flamegraph when asked with ``?_redline=profile
 from __future__ import annotations
 
 import logging
+import sys
 from typing import Any
 
 from asgiref.sync import iscoroutinefunction, markcoroutinefunction
@@ -205,6 +206,34 @@ def _small_body(request: HttpRequest, limit: int) -> bytes | None:
         return None
 
 
+def _ninja_operation(func: Any, method: str | None) -> Any:
+    """The endpoint function behind a Django Ninja route, else ``None``.
+
+    Ninja registers one Django view per *path* (a closure over its ``PathView``, whose
+    ``operations`` hold the real functions, one or more per HTTP method), so
+    ``resolver_match.func`` is always ``ninja.operation...view_wrapper``. Nothing is
+    imported: if Ninja is not already loaded, this is not a Ninja request.
+    """
+    operation_module = sys.modules.get("ninja.operation")
+    path_view_cls = getattr(operation_module, "PathView", None)
+    if path_view_cls is None or getattr(func, "__module__", None) != "ninja.operation":
+        return None
+    candidates = [getattr(func, "__self__", None)]  # older Ninja: a bound method
+    for cell in getattr(func, "__closure__", None) or ():
+        try:
+            candidates.append(cell.cell_contents)
+        except ValueError:  # an empty cell
+            continue
+    for candidate in candidates:
+        if not isinstance(candidate, path_view_cls):
+            continue
+        for operation in candidate.operations:
+            if method in operation.methods:
+                return operation.view_func
+        return None
+    return None
+
+
 def _route(request: HttpRequest) -> tuple[str | None, str | None]:
     match = getattr(request, "resolver_match", None)
     if match is None:
@@ -213,7 +242,9 @@ def _route(request: HttpRequest) -> tuple[str | None, str | None]:
     if route is not None:
         route = "/" + route.lstrip("^/") if not route.startswith("/") else route
     func = match.func
-    target = getattr(func, "view_class", None) or getattr(func, "cls", None) or func
+    target = _ninja_operation(func, request.method) or (
+        getattr(func, "view_class", None) or getattr(func, "cls", None) or func
+    )
     module = getattr(target, "__module__", None)
     name = getattr(target, "__qualname__", None) or getattr(target, "__name__", None)
     view = f"{module}.{name}" if module and name else getattr(match, "_func_path", None)
