@@ -324,9 +324,9 @@ def test_history_retention(tmp_path):
     old.release, new.release = "old", "new"
     store.save(old)
     store.save(new)
-    store.save_run(Run(name="done", created_at=now - 20 * 86_400, status="finished"))
+    store.save_run(Run(name="done", created_at=now - 20 * 86_400, status="done"))
     store.save_run(Run(name="live", created_at=now - 20 * 86_400, status="running"))
-    store.save_run(Run(name="fresh", status="finished"))
+    store.save_run(Run(name="fresh", status="done"))
     assert store.prune_history() > 0
     assert [r.release for r in store.releases()] == ["new"]
     assert rows(store, "SELECT count(*) FROM rollups") == [(1,)]
@@ -644,9 +644,9 @@ def test_run_lifecycle(store):
         "error_breakdown",
     }
     assert s1["error_rate"] == 0.2 and s1["max_ms"] == 100 and s1["dropped"] == 3
-    store.finish_run(run.id, "finished", {"knee_step": 1, "max_ok_rps": 10, "verdict": "knee"})
+    store.finish_run(run.id, "done", {"knee_step": 1, "max_ok_rps": 10, "verdict": "knee"})
     got = store.get_run(run.id)
-    assert got.status == "finished" and got.finished_at is not None
+    assert got.status == "done" and got.finished_at is not None
     assert got.to_dict()["summary"]["knee_step"] == 1
     later = Run(name="later", created_at=run.created_at + 1)
     store.save_run(later)

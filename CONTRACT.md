@@ -409,7 +409,7 @@ Concrete decisions (v0.2 implementation):
   pattern, `retries` = requests with ≥ 3 calls and ≥ 1 error. `history` merges hourly rows into UTC-aligned 1 h / 1 d
   buckets (only non-empty ones); its `releases` are those first seen within the range. `compare_periods` has hourly
   resolution for ranges.
-- **Runs** (`redline_core.runs`): `Run(id, name, status: "running"|"finished"|"stopped"|"failed", config, created_at,
+- **Runs** (`redline_core.runs`): `Run(id, name, status: "running"|"done"|"stopped"|"failed", config, created_at,
   finished_at, steps, summary)` and `RunStep(step, target_rps, started_at, ended_at, achieved_rps, sent, ok, errors,
   dropped, hist: Histogram, error_breakdown)`; `RunStep.error_rate = errors / (ok + errors)`. Run writes are
   synchronous (not queued); `save_run_step` upserts by `(run_id, step)`, so a step can be re-saved as it progresses.

@@ -21,8 +21,8 @@ from .model import new_id
 
 __all__ = ["RUN_STATUSES", "Run", "RunStatus", "RunStep"]
 
-RunStatus = Literal["running", "finished", "stopped", "failed"]
-RUN_STATUSES: tuple[str, ...] = ("running", "finished", "stopped", "failed")
+RunStatus = Literal["running", "done", "stopped", "failed"]
+RUN_STATUSES: tuple[str, ...] = ("running", "done", "stopped", "failed")
 
 
 @dataclass
