@@ -106,14 +106,22 @@ jobs:
           path: dist/
           if-no-files-found: error
 
+  # One job per package, each in its own environment. PyPI allows a pending trusted
+  # publisher (owner + repository + workflow + environment) to be registered for one
+  # project name only, so five projects published from this workflow need five
+  # environment names. GitHub's review dialog approves all waiting environments at once.
   publish-testpypi:
-    name: Publish to TestPyPI
+    name: Publish ${{ matrix.package }} to TestPyPI
     needs: build
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [redline-core, django-redline, fastapi-redline, flask-redline, litestar-redline]
     environment:
-      name: testpypi
-      url: https://test.pypi.org/project/redline-core/
+      name: testpypi-${{ matrix.package }}
+      url: https://test.pypi.org/project/${{ matrix.package }}/
     permissions:
       # The OIDC token Trusted Publishing exchanges for a short-lived upload token.
       # Nothing else in this job needs a permission, so nothing else is granted.
@@ -122,7 +130,15 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           name: dist
-          path: dist/
+          path: all/
+      - name: Select this package's files
+        env:
+          PACKAGE: ${{ matrix.package }}
+        run: |
+          mkdir dist
+          mv all/"${PACKAGE//-/_}"-* dist/
+          ls dist
+          test "$(ls dist | wc -l)" -eq 2
       - uses: pypa/gh-action-pypi-publish@v1.14.2
         with:
           repository-url: https://test.pypi.org/legacy/
@@ -131,20 +147,32 @@ jobs:
           skip-existing: true
 
   publish-pypi:
-    name: Publish to PyPI
+    name: Publish ${{ matrix.package }} to PyPI
     needs: publish-testpypi
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [redline-core, django-redline, fastapi-redline, flask-redline, litestar-redline]
     environment:
-      name: pypi
-      url: https://pypi.org/project/redline-core/
+      name: pypi-${{ matrix.package }}
+      url: https://pypi.org/project/${{ matrix.package }}/
     permissions:
       id-token: write
     steps:
       - uses: actions/download-artifact@v8
         with:
           name: dist
-          path: dist/
+          path: all/
+      - name: Select this package's files
+        env:
+          PACKAGE: ${{ matrix.package }}
+        run: |
+          mkdir dist
+          mv all/"${PACKAGE//-/_}"-* dist/
+          ls dist
+          test "$(ls dist | wc -l)" -eq 2
       - uses: pypa/gh-action-pypi-publish@v1.14.2
         with:
           # PEP 740 attestations, signed by the same OIDC identity. Free provenance.
