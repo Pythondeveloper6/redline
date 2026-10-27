@@ -3,6 +3,7 @@ import { Link, useParams, useSearchParams } from 'react-router-dom'
 import { api, ApiError } from '../api'
 import { bytes, clock, isRedacted, KIND_COLOR, ms } from '../lib/format'
 import type { Issue, Span, Trace } from '../types'
+import { useFeatures } from '../lib/meta'
 import { Callsite, CopyButton, Empty, ErrorBox, I, Icon, IssueBadge, Pill, Redacted, Sev, Spinner, Sql, Status, Tabs, useAsync } from '../components/ui'
 import Waterfall from '../components/Waterfall'
 import SpanDrawer, { KV } from '../components/SpanDrawer'
@@ -155,6 +156,7 @@ export default function RequestDetail({ snapshotId }: { snapshotId?: string } = 
   const [sp, setSp] = useSearchParams()
   const tab = (sp.get('tab') as Tab) || 'timeline'
   const setTab = (t: Tab) => setSp({ tab: t }, { replace: true })
+  const { has } = useFeatures()
   const t = useAsync(() => api.trace(id), [id])
   const [span, setSpan] = useState<Span | null>(null)
   const [explain, setExplain] = useState<Span | null>(null)
@@ -181,13 +183,13 @@ export default function RequestDetail({ snapshotId }: { snapshotId?: string } = 
       </div>
       <div className="flex flex-wrap items-center gap-2">
         <RequestActions trace={trace} offline={snap} />
-        {!snap && <a className="btn" href={api.snapshotUrl(trace.id)} download={`redline-${trace.id}.html`} title="Download a standalone HTML copy of this request"><Icon d={I.down} size={12} />Snapshot</a>}
+        {!snap && has('snapshot') && <a className="btn" href={api.snapshotUrl(trace.id)} download={`redline-${trace.id}.html`} title="Download a standalone HTML copy of this request"><Icon d={I.down} size={12} />Snapshot</a>}
       </div>
       {trace.error && (
         <div className="rounded-lg border border-bad/30 bg-bad/5 p-3">
           <div className="flex items-center gap-2 text-bad font-semibold"><Icon d={I.alert} size={15} />{trace.error.type}</div>
           <div className="mt-0.5">{trace.error.message}</div>
-          <button className="btn btn-ghost -ml-2 mt-1 text-bad" onClick={() => setTab('exception')}>View traceback{trace.error.frames?.length ? ' and locals' : ''}</button>
+          <button className="btn btn-ghost -ml-2 mt-1 text-bad" onClick={() => setTab('exception')}>View traceback{trace.error.frames?.length && has('locals') ? ' and locals' : ''}</button>
         </div>
       )}
       {trace.truncated && (
@@ -211,18 +213,18 @@ export default function RequestDetail({ snapshotId }: { snapshotId?: string } = 
           { id: 'timeline', label: 'Timeline' },
           { id: 'sql', label: 'SQL', badge: <span className="num text-faint">{trace.query_count}</span> },
           { id: 'issues', label: 'Issues', badge: trace.issues.length ? <span className="num rounded-full bg-accent text-white px-1.5 text-[10px] leading-4">{trace.issues.length}</span> : undefined },
-          { id: 'logs', label: 'Logs', badge: logCount ? <span className={`num ${hasErrLog ? 'text-bad' : 'text-faint'}`}>{logCount}{trace.logs_dropped ? '+' : ''}</span> : undefined },
+          ...(has('logs') ? [{ id: 'logs' as Tab, label: 'Logs', badge: logCount ? <span className={`num ${hasErrLog ? 'text-bad' : 'text-faint'}`}>{logCount}{trace.logs_dropped ? '+' : ''}</span> : undefined }] : []),
           ...(trace.error ? [{ id: 'exception' as Tab, label: 'Exception', badge: <span className="w-1.5 h-1.5 rounded-full bg-bad" /> }] : []),
-          { id: 'profile', label: 'Profile' },
+          ...(has('profile') ? [{ id: 'profile' as Tab, label: 'Profile' }] : []),
           { id: 'http', label: 'Request / Response' },
         ]} />
         <div className="pt-4">
           {tab === 'timeline' && <Waterfall spans={trace.spans} total={trace.duration_ms} issueSpanIds={issueSpanIds} onSelect={setSpan} selected={span?.id} />}
-          {tab === 'sql' && <SqlTab trace={trace} issueBySpan={issueBySpan} onOpen={setSpan} onExplain={snap ? undefined : setExplain} />}
+          {tab === 'sql' && <SqlTab trace={trace} issueBySpan={issueBySpan} onOpen={setSpan} onExplain={snap || !has('explain') ? undefined : setExplain} />}
           {tab === 'issues' && <IssuesTab issues={trace.issues} spans={trace.spans} />}
-          {tab === 'logs' && <LogsTab logs={trace.logs ?? []} dropped={trace.logs_dropped ?? 0} />}
+          {tab === 'logs' && has('logs') && <LogsTab logs={trace.logs ?? []} dropped={trace.logs_dropped ?? 0} />}
           {tab === 'exception' && (trace.error ? <ExceptionTab error={trace.error} /> : <div className="card"><Empty title="No exception in this request" /></div>)}
-          {tab === 'profile' && <ProfileTab trace={trace} />}
+          {tab === 'profile' && has('profile') && <ProfileTab trace={trace} />}
           {tab === 'http' && (
             <div className="space-y-3">
               {Object.keys(trace.tags).length > 0 && <div className="flex flex-wrap gap-1.5">{Object.entries(trace.tags).map(([k, v]) => <Pill key={k}><span className="text-faint">{k}</span> {v}</Pill>)}</div>}
@@ -241,8 +243,8 @@ export default function RequestDetail({ snapshotId }: { snapshotId?: string } = 
           )}
         </div>
       </div>
-      <SpanDrawer span={span} onClose={() => setSpan(null)} onExplain={snap ? undefined : s => { setSpan(null); setExplain(s) }} />
-      {!snap && <ExplainDrawer traceId={trace.id} span={explain} onClose={() => setExplain(null)} />}
+      <SpanDrawer span={span} onClose={() => setSpan(null)} onExplain={snap || !has('explain') ? undefined : s => { setSpan(null); setExplain(s) }} />
+      {!snap && has('explain') && <ExplainDrawer traceId={trace.id} span={explain} onClose={() => setExplain(null)} />}
     </div>
   )
 }

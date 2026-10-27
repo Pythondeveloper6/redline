@@ -11,21 +11,29 @@ from __future__ import annotations
 
 import dataclasses
 import difflib
+import ipaddress
 import os
 import re
 import subprocess
 import threading
+import types
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 __all__ = [
+    "ACCESS_POLICIES",
     "DEFAULT_IGNORE_PATHS",
     "DEFAULT_REDACT_HEADERS",
     "DEFAULT_REDACT_KEYS",
     "EDITORS",
+    "FEATURES",
     "LOG_LEVELS",
+    "MIN_TOKEN_LENGTH",
+    "PRESETS",
     "PROFILE_MODES",
+    "SECRET_SETTINGS",
     "ProfileMode",
     "Settings",
     "SettingsError",
@@ -46,6 +54,45 @@ EDITORS: dict[str, str | None] = {
     "sublime": "subl://open?url=file://{file}&line={line}",
     "none": None,
 }
+
+#: ``Settings.access`` policies (``CONTRACT.md`` §18).
+ACCESS_POLICIES: tuple[str, ...] = ("local", "token", "basic", "framework", "custom", "open")
+#: Switches of ``Settings.features``; a missing key means on.
+FEATURES: tuple[str, ...] = (
+    "explain",
+    "profile",
+    "replay",
+    "snapshot",
+    "load",
+    "logs",
+    "locals",
+    "sse",
+)
+#: What each preset changes; a preset only sets defaults – any explicit value wins.
+PRESETS: dict[str, dict[str, Any]] = {
+    "dev": {},
+    "staging": {"sample_rate": 0.25, "access": "token", "capture_locals": False},
+    "production": {
+        "sample_rate": 0.05,
+        "always_keep_errors": True,
+        "capture_request_body": False,
+        "capture_response_body": False,
+        "capture_locals": False,
+        "log_level": "WARNING",
+        "access": "token",
+        "read_only": True,
+        "badge": False,
+        "server_timing": False,
+        "load_from_ui": False,
+        "explain_analyze": False,
+    },
+}
+#: Settings never shown in clear (``GET api/config``, ``redline config``).
+SECRET_SETTINGS: tuple[str, ...] = ("token", "secret_key", "basic_users")
+#: Prefix of the hashes made by ``redline hash-password``.
+PASSWORD_HASH_PREFIX = "pbkdf2_sha256$"
+#: Minimum token length outside the ``dev`` preset.
+MIN_TOKEN_LENGTH = 24
 
 DEFAULT_IGNORE_PATHS: tuple[str, ...] = ("/static/", "/media/", "/favicon.ico")
 DEFAULT_REDACT_HEADERS: tuple[str, ...] = (
@@ -137,7 +184,9 @@ class Settings:
     #: ``vscode``, ``cursor``, ``pycharm``, ``idea``, ``sublime``, ``none`` or a template
     #: containing ``{file}`` (absolute path) and ``{line}``.
     editor: str = "vscode"
-    server_timing: bool = True
+    #: ``Server-Timing`` header on recorded responses (trace id, query count/time – a side
+    #: channel for anyone who can make requests); ``"auto"`` = in framework debug mode.
+    server_timing: bool | str = "auto"
     #: Inject the floating badge into HTML responses; ``"auto"`` = when the framework is
     #: in debug mode.
     badge: bool | str = "auto"
@@ -148,8 +197,53 @@ class Settings:
     history_retention_days: int | None = 90
     load_from_ui: bool = False
 
+    # configuration & access control (CONTRACT.md section 18)
+    #: ``dev`` / ``staging`` / ``production``: a set of defaults, see :data:`PRESETS`. It
+    #: is applied by :func:`redline_core.config.resolve_settings`, not by this class.
+    preset: str = "dev"
+    #: Who may open the UI/API: one of :data:`ACCESS_POLICIES`.
+    access: str = "local"
+    #: ``access="custom"``: ``callable(RequestInfo) -> bool`` or its dotted path.
+    access_check: Any = None
+    #: IPs/CIDRs. ``local``: allowed besides loopback; other policies: when non-empty, the
+    #: client must also be in one of them.
+    allowed_ips: tuple[str, ...] = ()
+    #: Extra ``Host`` names the ``local`` policy's DNS-rebinding check accepts.
+    allowed_hosts: tuple[str, ...] = ()
+    #: Peers (IPs/CIDRs) whose ``X-Forwarded-For/-Proto/-Host`` headers are believed.
+    trusted_proxies: tuple[str, ...] = ()
+    token: str | None = None
+    token_file: str | None = None
+    #: ``{username: hash}`` for ``access="basic"`` (hashes from ``redline hash-password``).
+    basic_users: Mapping[str, str] = field(default_factory=dict)
+    #: Signs the login cookie. Unset: a random per-process key (single-process servers).
+    secret_key: str | None = None
+    read_only: bool = False
+    #: Feature switches, see :data:`FEATURES` (missing keys are on).
+    features: Mapping[str, bool] = field(default_factory=dict)
+    ui_enabled: bool = True
+    #: Where adapters mount the UI/API when their own argument is not given (Django: the
+    #: URLconf decides).
+    mount_path: str | None = None
+    #: Target of load runs started from the UI. Unset: the app's own URL as the request
+    #: addressed it, accepted only for a loopback host or one in ``allowed_hosts``.
+    base_url: str | None = None
+    session_ttl_s: int = 43_200
+    #: Failed logins allowed per client IP per 5 minutes.
+    max_login_attempts: int = 10
+
     def __post_init__(self) -> None:
-        for name in (*_SEQ_FIELDS, *_PATH_FIELDS, "log_level", "badge"):
+        for name in (
+            *_SEQ_FIELDS,
+            *_PATH_FIELDS,
+            *_MAP_FIELDS,
+            "log_level",
+            "badge",
+            "server_timing",
+            "preset",
+            "access",
+            "mount_path",
+        ):
             object.__setattr__(self, name, _coerce(name, getattr(self, name)))
         _validate(self)
 
@@ -193,6 +287,10 @@ class Settings:
     def to_dict(self) -> dict[str, Any]:
         return {name: _plain(getattr(self, name)) for name in self.field_names()}
 
+    def feature(self, name: str) -> bool:
+        """Whether feature ``name`` (see :data:`FEATURES`) is switched on."""
+        return bool(self.features.get(name, True))
+
     # derived ---------------------------------------------------------------
     @property
     def max_age_s(self) -> float | None:
@@ -219,8 +317,16 @@ class Settings:
         }
 
 
-_SEQ_FIELDS = {"ignore_paths", "redact_headers", "redact_keys"}
-_PATH_FIELDS = {"storage_path", "project_root"}
+_SEQ_FIELDS = {
+    "ignore_paths",
+    "redact_headers",
+    "redact_keys",
+    "allowed_ips",
+    "allowed_hosts",
+    "trusted_proxies",
+}
+_PATH_FIELDS = {"storage_path", "project_root", "token_file"}
+_MAP_FIELDS = {"basic_users", "features"}
 #: Integer settings where ``0`` and ``None`` both mean "no limit".
 _OPTIONAL_LIMITS = ("max_rows", "max_age_days", "max_spans_per_trace", "history_retention_days")
 
@@ -234,7 +340,13 @@ def _coerce(name: str, value: Any) -> Any:
         return value
     if name == "log_level" and isinstance(value, str):
         return value.strip().upper()
-    if name == "badge" and isinstance(value, str):
+    if name in ("preset", "access") and isinstance(value, str):
+        return value.strip().lower()
+    if name == "mount_path" and isinstance(value, str):
+        return "/" + value.strip().strip("/")
+    if name in _MAP_FIELDS:
+        return _coerce_mapping(name, value)
+    if name in ("badge", "server_timing") and isinstance(value, str):
         return value.strip().lower() if value.strip().lower() == "auto" else value
     if name in _SEQ_FIELDS:
         if isinstance(value, str):
@@ -246,8 +358,25 @@ def _coerce(name: str, value: Any) -> Any:
     return value
 
 
+def _coerce_mapping(name: str, value: Any) -> Mapping[str, Any]:
+    if value is None:
+        value = {}
+    if not isinstance(value, Mapping):
+        raise SettingsError(f"Redline setting {name!r} must be a mapping (a dict or TOML table).")
+    if name == "features":
+        items = {(k.strip().lower() if isinstance(k, str) else k): v for k, v in value.items()}
+        items = {**dict.fromkeys(FEATURES, True), **items}
+    else:
+        items = dict(value)
+    return types.MappingProxyType(items)  # read-only: settings are immutable
+
+
 def _plain(value: Any) -> Any:
-    return list(value) if isinstance(value, tuple) else value
+    if isinstance(value, tuple):
+        return list(value)
+    if isinstance(value, types.MappingProxyType):
+        return dict(value)
+    return value
 
 
 def _check_type(s: Settings, name: str, types: tuple[type, ...], label: str) -> None:
@@ -268,8 +397,9 @@ def _validate(s: Settings) -> None:
         "detect_blocking",
         "capture_logs",
         "capture_locals",
-        "server_timing",
         "load_from_ui",
+        "read_only",
+        "ui_enabled",
     ):
         _check_type(s, name, (bool,), "True or False")
     for name in (
@@ -281,6 +411,8 @@ def _validate(s: Settings) -> None:
         "large_result_rows",
         "unbounded_rows",
         "max_logs_per_trace",
+        "session_ttl_s",
+        "max_login_attempts",
     ):
         _check_type(s, name, (int,), "an integer")
         if getattr(s, name) < 0:
@@ -293,8 +425,14 @@ def _validate(s: Settings) -> None:
             raise SettingsError(
                 f"Redline setting {name!r} must not be negative (use 0 or None to disable it)."
             )
-    for name in ("n_plus_one_threshold", "duplicate_threshold", "writer_queue_size"):
-        if getattr(s, name) < 1 + (name != "writer_queue_size"):
+    for name in (
+        "n_plus_one_threshold",
+        "duplicate_threshold",
+        "writer_queue_size",
+        "session_ttl_s",
+        "max_login_attempts",
+    ):
+        if getattr(s, name) < (2 if name.endswith("threshold") else 1):
             raise SettingsError(f"Redline setting {name!r} is too small: {getattr(s, name)}.")
     for name in (
         "sample_rate",
@@ -325,10 +463,12 @@ def _validate(s: Settings) -> None:
             f"Redline setting 'log_level' must be one of {', '.join(LOG_LEVELS)} "
             f"(case-insensitive); got {s.log_level!r}."
         )
-    if not isinstance(s.badge, bool) and s.badge != "auto":
-        raise SettingsError(
-            f"Redline setting 'badge' must be 'auto', True or False; got {s.badge!r}."
-        )
+    for name in ("badge", "server_timing"):
+        value = getattr(s, name)
+        if not isinstance(value, bool) and value != "auto":
+            raise SettingsError(
+                f"Redline setting {name!r} must be 'auto', True or False; got {value!r}."
+            )
     _check_type(s, "editor", (str,), "an editor name or a template")
     if s.editor not in EDITORS and not ("{file}" in s.editor and "{line}" in s.editor):
         raise SettingsError(
@@ -346,6 +486,114 @@ def _validate(s: Settings) -> None:
             re.compile(pattern)
         except re.error as exc:
             raise SettingsError(f"Invalid regular expression {pattern!r}: {exc}.") from None
+    _validate_access(s)
+
+
+_GENERATE_TOKEN = 'python -c "import secrets; print(secrets.token_urlsafe(32))"'
+
+
+def _validate_access(s: Settings) -> None:
+    """The section-18 settings, including the cross-field rules of the access policy."""
+    if s.preset not in PRESETS:
+        raise SettingsError(
+            f"Redline setting 'preset' must be one of {', '.join(PRESETS)}; got {s.preset!r}."
+        )
+    if s.access not in ACCESS_POLICIES:
+        raise SettingsError(
+            f"Redline setting 'access' must be one of {', '.join(ACCESS_POLICIES)}; "
+            f"got {s.access!r}."
+        )
+    for name in ("allowed_ips", "trusted_proxies"):
+        for entry in getattr(s, name):
+            try:
+                ipaddress.ip_network(entry.strip(), strict=False)
+            except ValueError:
+                raise SettingsError(
+                    f"Redline setting {name!r}: {entry!r} is not an IP address or CIDR network "
+                    "(e.g. '10.0.0.0/8', '192.168.1.7', 'fd00::/8')."
+                ) from None
+    if s.base_url is not None:
+        _check_type(s, "base_url", (str,), "an http(s) URL or None")
+        parts = urlsplit(s.base_url)
+        if parts.scheme not in ("http", "https") or not parts.netloc or parts.query:
+            raise SettingsError(
+                "Redline setting 'base_url' must be an http(s) URL such as "
+                f"'http://127.0.0.1:8000'; got {s.base_url!r}."
+            )
+    for name in ("token", "token_file", "secret_key", "mount_path"):
+        if getattr(s, name) is not None:
+            _check_type(s, name, (str,), "a string or None")
+    if s.token is not None:
+        if not s.token or any(c.isspace() or not c.isprintable() for c in s.token):
+            raise SettingsError(
+                "Redline setting 'token' must be a non-empty string without whitespace."
+            )
+        if s.token_file is not None:
+            raise SettingsError("Set either the Redline 'token' or 'token_file', not both.")
+    if s.secret_key is not None and len(s.secret_key) < 16:
+        raise SettingsError("Redline setting 'secret_key' must be at least 16 characters long.")
+    if s.mount_path is not None and (
+        s.mount_path == "/" or any(c in s.mount_path for c in ';,"\\ \r\n\t')
+    ):
+        raise SettingsError(
+            f"Redline setting 'mount_path' must be a sub-path such as '/_redline'; "
+            f"got {s.mount_path!r}."
+        )
+    for feature, on in s.features.items():
+        if feature not in FEATURES:
+            close = difflib.get_close_matches(str(feature), FEATURES, n=1)
+            hint = f" (did you mean {close[0]!r}?)" if close else ""
+            raise SettingsError(
+                f"Unknown Redline feature {feature!r}{hint}. Features: {', '.join(FEATURES)}."
+            )
+        if not isinstance(on, bool):
+            raise SettingsError(f"Redline feature {feature!r} must be True or False; got {on!r}.")
+    for user, hashed in s.basic_users.items():
+        if not isinstance(user, str) or not user or ":" in user:
+            raise SettingsError(
+                "Redline setting 'basic_users': user names must be non-empty strings without "
+                f"':'; got {user!r}."
+            )
+        if not isinstance(hashed, str) or not hashed.startswith(PASSWORD_HASH_PREFIX):
+            raise SettingsError(
+                f"Redline setting 'basic_users': the password of {user!r} must be a hash made "
+                "by `redline hash-password` (it starts with 'pbkdf2_sha256$'), never the "
+                "plain password."
+            )
+    if s.access_check is not None and not (
+        callable(s.access_check) or isinstance(s.access_check, str)
+    ):
+        raise SettingsError(
+            "Redline setting 'access_check' must be a callable(request_info) -> bool or its "
+            "dotted path."
+        )
+    if s.access == "token" and s.token is None and s.token_file is None:
+        why = f" (the {s.preset!r} preset uses access='token')" if s.preset != "dev" else ""
+        raise SettingsError(
+            f"access='token' needs a token{why}: set 'token' (e.g. the REDLINE_TOKEN "
+            f"environment variable) or 'token_file'. Generate one with: {_GENERATE_TOKEN}"
+        )
+    if s.access == "token" and s.token is not None and s.preset != "dev":
+        check_token_strength(s.token, s.preset)
+    if s.access == "basic" and not s.basic_users:
+        raise SettingsError(
+            "access='basic' needs at least one user in 'basic_users' "
+            "({username: hash}; make hashes with `redline hash-password`)."
+        )
+    if s.access == "custom" and s.access_check is None:
+        raise SettingsError(
+            "access='custom' needs 'access_check': a callable(request_info) -> bool "
+            "(or its dotted path)."
+        )
+
+
+def check_token_strength(token: str, preset: str) -> None:
+    """Raise :class:`SettingsError` when ``token`` is too short for ``preset``."""
+    if preset != "dev" and len(token) < MIN_TOKEN_LENGTH:
+        raise SettingsError(
+            f"The Redline token must be at least {MIN_TOKEN_LENGTH} characters long with the "
+            f"{preset!r} preset (it has {len(token)}). Generate one with: {_GENERATE_TOKEN}"
+        )
 
 
 # ── v0.2 helpers ─────────────────────────────────────────────────────────────────────

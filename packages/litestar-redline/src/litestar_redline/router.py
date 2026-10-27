@@ -19,7 +19,7 @@ from redline_core import stream, ui
 from redline_core.api import RawResponse
 from redline_core.storage import FilterError
 
-from ._security import RedlineHTTPError, csrf_guard
+from ._security import RedlineHTTPError, request_info
 
 __all__ = ["build_router", "error_response"]
 
@@ -41,11 +41,15 @@ _CODES = {
 
 
 def error_response(
-    status: int, code: str, message: str, headers: dict[str, str] | None = None
+    status: int,
+    code: str,
+    message: str,
+    headers: dict[str, str] | None = None,
+    extra: dict[str, Any] | None = None,
 ) -> Response[Any]:
     """A JSON error in the API's shape (``CONTRACT.md`` section 5)."""
     return Response(
-        {"error": {"code": code, "message": message}},
+        {"error": {"code": code, "message": message, **(extra or {})}},
         status_code=status,
         media_type=MediaType.JSON,
         headers={**_NO_STORE, **_SECURITY, **(headers or {})},
@@ -56,12 +60,13 @@ def _http_exception_handler(_request: Request, exc: HTTPException) -> Response[A
     """Render ``HTTPException`` - from Redline's guards *and* your own guards - as
     ``{"error": {"code", "message"}}`` so the UI can show it. Headers such as
     ``WWW-Authenticate`` are kept."""
+    extra: dict[str, Any] = {}
     if isinstance(exc, RedlineHTTPError):
-        code, message = exc.code, exc.message
+        code, message, extra = exc.code, exc.message, exc.extra
     else:
         code = _CODES.get(exc.status_code, "http_error")
         message = exc.detail if isinstance(exc.detail, str) and exc.detail else code
-    return error_response(exc.status_code, code, message, dict(exc.headers or {}))
+    return error_response(exc.status_code, code, message, dict(exc.headers or {}), extra)
 
 
 def _rest(request: Request[Any, Any, Any], name: str) -> str:
@@ -135,12 +140,21 @@ def build_router(plugin: Any, path: str, guards: Sequence[Any]) -> Router:
     @route(
         "/api/{rest:path}",
         http_method=["GET", "POST", "DELETE", "PUT", "PATCH"],  # core answers 405 to the last two
-        guards=[csrf_guard],
         status_code=200,
         include_in_schema=False,
     )
     async def api(request: Request[Any, Any, Any]) -> Response[Any]:
         plugin.loop = asyncio.get_running_loop()
+        if _rest(request, "rest").strip("/") in ("login", "logout"):  # the gate's own endpoints
+            body = await request.body() if request.method == "POST" else None
+            decision = plugin.access.handle(request_info(request, path), body)
+            if decision is not None:
+                return Response(
+                    decision.body(),
+                    status_code=decision.status,
+                    media_type=MediaType.JSON,
+                    headers={**_NO_STORE, **_SECURITY, **decision.headers},
+                )
         params = _params(request)
         body = await request.body() if request.method == "POST" else None
         status, payload = await sync_to_thread(

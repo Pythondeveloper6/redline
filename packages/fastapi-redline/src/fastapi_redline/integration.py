@@ -13,13 +13,15 @@ from fastapi import Depends, FastAPI
 from fastapi.params import Depends as DependsParam
 
 from redline_core import Recorder, Settings, configure
+from redline_core.access import Access
 from redline_core.api import RedlineAPI
+from redline_core.config import ResolvedConfig, resolve_settings
 from redline_core.explain import ExplainExecutor
 from redline_core.load.control import run_hooks
 from redline_core.storage import SQLiteStore, Store
 
 from ._middleware import RedlineMiddleware
-from ._security import local_only
+from ._security import redline_guard
 from ._serialize import instrument_serialization
 from ._sqlalchemy import (
     EngineLike,
@@ -49,6 +51,8 @@ class Redline:
         recorder: Recorder,
         store: Store,
         suggester: SQLAlchemyFixSuggester,
+        config: ResolvedConfig | None = None,
+        access: Access | None = None,
     ) -> None:
         self.app = app
         self.prefix = prefix
@@ -56,6 +60,8 @@ class Redline:
         self.recorder = recorder
         self.store = store
         self.suggester = suggester
+        self.config = config
+        self.access = access if access is not None else Access(settings)
         self.engines: dict[str, EngineLike] = {}
         self.loop: asyncio.AbstractEventLoop | None = None
         launcher, stopper = run_hooks(store, settings)
@@ -66,6 +72,8 @@ class Redline:
             explain_executor=self._executor_for,
             run_launcher=launcher,
             run_stopper=stopper,
+            config=config,
+            access=self.access,
         )
 
     def add_engine(self, engine: EngineLike, alias: str | None = None) -> str:
@@ -95,7 +103,7 @@ def install(
     *,
     engine: Any = None,
     settings: Mapping[str, Any] | Settings | None = None,
-    prefix: str = "/_redline",
+    prefix: str | None = None,
     dependencies: Sequence[Callable[..., Any] | DependsParam] | None = None,
     models: Any = None,
     store: Store | None = None,
@@ -106,15 +114,20 @@ def install(
         A sync ``Engine``, an ``AsyncEngine``, a list of them, or ``{alias: engine}``.
         The first of a list is the ``"default"`` db alias (used by EXPLAIN).
     ``settings``
-        A ``Settings`` or a dict of settings (case-insensitive keys).
+        A ``Settings`` or a dict of settings (case-insensitive keys). They are the top
+        layer over ``redline.toml`` / ``[tool.redline]`` and ``REDLINE_*`` variables
+        (``redline_core.config``).
     ``prefix``
-        Where the UI and API live (``/_redline/``). Never recorded.
+        Where the UI and API live (default: the ``mount_path`` setting, else
+        ``/_redline``). Never recorded.
     ``dependencies``
         FastAPI dependencies protecting the UI and API, e.g.
-        ``[Depends(require_admin)]``. When omitted, :func:`local_only` applies (loopback
-        clients addressing ``localhost``/``127.0.0.1``/``[::1]``) and a warning is
-        logged; pass ``[]`` to deliberately leave it open. ``HTTPException`` raised by
-        these dependencies is answered in the API's error shape.
+        ``[Depends(require_admin)]``; giving them implies ``access="framework"`` unless
+        the ``access`` setting is set explicitly. When omitted, the ``access`` setting
+        decides (default ``local``: loopback clients addressing
+        ``localhost``/``127.0.0.1``/``[::1]``); ``[]`` deliberately leaves it open.
+        ``HTTPException`` raised by these dependencies is answered in the API's error
+        shape.
     ``models``
         Declarative ``Base``/``registry`` (or a list) for fix suggestions; by default every
         registry SQLAlchemy knows about.
@@ -123,33 +136,43 @@ def install(
     """
     if getattr(app.state, "redline", None) is not None:
         raise RuntimeError("Redline is already installed on this app.")
+    resolved = resolve_settings(settings, native_hook=dependencies is not None)
+    cfg = resolved.settings
+    prefix = prefix if prefix is not None else (cfg.mount_path or "/_redline")
     prefix = "/" + prefix.strip("/")
     if prefix == "/":
         raise ValueError("prefix must be a sub-path such as '/_redline'.")
-
-    cfg = settings if isinstance(settings, Settings) else Settings.from_mapping(settings)
     own = rf"^{re.escape(prefix)}(/|$)"
     if own not in cfg.ignore_paths:
         cfg = cfg.replace(ignore_paths=[*cfg.ignore_paths, own])
+    access = Access(cfg)
 
     store = store if store is not None else SQLiteStore.from_settings(cfg)
     suggester = SQLAlchemyFixSuggester(models, project_root=cfg.project_root)
     recorder = configure(cfg, store, [suggester])
     redline = Redline(
-        app=app, prefix=prefix, settings=cfg, recorder=recorder, store=store, suggester=suggester
+        app=app,
+        prefix=prefix,
+        settings=cfg,
+        recorder=recorder,
+        store=store,
+        suggester=suggester,
+        config=resolved,
+        access=access,
     )
     for alias, eng in name_engines(engine).items():
         redline.add_engine(eng, alias)
 
-    if dependencies is None:
-        deps: list[Any] = [Depends(local_only)]
+    deps: list[Any] = [Depends(redline_guard(access, prefix))]
+    if dependencies is not None:
+        deps += [d if isinstance(d, DependsParam) else Depends(d) for d in dependencies]
+    if cfg.access == "local":
         logger.warning(
-            "Redline is mounted at %s with no auth dependency: only loopback clients are "
-            "allowed. Pass install(app, dependencies=[...]) before exposing it.",
+            "Redline is mounted at %s with no auth dependency (access='local'): only "
+            "loopback clients are allowed. Set access='token' or 'basic', or pass "
+            "install(app, dependencies=[...]) before exposing it.",
             prefix,
         )
-    else:
-        deps = [d if isinstance(d, DependsParam) else Depends(d) for d in dependencies]
 
     router = build_router(redline, deps)
     before = len(app.router.routes)

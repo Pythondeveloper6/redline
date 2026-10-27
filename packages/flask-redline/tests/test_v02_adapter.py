@@ -20,7 +20,7 @@ RUN_BODY = {
 
 # ---------------------------------------------------------------------------- Server-Timing
 def test_server_timing_header(make_env):
-    env = make_env()
+    env = make_env(settings={"server_timing": True})
     r = env.client().get("/orders/1")
     timing = r.headers["Server-Timing"]
     assert timing.startswith("total;dur=")
@@ -30,7 +30,7 @@ def test_server_timing_header(make_env):
 
 
 def test_server_timing_appends_to_the_apps_header(make_env):
-    r = make_env().client().get("/timed")
+    r = make_env(settings={"server_timing": True}).client().get("/timed")
     values = r.headers.getlist("Server-Timing")
     assert len(values) == 1
     assert values[0].startswith('app;dur=1.0;desc="mine", total;dur=')
@@ -39,8 +39,15 @@ def test_server_timing_appends_to_the_apps_header(make_env):
 def test_server_timing_off_and_not_on_redline_urls(make_env):
     env = make_env(settings={"server_timing": False})
     assert "Server-Timing" not in env.client().get("/orders/1").headers
-    env2 = make_env()
+    env2 = make_env(settings={"server_timing": True})
     assert "Server-Timing" not in env2.client().get("/_redline/api/meta").headers
+
+
+def test_server_timing_auto_follows_app_debug(make_env):
+    env = make_env()  # "auto": only in debug mode (it is a side channel)
+    assert "Server-Timing" not in env.client().get("/orders/1").headers
+    env.app.debug = True
+    assert "Server-Timing" in env.client().get("/orders/1").headers
 
 
 # ---------------------------------------------------------------------------- badge

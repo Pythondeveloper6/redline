@@ -167,7 +167,9 @@ class RedlineMiddleware:
         res = _Capture(limit)
         capture_res = settings.capture_response_body
         state: dict[str, Any] = {"status": None, "headers": [], "done": False}
-        badge_on = ui.badge_enabled(settings, bool(getattr(scope.get("app"), "debug", False)))
+        debug = bool(getattr(scope.get("app"), "debug", False))
+        badge_on = ui.badge_enabled(settings, debug)
+        timing_on = ui.server_timing_enabled(settings, debug)
         held: dict[str, Any] = {}  # badge: the held start message and the buffered body
 
         def finalize(status: int | None = None, error: BaseException | None = None) -> None:
@@ -243,7 +245,7 @@ class RedlineMiddleware:
             if kind == "http.response.start":
                 state["status"] = message["status"]
                 resp_headers = list(message.get("headers") or [])
-                if settings.server_timing:
+                if timing_on:
                     timing = builder.server_timing()
                     if timing:
                         _with_header(resp_headers, b"server-timing", timing)

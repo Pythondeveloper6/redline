@@ -82,7 +82,7 @@ def test_defaults():
     assert (s.large_result_rows, s.unbounded_rows) == (1000, 200)
     assert (s.slow_serializer_ms, s.long_transaction_ms, s.slow_external_ms) == (50, 200, 500)
     assert (s.capture_logs, s.log_level, s.max_logs_per_trace) == (True, "INFO", 200)
-    assert (s.capture_locals, s.editor, s.server_timing) == (True, "vscode", True)
+    assert (s.capture_locals, s.editor, s.server_timing) == (True, "vscode", "auto")
     assert s.badge == "auto" and s.release is None
     assert (s.history_retention_days, s.load_from_ui) == (90, False)
 
@@ -285,7 +285,9 @@ def test_meta_additions(tmp_path):
         assert meta["editor"] == "cursor"
         assert meta["editor_url_template"] == "cursor://file/{file}:{line}"
         assert meta["release"] == "r9"
-        assert meta["features"] == {"load_from_ui": True, "sse": True, "snapshot": True}
+        assert {"load_from_ui": True, "sse": True, "snapshot": True}.items() <= meta[
+            "features"
+        ].items()
         assert "thresholds" in meta["settings"]  # v0.1 keys untouched
         _, none_meta = RedlineAPI(store, Settings(editor="none"), framework="other").dispatch(
             "GET", "api/meta"

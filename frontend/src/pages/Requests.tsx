@@ -5,6 +5,7 @@ import { useLiveStream } from '../lib/live'
 import { ago, ms } from '../lib/format'
 import { isTyping, useDebounced, useNow } from '../lib/hooks'
 import type { Page, TraceFilters, TraceSummary } from '../types'
+import { feature } from '../lib/meta'
 import { CopyButton, Empty, ErrorBox, I, Icon, IssueBadge, Kbd, Status } from '../components/ui'
 
 const METHODS = ['', 'GET', 'POST', 'PUT', 'PATCH', 'DELETE']
@@ -73,7 +74,7 @@ export default function Requests() {
     try { const p = await api.traces(filters); setHead(p); setErr(null) } catch (e) { setErr(e as Error) }
   }, [filters])
 
-  useEffect(() => { api.meta().then(m => { setFw(m.framework); setSse(m.features?.sse !== false && m.features?.sse !== undefined) }, () => {}) }, [])
+  useEffect(() => { api.meta().then(m => { setFw(m.framework); setSse(feature(m, 'sse')) }, () => {}) }, [])
   useEffect(() => { setExtra([]); setExtraCursor(undefined); setFresh([]); setSel(0); setHead(null); void poll() }, [fkey]) // eslint-disable-line react-hooks/exhaustive-deps
   const latest = useRef(Date.now() / 1000)
   const streamMode = live && sse && !hasFilters && head !== null

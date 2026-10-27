@@ -182,11 +182,14 @@ class RedlineMiddleware:
         recorder: Recorder,
         prefix: str = "/_redline",
         badge: Callable[[], bool] | None = None,
+        debug: Callable[[], bool] | None = None,
     ) -> None:
         self.wsgi_app = wsgi_app
         self.recorder = recorder
         self.prefix = prefix
         self.badge = badge
+        #: ``app.debug`` right now (``server_timing="auto"``).
+        self.debug = debug or (lambda: False)
 
     def __call__(self, environ: dict[str, Any], start_response: Any) -> Any:
         recorder = self.recorder
@@ -310,7 +313,7 @@ class RedlineMiddleware:
     def _finalise_headers(
         self, builder: TraceBuilder, headers: list[tuple[str, str]]
     ) -> list[tuple[str, str]]:
-        if not self.recorder.settings.server_timing:
+        if not ui.server_timing_enabled(self.recorder.settings, self.debug()):
             return headers
         timing = builder.server_timing()
         if not timing:

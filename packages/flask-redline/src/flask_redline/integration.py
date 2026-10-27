@@ -13,14 +13,15 @@ from typing import Any
 from flask import Flask, current_app, has_app_context
 
 from redline_core import Recorder, Settings, configure, ui
+from redline_core.access import Access
 from redline_core.api import RedlineAPI
+from redline_core.config import ResolvedConfig, resolve_settings
 from redline_core.explain import ExplainExecutor
 from redline_core.load.control import run_hooks
 from redline_core.storage import SQLiteStore, Store
 
 from ._hooks import install_hooks
 from ._middleware import RedlineMiddleware
-from ._security import local_only
 from ._sqlalchemy import (
     EngineLike,
     alias_for,
@@ -53,8 +54,9 @@ class _Runtime:
         recorder: Recorder,
         store: Store,
         suggester: SQLAlchemyFixSuggester,
-        permission: Callable[[Any], Any],
+        permission: Callable[[Any], Any] | None,
         explicit_engines: bool,
+        config: ResolvedConfig | None = None,
     ) -> None:
         self.app = app
         self.prefix = prefix
@@ -63,6 +65,8 @@ class _Runtime:
         self.store = store
         self.suggester = suggester
         self.permission = permission
+        self.config = config
+        self.access = Access(settings)
         self.engines: dict[str, EngineLike] = {}
         self._discover = not explicit_engines
         self._lock = threading.Lock()
@@ -74,6 +78,8 @@ class _Runtime:
             explain_executor=self._executor_for,
             run_launcher=launcher,
             run_stopper=stopper,
+            config=config,
+            access=self.access,
         )
 
     def badge_on(self) -> bool:
@@ -142,15 +148,20 @@ class Redline:
         is set up on the app, its engines are instrumented automatically.
     ``settings``
         A ``Settings`` or a dict of settings (case-insensitive keys). ``app.config["REDLINE"]``
-        (a dict) is merged underneath a dict given here; a ``Settings`` instance wins outright.
+        (a dict) is merged underneath a dict given here; a ``Settings`` instance replaces it.
+        This is the top layer over ``redline.toml`` / ``[tool.redline]`` and ``REDLINE_*``
+        variables (``redline_core.config``).
     ``url_prefix``
-        Where the UI and API live (``/_redline/``). Never recorded.
+        Where the UI and API live (default: the ``mount_path`` setting, else
+        ``/_redline``). Never recorded.
     ``permission``
         ``callable(request) -> bool`` protecting the UI and API, e.g.
-        ``lambda request: current_user.is_admin``. When omitted, :data:`local_only` applies
-        (loopback clients addressing ``localhost``/``127.0.0.1``/``[::1]``) and a warning is
-        logged. Raise ``werkzeug.exceptions.HTTPException`` (``abort(401)``) to answer with
-        another status; it is rendered in the API's error shape.
+        ``lambda request: current_user.is_admin``; giving it implies ``access="framework"``
+        unless the ``access`` setting is set explicitly. When omitted, the ``access``
+        setting decides (default ``local``: loopback clients addressing
+        ``localhost``/``127.0.0.1``/``[::1]``, with a warning logged). Raise
+        ``werkzeug.exceptions.HTTPException`` (``abort(401)``) to answer with another
+        status; it is rendered in the API's error shape.
     ``store``
         A custom ``Store``; default is the SQLite file at ``storage_path``.
     """
@@ -161,14 +172,16 @@ class Redline:
         *,
         engine: Any = None,
         settings: Mapping[str, Any] | Settings | None = None,
-        url_prefix: str = "/_redline",
+        url_prefix: str | None = None,
         permission: Callable[[Any], Any] | None = None,
         store: Store | None = None,
     ) -> None:
-        prefix = "/" + url_prefix.strip("/")
-        if prefix == "/":
-            raise ValueError("url_prefix must be a sub-path such as '/_redline'.")
-        self.url_prefix = prefix
+        if url_prefix is not None:
+            url_prefix = "/" + url_prefix.strip("/")
+            if url_prefix == "/":
+                raise ValueError("url_prefix must be a sub-path such as '/_redline'.")
+        self._url_prefix = url_prefix
+        self.url_prefix = url_prefix or "/_redline"
         self.permission = permission
         self._engine = engine
         self._settings = settings
@@ -222,13 +235,13 @@ class Redline:
     def init_app(self, app: Flask) -> None:
         if "redline" in app.extensions:
             raise RuntimeError("Redline is already installed on this app.")
-        prefix = self.url_prefix
         settings = self._settings
-        if isinstance(settings, Settings):
-            cfg = settings
-        else:
-            merged = {**(app.config.get(CONFIG_KEY) or {}), **(settings or {})}
-            cfg = Settings.from_mapping(merged)
+        if not isinstance(settings, Settings):
+            settings = {**(app.config.get(CONFIG_KEY) or {}), **(settings or {})}
+        resolved = resolve_settings(settings, native_hook=self.permission is not None)
+        cfg = resolved.settings
+        prefix = self._url_prefix or "/" + (cfg.mount_path or "/_redline").strip("/")
+        self.url_prefix = prefix
         own = rf"^{re.escape(prefix)}(/|$)"
         if own not in cfg.ignore_paths:
             cfg = cfg.replace(ignore_paths=[*cfg.ignore_paths, own])
@@ -238,11 +251,11 @@ class Redline:
         recorder = configure(cfg, store, [suggester])
 
         permission = self.permission
-        if permission is None:
-            permission = local_only
+        if cfg.access == "local":
             logger.warning(
-                "Redline is mounted at %s with no permission check: only loopback clients "
-                "are allowed. Pass Redline(app, permission=...) before exposing it.",
+                "Redline is mounted at %s with no permission check (access='local'): only "
+                "loopback clients are allowed. Set access='token' or 'basic', or pass "
+                "Redline(app, permission=...) before exposing it.",
                 prefix,
             )
         runtime = _Runtime(
@@ -254,6 +267,7 @@ class Redline:
             suggester=suggester,
             permission=permission,
             explicit_engines=self._engine is not None,
+            config=resolved,
         )
         for alias, eng in name_engines(self._engine).items():
             runtime.add_engine(eng, alias)
@@ -264,7 +278,11 @@ class Redline:
         app.cli.add_command(redline_cli)
         if cfg.enabled:  # disabled: no middleware, hooks or SQLAlchemy listeners at all
             app.wsgi_app = RedlineMiddleware(  # type: ignore[method-assign]
-                app.wsgi_app, recorder, prefix, badge=runtime.badge_on
+                app.wsgi_app,
+                recorder,
+                prefix,
+                badge=runtime.badge_on,
+                debug=lambda: bool(app.debug),
             )
             install_hooks(app, runtime.discover_engines)
             runtime.discover_engines()
