@@ -1,0 +1,36 @@
+name = "fastapi shop browse"
+description = "Browse the demo shop: N+1 on orders and customers, a duplicate report and a full-scan search."
+base_url = "http://127.0.0.1:8000"
+timeout_s = 10
+
+[[requests]]
+name = "orders (N+1 on items)"
+path = "/orders"
+weight = 3
+
+[[requests]]
+name = "orders with customers (N+1)"
+path = "/orders/customers"
+weight = 2
+
+[[requests]]
+name = "order detail"
+path = "/orders/{random_int:1:300}"
+weight = 2
+
+[[requests]]
+name = "duplicate report"
+path = "/report/duplicates"
+weight = 1
+
+[[requests]]
+name = "audit search (slow query)"
+path = "/audit/search?q={random_choice:refund|login|export|invoice}"
+weight = 1
+
+[profile]
+mode = "steps"
+start_rps = 5
+end_rps = 50
+step_rps = 5
+step_duration_s = "10s"
