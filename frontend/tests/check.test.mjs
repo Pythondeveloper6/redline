@@ -54,7 +54,7 @@ test('summarize: counts, geometric mean, queries, wins and regressions', () => {
   assert.deepEqual([s.queriesBefore, s.queriesAfter, s.queriesChange], [40, 4, -36])
   assert.equal(s.queriesChangePct, -90)
   assert.deepEqual(s.wins.map(w => w.name), ['a'])
-  assert.deepEqual(s.regressions.map(w => w.name), ['b', 'd'])
+  assert.deepEqual(s.regressions.map(w => w.name), ['b']) // noisy ('d') / same are not regressions
 })
 
 test('summarize ignores requests with failed calls in the speed mean, handles empty', () => {

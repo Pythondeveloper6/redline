@@ -3,16 +3,24 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import time
+import uuid
 
 import httpx
 from fastapi import APIRouter, Request
 from pydantic import BaseModel
 from sqlalchemy import func, select
+from sqlalchemy.orm import selectinload
 
 from .db import AsyncSession, SyncSession
 from .models import AuditLog, Customer, Order, OrderItem, Product
 
 router = APIRouter()
+
+# SHOP_REFACTOR=1 simulates a refactor for `redline check` (see the README):
+# N+1 fixed, one endpoint slower, one response field changed, one endpoint broken.
+REFACTOR = os.environ.get("SHOP_REFACTOR") == "1"
 
 
 @router.get("/")
@@ -38,6 +46,10 @@ async def index() -> dict:
 async def list_orders() -> list[dict]:
     """N+1: one query for the orders, then one per order for its items."""
     async with AsyncSession() as session:
+        if REFACTOR:  # refactor: one extra query instead of one per order
+            stmt = select(Order).options(selectinload(Order.items)).order_by(Order.id).limit(30)
+            orders = (await session.scalars(stmt)).all()
+            return [{"id": o.id, "status": o.status, "items": len(o.items)} for o in orders]
         orders = (await session.scalars(select(Order).order_by(Order.id).limit(30))).all()
         out = []
         for order in orders:
@@ -60,6 +72,8 @@ async def orders_with_customers() -> list[dict]:
 
 @router.get("/orders/{order_id}")
 async def get_order(order_id: int) -> dict:
+    if REFACTOR:  # refactor: a slower code path
+        await asyncio.sleep(0.05)
     async with AsyncSession() as session:
         order = (await session.execute(select(Order).where(Order.id == order_id))).scalar_one()
         total = await session.scalar(
@@ -75,6 +89,8 @@ async def duplicates() -> dict:
         counts = []
         for _ in range(4):
             counts.append(await session.scalar(select(func.count()).select_from(Product)))
+        if REFACTOR:  # refactor: the field is now a string
+            return {"products": str(counts[-1])}
         return {"products": counts[-1]}
 
 
@@ -100,9 +116,17 @@ async def slow() -> dict:
 @router.get("/sync/orders")
 def sync_orders() -> list[dict]:
     """A plain `def` endpoint (runs in the threadpool) lazy-loading a collection."""
+    if REFACTOR:  # refactor: a regression that breaks the endpoint
+        raise RuntimeError("tags backend not configured")
     with SyncSession() as session:
         orders = session.scalars(select(Order).order_by(Order.id).limit(20)).all()
         return [{"id": o.id, "tags": [t.name for t in o.tags]} for o in orders]
+
+
+@router.get("/status")
+async def status() -> dict:
+    """A health check with volatile fields (changes on every call)."""
+    return {"ok": True, "now": time.time(), "request_id": uuid.uuid4().hex}
 
 
 @router.get("/boom")

@@ -43,6 +43,40 @@ Apply a suggested diff straight from the UI's "Copy diff" button with `git apply
 See `shop/main.py` for the whole integration: one `RedlinePlugin(engine=...)` in the
 plugins list, and `instrument_httpx()`.
 
+## Try the refactor check
+
+`check.toml` is a ready-made suite of read-only endpoints (the N+1 one, the slow one, one with
+volatile fields). Setting `SHOP_REFACTOR=1` simulates a refactor of the app, so you can see what
+`redline check` reports without touching the code:
+
+| Endpoint | What `SHOP_REFACTOR=1` does | Expected verdict |
+|---|---|---|
+| `GET /orders` | fixes the N+1 with `selectinload` | faster, queries 31 -> 2, fixed N+1 |
+| `GET /orders/1` | adds a 50 ms sleep | slower |
+| `GET /report/duplicates` | `products` becomes a string | changed (`products`, type) |
+| `GET /sync/orders` | raises an error | broken (200 -> 500) |
+| `GET /status` | unchanged; `now` and `request_id` differ on every call | same (volatile fields ignored) |
+
+```bash
+# 1. old code: start the app (as above) and, from the repository root in another terminal,
+#    record a baseline
+cd examples/litestar
+uv run --project ../.. uvicorn shop.main:app --port 8000
+uv run --package redline-core --extra load redline check record examples/litestar/check.toml \
+    --base-url http://127.0.0.1:8000 --store examples/litestar/.redline/redline.db
+
+# 2. "refactored" code: restart the app with the toggle, then compare
+SHOP_REFACTOR=1 uv run --project ../.. uvicorn shop.main:app --port 8000
+uv run --package redline-core --extra load redline check compare examples/litestar/check.toml \
+    --base-url http://127.0.0.1:8000 --store examples/litestar/.redline/redline.db --markdown report.md --junit report.xml
+echo $?   # 1: the refactor made things slower, changed a response and broke an endpoint
+```
+
+`--store` matters: the CLI defaults to `.redline/redline.db` relative to where you run it, which is
+the repository root here, not the app's store. In the UI, open the Checks page, create a suite from
+the routes Redline has seen, record a baseline,
+restart with the toggle and press Compare (the UI starts runs because `checks_from_ui` defaults to on in debug mode; set `checks_from_ui = true` otherwise).
+
 ## Load test it
 
 With the app running (see above), run the bundled scenario from the repository root:

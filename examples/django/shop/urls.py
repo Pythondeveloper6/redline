@@ -14,4 +14,5 @@ urlpatterns = [
     path("api/products/", views.api_products),
     path("async/summary/", views.async_summary),
     path("cached/", views.cached),
+    path("status/", views.status),
 ]

@@ -1,0 +1,41 @@
+# Refactor-check suite for the FastAPI demo shop. See "Try the refactor check" in README.md.
+name = "fastapi shop"
+base_url = "http://127.0.0.1:8000"
+timeout_s = 10
+repeat = 10
+warmup = 2
+
+[thresholds]
+slower_pct = 10
+slower_ms = 2
+max_query_increase = 0
+
+[[requests]]
+name = "list orders (N+1)"
+method = "GET"
+path = "/orders"
+
+[[requests]]
+name = "order detail"
+method = "GET"
+path = "/orders/1"
+
+[[requests]]
+name = "duplicate report"
+method = "GET"
+path = "/report/duplicates"
+
+[[requests]]
+name = "sync orders"
+method = "GET"
+path = "/sync/orders"
+
+[[requests]]
+name = "slow endpoint"
+method = "GET"
+path = "/slow"
+
+[[requests]]
+name = "status (volatile fields)"
+method = "GET"
+path = "/status"
