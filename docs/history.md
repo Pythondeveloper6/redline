@@ -52,7 +52,8 @@ seen.
 
 ## The History page
 
-<!-- screenshot wanted: History page (light and dark), to be added by the maintainer -->
+![The History page with release markers](assets/screenshots/fastapi-history-light.png){ .rl-shot .rl-only-light }
+![The History page with release markers](assets/screenshots/fastapi-history-dark.png){ .rl-shot .rl-only-dark }
 
 Choose an endpoint (or the whole app) and a window. Four charts share one time axis, with
 a vertical marker at each release:

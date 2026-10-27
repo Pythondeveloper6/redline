@@ -2,6 +2,9 @@
 
 [← Index](index.md)
 
+![The Database page: the slowest queries of the demo shop](assets/screenshots/fastapi-database-light.png){ .rl-shot .rl-only-light }
+![The Database page: the slowest queries of the demo shop](assets/screenshots/fastapi-database-dark.png){ .rl-shot .rl-only-dark }
+
 The request detail page tells you what *one* request did to the database. The **Database**
 page answers the questions that only make sense across all of them:
 
