@@ -239,6 +239,7 @@ routes answer `404 feature_disabled`, and the UI hides the matching controls (fr
 | `replay` | the Replay button (replay has no server route; it is a UI feature) |
 | `snapshot` | `GET api/traces/{id}/snapshot` and the download button |
 | `load` | the Load page and everything under `api/runs` |
+| `checks` | the Checks pages and everything under `api/checks` ([Refactor check](refactor-check.md)) |
 | `logs` | log capture (the trace's `logs` is `[]`) and the Logs tab |
 | `locals` | exception local variables (not captured, dropped from responses) |
 | `sse` | `api/stream`; Live mode is hidden |
@@ -258,7 +259,8 @@ replay = false
 | `session_ttl_s` | `43200` | Login cookie lifetime |
 | `max_login_attempts` | `10` | Failed credential attempts per client IP per 300 seconds |
 | `secret_key` | `None` | Signs login cookies (see above) |
-| `base_url` | `None` | Where load runs started from the UI go; see [Load testing](load-testing.md#starting-a-run-from-the-ui) |
+| `base_url` | `None` | Where load runs and refactor checks started from the UI go; see [Load testing](load-testing.md#starting-a-run-from-the-ui) |
+| `checks_from_ui` | `"auto"` | Whether baseline and compare runs may be started from the UI. `auto` = only in the framework's debug mode; `true`/`false` force it; the `production` preset sets `false`. Every `POST`, `PUT` and `DELETE` under `api/checks` is also refused under `read_only`, and the whole tree answers `404 feature_disabled` when the `checks` feature is off. See [Refactor check](refactor-check.md#settings-and-access) |
 
 ## Login and API
 

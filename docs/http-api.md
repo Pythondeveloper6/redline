@@ -32,7 +32,7 @@ The mutating methods are additionally protected against cross-site requests:
     - Anonymous or unauthorised callers get `403` with `{"error": {"code": "forbidden", ...}}`.
     - A `Host` not in `ALLOWED_HOSTS` gets Django's own `400` before anything else.
     - The API runs Django's own CSRF check on **every** request, whether or not
-      `CsrfViewMiddleware` is installed. `GET` is free; `DELETE` and `POST` need the
+      `CsrfViewMiddleware` is installed. `GET` is free; `DELETE`, `PUT` and `POST` need the
       token in the CSRF header (`X-CSRFToken` by default, or your `CSRF_HEADER_NAME`),
       and on HTTPS the Origin and Referer checks apply. Failure is `403` with code
       `csrf_failed`.
@@ -92,6 +92,8 @@ cookie and `X-CSRFToken`.
 | 400 | `invalid_kind` | `kind` is not one of the known issue kinds |
 | 400 | `invalid_period` | A `a` or `b` of `api/history/compare` is not `release:<name>` or `range:<start>-<end>` |
 | 400 | `invalid_json` | The `POST` body is not valid JSON |
+| 400 | `invalid_suite` | The suite of an `api/checks` call is not valid: unknown key, value out of range, a write method, an absolute URL, or over the run caps (200 requests, 5 000 calls) |
+| 400 | `invalid_baseline` | The body of `POST api/checks/baselines/import` is not a `redline-check-baseline` document (format, version or shape) |
 | 400 | `invalid_body` | The body is not an object, or a required field is missing or not valid (for `POST api/runs`: also when no load target can be determined, see [Runs](#runs)) |
 | 400 | `not_explainable` | The span is not a single read-only `SELECT` |
 | 400 | `analyze_unsupported` | `analyze: true` on MySQL |
@@ -104,6 +106,7 @@ cookie and `X-CSRFToken`.
 | 403 | `open_refused` | `access = "open"` without `REDLINE_ALLOW_OPEN=1` |
 | 403 | `csrf_failed` | The CSRF check failed (see above; on Django also Django's own check) |
 | 403 | `load_disabled` | `POST api/runs` while `load_from_ui` is off |
+| 403 | `checks_from_ui_disabled` | `POST api/checks/runs` while `checks_from_ui` is off (or `auto` outside debug mode) |
 | 403 | `read_only` | A state-changing call while `read_only` is on |
 | 404 | `feature_disabled` | The route belongs to a feature switched off in `features` |
 | 404 | `not_found` | No such API endpoint (or UI asset), or `ui_enabled` is off, or `api/login` under a policy without login |
@@ -111,8 +114,11 @@ cookie and `X-CSRFToken`.
 | 404 | `span_not_found` | The span id is not in that trace |
 | 404 | `profile_not_found` | The trace has no profile |
 | 404 | `run_not_found` | The load-run id does not exist |
+| 404 | `suite_not_found` | The check-suite id does not exist |
+| 404 | `check_run_not_found` | The check-run id (or the `baseline_id` of a compare) does not exist |
 | 405 | `method_not_allowed` | Wrong method for the endpoint |
-| 409 | `run_active` | `DELETE api/runs/{id}` while the run is still running |
+| 409 | `run_active` | `DELETE api/runs/{id}` or `DELETE api/checks/runs/{id}` while the run is still running; `DELETE api/checks/suites/{id}` while one of its runs is; `POST api/checks/runs` while a run of the same suite is |
+| 413 | `payload_too_large` | A suite body over 1 MiB, or a baseline import over 10 MiB |
 | 429 | `too_many_requests` | Too many failed credentials from one client (`Retry-After` is set) |
 | 422 | `explain_failed` | The database rejected the EXPLAIN |
 | 500 | `internal_error` | An unexpected error. Logged on the `redline` logger |
@@ -679,6 +685,97 @@ This is why a UI served at `https://staging.example.com` needs `base_url`, and w
 `running`, then `done`, `stopped` or `failed`. See [Load testing](load-testing.md#starting-a-run-from-the-ui)
 and [Security](security.md#load-from-the-ui).
 
+### Checks
+
+[Refactor check](refactor-check.md): suites, runs and reports. All routes are under the
+`checks` [feature switch](access-control.md#feature-switches) (`404 feature_disabled` when off), and every
+`POST`, `PUT` and `DELETE` is refused with `403 read_only` in read-only mode. They need a
+file-backed SQLite store (`501 not_supported` otherwise).
+
+| Request | Returns |
+|---|---|
+| `GET api/checks/suites` | `{"items": [SuiteSummary]}` |
+| `POST api/checks/suites` body `{"name", "suite"}` | `201` a `Suite` |
+| `GET api/checks/suites/{id}` | a `Suite` |
+| `PUT api/checks/suites/{id}` body `{"name", "suite"}` | `200` the updated `Suite` |
+| `DELETE api/checks/suites/{id}` | `{"deleted": ...}`, with its runs. `409 run_active` while one is running |
+| `GET api/checks/suites/{id}/export` | the suite as TOML, `text/plain`, `Content-Disposition: attachment; filename="<name>.toml"` |
+| `POST api/checks/suites/draft` body `{"routes"?, "limit"?}` | a suite object built from seen traffic; not saved |
+| `POST api/checks/runs` body `{"suite_id", "kind", "baseline_id"?, "label"?}` | `202 {"id", "status": "running", "kind", "suite_id", "baseline_id"}` |
+| `GET api/checks/runs?suite_id=&kind=&limit=` | `{"items": [Run]}`, newest first |
+| `GET api/checks/runs/{id}` | a `Run` plus `suite`, `report` and `requests` |
+| `POST api/checks/runs/{id}/stop` | `{"stopped": true}`; `false` when it was not running |
+| `DELETE api/checks/runs/{id}` | `{"deleted": ...}`. `409 run_active` while running |
+| `POST api/checks/baselines/import[?suite_id=]` | `201 {"id", "kind": "baseline", "requests"}` |
+
+**Suites.** `suite` is the [suite file](refactor-check.md#the-suite-file) as an object (the same
+keys as the TOML). It is validated by the same code as the command line: a bad suite, or any
+method but `GET`, `HEAD` and `OPTIONS`, is `400 invalid_suite` with a message that names the
+key. Bodies are limited to 1 MiB (`413 payload_too_large`). A `Suite` is
+
+```json
+{"id": "9b2e...", "name": "orders refactor", "requests": 3,
+ "suite": {"name": "orders refactor", "base_url": "http://127.0.0.1:8000", "repeat": 20,
+           "headers": {"Authorization": "Bearer ${env:API_TOKEN}"},
+           "requests": [{"name": "list orders", "method": "GET", "path": "/orders?page=1"}]},
+ "created_at": 1761500000, "updated_at": 1761500000}
+```
+
+Secret header values are returned as `[redacted]` unless they are only an `${env:NAME}`
+placeholder (optionally after a scheme such as `Bearer`); a `PUT` that sends `[redacted]`
+back keeps the stored value. A `SuiteSummary` is `{id, name, requests, created_at, updated_at,
+last_baseline, last_compare}`, where the last two are `null` or `{id, status, label, git,
+created_at, summary}`.
+
+**Draft.** `routes` is a list of routes as `GET api/endpoints` shows them (`"/orders/{id}"`),
+`"GET /x"` strings or `{"method", "route"}` objects; omit it for every read-only route.
+`limit` is 1 to 200 (default 50). It uses the last 7 days of traffic and returns a suite
+object ready to edit; its only headers are the placeholders
+`${env:REDLINE_CHECK_AUTHORIZATION}` and `${env:REDLINE_CHECK_COOKIE}`, and only when recent
+requests carried those headers.
+
+**Starting a run.** `kind` is `baseline` or `compare`. For a compare, `baseline_id` defaults to
+the suite's newest finished baseline. The run is a background process; poll
+`GET api/checks/runs/{id}` (the UI does, every second). The checks run in this order and the
+first that fails answers: `403 checks_from_ui_disabled` (setting off, or `auto` outside debug
+mode), `400 invalid_body`, `404 suite_not_found`, for a compare `400` (no baseline yet, or not
+a finished baseline) and `404 check_run_not_found`, `409 run_active` (one run per suite at a
+time), `501 not_supported` (no file-backed SQLite store), `400` when no target can be
+determined (the same rule as [load runs](#runs): the `base_url` setting, else the server's own
+port, never `Host`), and `400 invalid_suite` over the caps of 200 requests and 5 000 calls
+(each request's warmup plus repeat, added up). A run is stopped after 15 minutes.
+
+A `Run`:
+
+```json
+{
+  "id": "5d0c...", "suite_id": "9b2e...", "name": "orders refactor", "kind": "compare",
+  "baseline_id": "c41a...", "status": "done", "label": "after eager loading",
+  "git": {"sha": "3f9a2c1e...", "branch": "refactor/orders", "dirty": false},
+  "created_at": 1761500300, "finished_at": 1761500341,
+  "summary": {"requests": 3, "faster": 1, "slower": 1, "changed": 1, "broken": 0, "passed": 1,
+              "speed_change_pct": -11.4, "queries_before": 37, "queries_after": 12},
+  "error": null, "progress": null, "request_count": 3,
+  "base_url": "http://127.0.0.1:8000", "release": "3f9a2c1", "source": "ui",
+  "baseline": {"id": "c41a...", "label": "before", "git": {}, "created_at": 1761500000}
+}
+```
+
+`status` is `running`, `done`, `failed` or `stopped`; times are epoch seconds. While running,
+`progress` is `{done, total, current, ...}`. `GET api/checks/runs/{id}` adds `suite` (redacted),
+`report` and `requests`: for a **compare**, `report` is the full report in the same shape as
+`redline check compare --json` (`{format: "redline-check-report", version, suite, baseline,
+run, summary, requests: [...]}`, each request with `perf`, `server` and `response`) and
+`requests` is `null`; for a **baseline**, `requests` is the per-request baseline data and
+`report` is `null`.
+
+**Import.** `POST api/checks/baselines/import` takes the JSON written by `redline check
+record` (up to 10 MiB, else `413 payload_too_large`), so a baseline made in CI can be viewed
+and compared against in the UI. `?suite_id=` attaches it to a saved suite. A document that is
+not a `redline-check-baseline` of version 1, or that does not have the right shape, is
+`400 invalid_baseline`. Suite headers and URLs, request paths, response headers and bodies are
+redacted again on import.
+
 ### POST api/login, POST api/logout, GET api/config
 
 Part of [access control](access-control.md#login-and-api).
@@ -690,8 +787,8 @@ Part of [access control](access-control.md#login-and-api).
 | `GET api/config` | `{preset, file, settings, sources, groups, warnings}`: the effective configuration, secrets as `"***"`, where each value came from (`default`, `adapter`, `preset`, `file`, `env`, `framework`), the settings grouped for display, and a list of warnings (configuration plus runtime notes of the access gate) |
 
 `GET api/meta` also reports `features` (`explain`, `profile`, `replay`, `snapshot`, `load`,
-`logs`, `locals`, `sse`, and `load_from_ui`, which is the setting and the `load` feature
-and not `read_only`) and `access: {policy, login, read_only, preset}`, where `login` is
+`checks`, `logs`, `locals`, `sse`, and `load_from_ui` and `checks_from_ui`, which are the
+setting and the feature and not `read_only`) and `access: {policy, login, read_only, preset}`, where `login` is
 `"token"`, `"basic"` or `null`. The UI uses them to hide what is switched off.
 
 ## Things to know

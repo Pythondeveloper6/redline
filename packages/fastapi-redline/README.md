@@ -114,6 +114,7 @@ suggester discovers (or pass `models=SQLModel`).
 - Your own spans: `with redline_core.span("pricing.compute"): ...` (also `async with` and
   as a decorator).
 - `X-Redline-Run: <id>;step=<n>` becomes tags (used by the load tester).
+- `X-Redline-Check: <id>;req=<i>;n=<k>` becomes tags (used by `redline check`, only for a check run that exists in the store).
 
 ### Outbound HTTP (httpx)
 

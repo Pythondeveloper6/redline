@@ -8,7 +8,7 @@ Django, `/_redline/` for FastAPI), so there is nothing to host and no Node.js to
 
 It is a client of the [HTTP API](http-api.md), using relative URLs (`./api/...`) and hash
 routing (`#/requests`, `#/requests/<id>`, `#/endpoints`, `#/issues`, `#/database`, `#/cache`,
-`#/external`, `#/history`, `#/load`, `#/compare/<a>/<b>`). That is why it works
+`#/external`, `#/history`, `#/load`, `#/checks`, `#/compare/<a>/<b>`). That is why it works
 under any mount prefix and needs no catch-all route. Because it follows the system
 colour scheme and has a theme switch, every screenshot below is shown in the theme you are
 reading these docs in.
@@ -316,10 +316,35 @@ Pages that look across many requests rather than one:
 | **Cache** | hit rate, unread writes and stampedes per key pattern | [Cache efficiency](cache-efficiency.md) |
 | **External** | outbound HTTP by host and URL pattern: latency, duplicates, retries | [External calls](external-calls.md) |
 | **History** | latency, errors and queries over time, release markers, before/after compare | [History](history.md) |
+| **Checks** | [refactor check](refactor-check.md) suites, baselines and compare reports (the *More* menu; hidden when the `checks` feature is off) | [Refactor check](refactor-check.md) |
 | **Load** | load-test runs, an RPS vs p95 vs errors chart with the knee, bottlenecks per step, a start form when enabled | [Load testing](load-testing.md) |
 
 Each has a window picker like the one on Endpoints. A page whose data the current store
 cannot provide (a custom store) says so instead of failing.
+
+## Checks
+
+**More → Checks** (`#/checks`) is the UI of the [refactor check](refactor-check.md): prove a
+refactor is safe and see what it gained. It has four pages.
+
+![The Checks page: every suite with its last baseline and last compare](assets/screenshots/checks-list-light.png){ .rl-shot .rl-only-light }
+![The Checks page: every suite with its last baseline and last compare](assets/screenshots/checks-list-dark.png){ .rl-shot .rl-only-dark }
+
+- **Suites** (`#/checks`): each suite with its request count, its last baseline (label, commit,
+  age) and verdict badges of its last compare. *New suite* opens the builder.
+- **Builder** (`#/checks/new`, `#/checks/suites/{id}/edit`): pick from the read-only routes
+  Redline has seen (search, sample path, last p50 and query count) or add a request by hand;
+  per request Perf and Response switches, ignore paths, headers and expected status; suite
+  settings for repeat, warmup and thresholds. *Save*, or *Export TOML*.
+- **Suite** (`#/checks/suites/{id}`): *Baseline* and *Compare* buttons (disabled, with the
+  reason, when `checks_from_ui` is off or the app is read-only), a baseline picker and the
+  history of runs.
+- **Report** (`#/checks/runs/{id}`): summary cards, a sortable table with the verdicts, and
+  per request the latency of both runs, the response diff, new and fixed issues and SQL.
+  *Copy as Markdown* gives the PR-comment text. A running check shows live progress.
+
+Details, including how verdicts are decided, are on the [Refactor check](refactor-check.md)
+page.
 
 ## Login and the Settings page
 

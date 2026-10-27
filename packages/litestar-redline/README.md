@@ -116,6 +116,7 @@ RedlinePlugin(engine={"main": main_engine, "analytics": analytics_engine})
 - Sync handlers (`sync_to_thread=True`) are attributed to the right request.
 - Your own spans: `with redline_core.span("pricing.compute"): ...`.
 - `X-Redline-Run: <id>;step=<n>` becomes tags (used by the load tester).
+- `X-Redline-Check: <id>;req=<i>;n=<k>` becomes tags (used by `redline check`, only for a check run that exists in the store).
 
 Requests that match no route (404) and `405 Method Not Allowed` never reach a route-level
 middleware, so Litestar does not run Redline for them.

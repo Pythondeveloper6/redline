@@ -54,11 +54,11 @@ Make performance a thing you can regress-test.
 - **Flamegraph diffs** between two requests or two releases.
 - **OTLP import and export**, so traces can flow to and from other tools.
 - Baselines and diffs per endpoint in CI, building on the History comparison already in 0.2.
-- **Refactor check** (in design): pick a set of read-only endpoints, record a baseline
-  before a refactor, run it again after, and get a per-endpoint report of performance
-  changes (time, queries, issues, overall average) and of response changes (a diff that
-  ignores fields that change on every call). From the UI and from the command line, with
-  an exit code for CI.
+- **Refactor check** (**shipped in 0.3.0a1**, see [Refactor check](refactor-check.md)): pick a
+  set of read-only endpoints, record a baseline before a refactor, run it again after, and
+  get a per-endpoint report of performance changes (time, queries, issues, overall average)
+  and of response changes (a diff that ignores fields that change on every call). From the UI
+  and from the command line, with an exit code, JUnit and a Markdown PR comment for CI.
 - **`redline analyze`**: a static analysis of the application's Python code (not only its
   templates) that finds likely bottlenecks before any request runs: queries inside loops
   (N+1), missing `select_related` / `prefetch_related` / `selectinload`, unbounded
