@@ -470,7 +470,9 @@ class Recorder:
             status=trace.status,
             duration_ms=duration,
             error=trace.error is not None,
-            profiled=profile is not None,
+            # an explicitly profiled request is kept even when the profiler caught no
+            # sample (a very fast request), so the keep rule does not depend on timing
+            profiled=builder.profiler is not None,
             # a refactor-check call is kept provisionally only when the store validates
             # the tag (its writer drops it for an unknown or finished check run)
             check="check_run_id" in trace.tags
