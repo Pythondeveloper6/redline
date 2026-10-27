@@ -29,6 +29,20 @@ decide whether a load test tells you the truth.
 
 ### Open versus closed model
 
+```mermaid
+flowchart LR
+    subgraph closed["Closed model: N users in a loop"]
+        direction LR
+        u1[user] --> s1[send] --> w1[wait for response] --> t1[think] --> u1
+    end
+    subgraph open["Open model: fixed arrival rate"]
+        direction LR
+        clock(["clock: R requests per second"]) --> s2[send] --> srv[server]
+        clock --> s3[send] --> srv
+        clock --> s4[send] --> srv
+    end
+```
+
 A **closed** model runs N virtual users in a loop: send a request, wait for the response,
 think, send the next. When the server slows down, the users slow down too, so the offered
 load *falls* exactly when you most need it to hold. The test politely stops hurting the
