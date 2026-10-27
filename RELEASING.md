@@ -36,6 +36,23 @@ token exists anywhere, and none should be created.
    A pending publisher turns into a normal one when the first upload creates the project.
    It also reserves nothing until then, so register all ten before tagging.
 
+   **PyPI allows at most three pending publishers per account at a time.** A pending
+   publisher stops counting once the first upload creates its project, so the very first
+   release goes out in two rounds within the same workflow run:
+
+   1. Register `redline-core`, `django-redline` and `fastapi-redline` on both test.pypi.org
+      and pypi.org.
+   2. Push the tag. Those three upload to TestPyPI; flask and litestar fail there, so the
+      PyPI stage does not start yet.
+   3. On test.pypi.org register `flask-redline` and `litestar-redline`, then **Re-run failed
+      jobs** on the run. TestPyPI completes and the PyPI stage waits for your approval;
+      approve it. Core, django and fastapi upload; flask and litestar fail.
+   4. On pypi.org register `flask-redline` and `litestar-redline`, then **Re-run failed
+      jobs** again. Both upload (already-uploaded files are skipped) and the GitHub release
+      is created.
+
+   Later releases need none of this: the publishers are then active, not pending.
+
 3. **Create the GitHub environments** in the repository's **Settings → Environments**:
    the five `pypi-<project>` environments (add yourself as a required reviewer, so every
    real upload waits for you; GitHub's review dialog approves all five at once) and the five
