@@ -76,29 +76,57 @@ def parse_since(params: Mapping[str, Any]) -> float:
     return value
 
 
+def parse_after(params: Mapping[str, Any], headers: Mapping[str, Any] | None = None) -> int | None:
+    """The resume position: ``?after=<seq>`` or the ``Last-Event-ID`` header (an SSE
+    ``id:`` is the trace's ``seq``). ``None`` when absent or not a number (then ``since``
+    decides where the stream starts)."""
+    raw = params.get("after")
+    if isinstance(raw, list):
+        raw = raw[-1] if raw else None
+    if raw in (None, "") and headers is not None:
+        raw = headers.get("Last-Event-ID") or headers.get("last-event-id")
+    try:
+        value = int(raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return value if value >= 0 else None
+
+
 def format_event(summary: Mapping[str, Any]) -> bytes:
-    """One ``event: trace`` frame (the id is the trace id)."""
+    """One ``event: trace`` frame; the SSE id is the trace's ``seq`` (insertion order) when
+    the store provides one, else its trace id."""
     data = json.dumps(dict(summary), separators=(",", ":"), default=str)
-    return f"event: trace\nid: {summary.get('id', '')}\ndata: {data}\n\n".encode()
+    event_id = summary.get("seq", summary.get("id", ""))
+    return f"event: trace\nid: {event_id}\ndata: {data}\n\n".encode()
 
 
 class _Cursor:
-    """``(since, last_id)`` advanced past every summary sent."""
+    """The stream position. It starts at ``since`` (an epoch) or ``after`` (a ``seq``) and,
+    once a summary carrying a ``seq`` is sent, follows insertion order: traces are saved
+    when they *finish*, so paging by ``started_at`` would skip a slow request that began
+    before already-streamed fast ones."""
 
-    __slots__ = ("api", "last_id", "since")
+    __slots__ = ("after", "api", "last_id", "since")
 
-    def __init__(self, api: Any, since: float) -> None:
+    def __init__(self, api: Any, since: float, after: int | None = None) -> None:
         self.api = api
         self.since = since
+        self.after = after
         self.last_id: str | None = None
 
     def poll(self) -> list[bytes]:
         try:
-            items = self.api.poll(self.since, self.last_id)
+            if self.after is not None:
+                items = self.api.poll(self.since, self.last_id, after_seq=self.after)
+            else:
+                items = self.api.poll(self.since, self.last_id)
         except Exception:  # a store hiccup must not kill the stream; try next tick
             return []
         out = []
         for item in items:
+            seq = item.get("seq")
+            if isinstance(seq, int) and not isinstance(seq, bool):
+                self.after = seq
             started = item.get("started_at")
             if isinstance(started, (int, float)):
                 self.since = float(started)
@@ -110,12 +138,13 @@ class _Cursor:
 def sync_events(
     api: Any,
     since: float,
+    after: int | None = None,
     *,
     sleep: Callable[[float], None] = time.sleep,
     clock: Callable[[], float] = time.monotonic,
 ) -> Iterator[bytes]:
     """The SSE byte stream for a WSGI/thread-per-request server."""
-    cursor = _Cursor(api, since)
+    cursor = _Cursor(api, since, after)
     yield _OPEN
     start = last_ping = clock()
     while True:
@@ -134,12 +163,13 @@ async def async_events(
     since: float,
     is_disconnected: Callable[[], Awaitable[bool]] | None = None,
     *,
+    after: int | None = None,
     clock: Callable[[], float] = time.monotonic,
 ) -> AsyncIterator[bytes]:
     """The SSE byte stream for an ASGI server. Store reads run in a worker thread, so the
     event loop is never blocked; ``is_disconnected`` (e.g. Starlette's
     ``request.is_disconnected``) ends the stream early."""
-    cursor = _Cursor(api, since)
+    cursor = _Cursor(api, since, after)
     yield _OPEN
     start = last_ping = clock()
     while True:

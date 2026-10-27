@@ -42,6 +42,8 @@ export interface TraceSummary {
   id: string; method: string; path: string; route: string | null; view: string | null
   status: number; started_at: number; duration_ms: number; query_count: number; query_ms: number
   issue_count: number; issue_kinds: IssueKind[]; has_profile: boolean; tags: Record<string, string>
+  /** Insertion order; present on live-tail events only. */
+  seq?: number
 }
 export interface Page { items: TraceSummary[]; next_cursor: string | null; total: number }
 export interface EndpointStats {

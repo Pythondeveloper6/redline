@@ -123,7 +123,9 @@ def build_blueprint(runtime: Any, url_prefix: str) -> Blueprint:
         except FilterError as exc:
             return error_response(400, "invalid_filter", str(exc))
         return Response(
-            stream.sync_events(runtime.api, since),
+            stream.sync_events(
+                runtime.api, since, stream.parse_after(request.args, request.headers)
+            ),
             status=200,
             content_type=stream.CONTENT_TYPE,
             headers={**_SECURITY, **stream.SSE_HEADERS},

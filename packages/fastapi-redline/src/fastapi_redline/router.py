@@ -96,7 +96,12 @@ def build_router(redline: Any, dependencies: Sequence[Any]) -> APIRouter:
         except FilterError as exc:
             return error_response(400, "invalid_filter", str(exc))
         return StreamingResponse(
-            stream.async_events(redline.api, since, request.is_disconnected),
+            stream.async_events(
+                redline.api,
+                since,
+                request.is_disconnected,
+                after=stream.parse_after(request.query_params, request.headers),
+            ),
             media_type=stream.CONTENT_TYPE,
             headers=stream.SSE_HEADERS,
         )

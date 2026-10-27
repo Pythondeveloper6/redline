@@ -192,11 +192,12 @@ def _stream(request: HttpRequest) -> HttpResponseBase:
     except FilterError as exc:
         return _json(400, {"error": {"code": "invalid_filter", "message": str(exc)}})
     api_ = get_runtime().api
+    after = stream.parse_after(request.GET, request.headers)
     events: Any
     if _is_asgi(request):
-        events = stream.async_events(api_, since)
+        events = stream.async_events(api_, since, after=after)
     else:
-        events = stream.sync_events(api_, since)
+        events = stream.sync_events(api_, since, after)
     response = StreamingHttpResponse(events, content_type=stream.CONTENT_TYPE)
     for key, value in stream.SSE_HEADERS.items():
         response[key] = value
