@@ -13,6 +13,7 @@ import logging
 import threading
 from dataclasses import dataclass
 
+from django.conf import settings as django_settings
 from django.core.exceptions import ImproperlyConfigured
 from django.core.signals import setting_changed
 from django.dispatch import receiver
@@ -89,6 +90,8 @@ def build_runtime(settings: Settings | None = None) -> Runtime:
         run_stopper=stopper,
         config=config,
         access=access,
+        # ``checks_from_ui="auto"`` follows DEBUG (read per request)
+        debug=lambda: bool(getattr(django_settings, "DEBUG", False)),
     )
     return Runtime(
         settings=core,

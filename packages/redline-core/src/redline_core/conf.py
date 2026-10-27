@@ -67,6 +67,7 @@ FEATURES: tuple[str, ...] = (
     "logs",
     "locals",
     "sse",
+    "checks",
 )
 #: What each preset changes; a preset only sets defaults – any explicit value wins.
 PRESETS: dict[str, dict[str, Any]] = {
@@ -84,10 +85,13 @@ PRESETS: dict[str, dict[str, Any]] = {
         "badge": False,
         "server_timing": False,
         "load_from_ui": False,
+        "checks_from_ui": False,
         "explain_analyze": False,
         "profile": "off",
     },
 }
+#: Settings that take ``"auto"`` besides True/False.
+_AUTO_FIELDS: tuple[str, ...] = ("badge", "server_timing", "checks_from_ui", "cookie_secure")
 #: Settings never shown in clear (``GET api/config``, ``redline config``).
 SECRET_SETTINGS: tuple[str, ...] = ("token", "secret_key", "basic_users")
 #: Prefix of the hashes made by ``redline hash-password``.
@@ -197,6 +201,9 @@ class Settings:
     # history & load testing
     history_retention_days: int | None = 90
     load_from_ui: bool = False
+    #: Start refactor-check runs (baseline / compare) from the UI; ``"auto"`` = only while
+    #: the framework is in debug mode (``CONTRACT.md`` §19.5).
+    checks_from_ui: bool | str = "auto"
 
     # configuration & access control (CONTRACT.md section 18)
     #: ``dev`` / ``staging`` / ``production``: a set of defaults, see :data:`PRESETS`. It
@@ -248,6 +255,7 @@ class Settings:
             "log_level",
             "badge",
             "server_timing",
+            "checks_from_ui",
             "cookie_secure",
             "preset",
             "access",
@@ -355,7 +363,7 @@ def _coerce(name: str, value: Any) -> Any:
         return "/" + value.strip().strip("/")
     if name in _MAP_FIELDS:
         return _coerce_mapping(name, value)
-    if name in ("badge", "server_timing", "cookie_secure") and isinstance(value, str):
+    if name in _AUTO_FIELDS and isinstance(value, str):
         return value.strip().lower() if value.strip().lower() == "auto" else value
     if name in _SEQ_FIELDS:
         if isinstance(value, str):
@@ -473,7 +481,7 @@ def _validate(s: Settings) -> None:
             f"Redline setting 'log_level' must be one of {', '.join(LOG_LEVELS)} "
             f"(case-insensitive); got {s.log_level!r}."
         )
-    for name in ("badge", "server_timing", "cookie_secure"):
+    for name in _AUTO_FIELDS:
         value = getattr(s, name)
         if not isinstance(value, bool) and value != "auto":
             raise SettingsError(

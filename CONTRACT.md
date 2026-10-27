@@ -440,7 +440,7 @@ Concrete decisions (v0.2 implementation):
   `SqlStats`, `CacheStats`, `ExternalStats`, `History`, `ReleaseInfo`, `PeriodStats`, `PeriodComparison`,
   `IssueIndexEntry`, `Bottlenecks`; `Period = ("release", name) | ("range", start, end)` and
   `parse_period("release:<name>" | "range:<start>-<end>")` (raises `FilterError`).
-- **Schema.** `meta.schema_version` = 3. A v0.1/v0.2-early file is migrated in place on connect inside one
+- **Schema.** `meta.schema_version` = 3 (4 since v0.3: the refactor-check tables, §19.5a). A v0.1/v0.2-early file is migrated in place on connect inside one
   `BEGIN IMMEDIATE` (re-checked inside, so concurrent workers migrate once): the new tables are created and
   **backfilled from the stored traces**. Version 3 adds `traces.saved_seq INTEGER` (indexed; backfilled from
   rowid order) and the `meta.last_seq` counter: the writer reserves `seq` numbers inside its write transaction,
@@ -521,6 +521,8 @@ Concrete decisions (v0.2 implementation):
 | `POST api/runs` / `POST api/runs/{id}/stop` / `DELETE api/runs/{id}` | start (403 `load_disabled` unless `load_from_ui`; the target is always the app's own base URL, given by the adapter) / stop / delete |
 
 New error codes: 400 `invalid_period`, 403 `load_disabled`, 404 `run_not_found`, 409 `run_active`, 501 `not_supported`.
+v0.3 (refactor check, §19.5): 400 `invalid_suite`, 400 `invalid_baseline`, 403 `checks_from_ui_disabled`,
+404 `suite_not_found`, 404 `check_run_not_found`, 413 `payload_too_large` (`run_active` is reused for check runs).
 
 Concrete decisions (v0.2 implementation):
 
@@ -808,7 +810,8 @@ always an error.
 | basic_users | dict[user, hash] (secret) | {} | `basic`; hashes `pbkdf2_sha256$<iter>$<salt b64url>$<hash b64url>` (≥ 1000 iterations accepted, default 600 000) |
 | secret_key | str ≥ 16 \| None (secret) | None | signs login cookies; unset = random per-process key (single process only) |
 | read_only | bool | False | 403 `read_only` for every non-GET/HEAD/OPTIONS `api/` call except `api/explain`, `api/login`, `api/logout`; `POST api/explain` with `analyze` → 403 `read_only` (from the API) |
-| features | dict[str, bool] | all True | `explain`, `profile`, `replay`, `snapshot`, `load`, `logs`, `locals`, `sse` (unknown keys → error) |
+| features | dict[str, bool] | all True | `explain`, `profile`, `replay`, `snapshot`, `load`, `logs`, `locals`, `sse`, `checks` (unknown keys → error) |
+| checks_from_ui | "auto" \| bool | "auto" | start refactor-check runs from the UI (§19.5); `auto` = framework debug mode (the same flag as `server_timing="auto"`, read per request); `production` preset: False |
 | ui_enabled | bool | True | False: every Redline URL answers 404 (capture continues) |
 | mount_path | str \| None | None | FastAPI `prefix` / Flask `url_prefix` / Litestar `path` when that argument is not given (they now default to `None`); Django ignores it (the URLconf decides) |
 | session_ttl_s | int ≥ 1 | 43200 | login-cookie lifetime |
@@ -896,7 +899,7 @@ middleware `force_ok`, Django `DEBUG` or `may_force`), so an application request
 | `POST api/login` | body `{"token"}` (token) or `{"username", "password"}` (basic), ≤ 4 KiB → 200 `{"ok": true, "expires_at": epoch}` + `Set-Cookie`. 400 `invalid_json`/`invalid_body`, 401 `invalid_credentials`, 429 `too_many_requests`, 404 `not_found` for other policies, 405 for non-POST. Never redirects |
 | `POST api/logout` | 200 `{"ok": true}` + an expiring `Set-Cookie` (any policy) |
 | `GET api/config` | `{preset, file, settings: {name: value (secrets "***", callables as dotted names)}, sources: {name: source}, groups: {capture, sampling, detectors, storage, access, features, other: [names]}, warnings: [str]}` – warnings = config warnings + runtime notes of the gate |
-| `GET api/meta` | `features: {explain, profile, replay, snapshot, load, logs, locals, sse, load_from_ui}` (`load_from_ui` = setting and `load` and not `read_only`), `access: {policy, login: "token"\|"basic"\|null, read_only, preset}` |
+| `GET api/meta` | `features: {explain, profile, replay, snapshot, load, logs, locals, sse, checks, load_from_ui, checks_from_ui}` (`load_from_ui` = setting and `load` and not `read_only`; `checks_from_ui` = the setting resolved (auto → debug) and `checks` and not `read_only`), `access: {policy, login: "token"\|"basic"\|null, read_only, preset}` |
 
 (Contract change: login/logout answer 200 JSON instead of 204, so the UI's JSON client handles them uniformly.)
 
@@ -1025,7 +1028,7 @@ expect_status = 200              # optional
 - Server-side per request (when the store is reachable – CLI `--store`, or always for UI runs): from the tagged
   traces, median server duration, query count (median and max), query time, the set of SQL fingerprints with
   counts, and the issues (kind + fingerprint/title) seen. If no tagged traces arrive (app not instrumented,
-  different store, sampled out — check calls are always kept: the recorder forces keep for a valid check tag),
+  different store — check calls are kept even when sampling would drop them, see the keep rule in 19.5a),
   server-side metrics are `null` and the report says so; client-side metrics still work.
 - Errors: connection errors/timeouts count as failed calls (status `null`); a request with ≥ 50 % failed calls
   is `broken` in both baseline and compare.
@@ -1135,6 +1138,90 @@ Per request:
     compares); `POST api/checks/runs/{id}/stop`; `DELETE api/checks/runs/{id}`.
   - `POST api/checks/baselines/import` (baseline JSON body, ≤ 10 MiB) → stored baseline id, so a CI-produced
     baseline can be viewed in the UI.
+
+#### 19.5a Storage, tagging and API as implemented
+
+- **Schema v4** (`storage/checks.py`, mixed into `SQLiteStore`): migrated inside the same single
+  `BEGIN IMMEDIATE` as earlier versions (version re-checked inside; new tables only). Extra columns beyond the
+  list above: `check_runs.suite_json` (redacted suite snapshot), `info_json` (`base_url`, `release`,
+  `source: "ui"|"import"`, `baseline: {id, label, git, created_at}` snapshot for compares), `progress_json`.
+  `check_results` has `PRIMARY KEY (run_id, idx)`. Writes are synchronous. `clear()` does not touch check tables.
+  Store methods: `create_check_suite(name, suite)`, `update_check_suite(id, name, suite)`, `get_check_suite`,
+  `list_check_suites`, `delete_check_suite` (with its runs); `create_check_run(run)` (upsert: keeps
+  `created_at`, merges info; then applies retention), `set_check_progress`, `finish_check_run(id, status,
+  summary, error)`, `add_check_result(run_id, idx, name, data)`, `get_check_results`, `get_check_run`,
+  `list_check_runs(suite_id=None, limit=50, kind=None)`, `delete_check_run`, `check_baseline(id)` (a finished
+  baseline as §19.3 JSON plus `id`, `status`, `base_url`), `import_check_baseline(doc, suite_id)`,
+  `known_check_runs()`, `prune_check_runs(suite_id, keep=50)`. A store lacking them → 501 `not_supported`.
+- **Retention:** on every create/import, per `suite_id` (NULL = one group): keep the 50 newest, running ones and
+  baselines referenced by a kept compare run.
+- **Dead runs:** like load runs (§11): a `running` check row older than 10 s whose `runs/<id>.pid` is missing or
+  dead becomes `failed`, `error = "the check process exited unexpectedly"` (only with a `runs/` dir beside the
+  store).
+- **Tagging.** `X-Redline-Check: <id>;req=<i>;n=<k>` → tags `check_run_id` (`[A-Za-z0-9_-]{1,64}`), `check_req`
+  (int ≥ 0), `check_n` (int; dropped when malformed); a malformed id/req tags nothing. Parsed in the same single
+  pass over the request headers as `X-Redline-Run`, so an untagged request pays nothing extra.
+- **Keep rule (no forced storage by anonymous clients).** When sampling would drop a request carrying a check
+  tag, `Sampler.keep(check=True)` keeps it *provisionally* with `sampled_by = "check"` – only if the store
+  declares `validates_check_tags = True` (SQLiteStore); other stores never receive such traces. The writer
+  thread checks every `check_run_id` against `known_check_runs()` (running, or finished < 60 s ago; 1 s cache):
+  an invalid tag on a `sampled_by="check"` trace drops the whole trace; on any other trace only the `check_*`
+  tags are stripped (its normal sampling decision stands). Run ids are random 128-bit hex known only to Redline
+  users, so a header cannot force storage. Profiling is never forced by the tag.
+- **Server metrics** (`check.sink.StoreServerMetrics.for_check(run_id, timeout_s)`): flushes this process's
+  writer, waits until `requests × (warmup + repeat)` tagged traces are stored or the count has been stable for
+  0.5 s (or the timeout), skips warm-up calls (`n=0`), then per `check_req`: `{calls, duration_ms_median,
+  queries_median, queries_max, query_ms_median, sql: {fingerprint16: {count (median executions per call over
+  the calls it ran in), max, calls, sql}}, issues: [{kind, fingerprint (16-hex of the issue's SQL fingerprint, or
+  the issue id), title, id, severity, calls}], sample_trace_id (the call nearest the median duration)}`.
+  `check.sink.load_baseline(store, id)` = `store.check_baseline(id)` (or `None`).
+- **API shapes:**
+  - `GET api/checks/suites` → `{items: [{id, name, requests (count), created_at, updated_at, last_baseline:
+    {id, status, label, git, created_at, summary}|null, last_compare: {same keys}|null}]}`.
+  - `POST api/checks/suites` `{name, suite}` → 201, `GET|PUT api/checks/suites/{id}` → 200: `{id, name, suite,
+    requests, created_at, updated_at}`. Secret header values (`redact_headers`/`redact_keys`) are shown as
+    `[redacted]` unless they are `${env:NAME}` placeholders (optionally after a scheme: `Bearer ${env:X}`); a PUT
+    that sends `[redacted]` back keeps the stored value. Bodies ≤ 1 MiB. Validation: the engine's
+    `Suite.from_dict` (plus read-only methods) → 400 `invalid_suite`. `DELETE` → `{deleted}` (409 `run_active`
+    while one of its runs is running). `GET …/export` → `text/plain` TOML (secrets masked), `Content-Disposition:
+    attachment; filename="<name>.toml"`.
+  - `POST api/checks/suites/draft` `{routes?: ["/orders/{id}" (as `GET api/endpoints` shows them), "GET /x",
+    {method, route}], limit?: 1..200 (default 50)}` → a suite object `{name, timeout_s, repeat, warmup,
+    thresholds, headers?, requests: [{name: "METHOD route", method, path}]}` from the last 7 days: read-only
+    methods, Redline's mount excluded, the most recent 2xx/3xx concrete path (query appended unless a value was
+    redacted; paths with redacted values skipped). `headers` only ever holds
+    `${env:REDLINE_CHECK_AUTHORIZATION}` / `${env:REDLINE_CHECK_COOKIE}` when recent requests carried those
+    headers. Per-route p50/queries for the builder come from `GET api/endpoints`.
+  - `POST api/checks/runs` `{suite_id, kind, baseline_id?, label?}`: 403 `checks_from_ui_disabled` (setting off,
+    or `auto` outside debug mode) → 400 `invalid_body` → 404 `suite_not_found` → compare: `baseline_id` defaults
+    to the suite's newest finished baseline (none → 400); unknown → 404 `check_run_not_found`; not a finished
+    baseline → 400 → 409 `run_active` while a run of the same suite is running → 501 without a file-backed
+    SQLite store → 400 when the target is unknown (same rules as §18 UI load runs: `base_url` setting, else
+    `own_base_url()`, never `Host`) → 400 `invalid_suite` over the caps (≤ 200 requests, ≤ 5000 calls =
+    Σ(warmup + repeat), GET/HEAD/OPTIONS, paths starting with one `/`). Answers 202 `{id, status: "running",
+    kind, suite_id, baseline_id}`.
+  - `GET api/checks/runs?suite_id=&kind=&limit=` → `{items: [Run]}`; `GET api/checks/runs/{id}` → `Run` plus
+    `suite` (redacted), `report` (compares: the §19.4 report built from the stored results: `{format, version,
+    suite, baseline, run: {id, git, created_at, base_url}, summary, requests}`; else null) and `requests`
+    (baselines: the §19.3 per-request array). `Run = {id, suite_id, kind, baseline_id, status, label, git,
+    created_at, finished_at, summary, error, progress: {done, total, current, …}|null, name, request_count,
+    base_url, release, source, baseline}` (epoch seconds). Progress is stored at most twice a second.
+  - `POST api/checks/runs/{id}/stop` → `{stopped: bool}` (false when not running); `DELETE api/checks/runs/{id}`
+    → `{deleted}`, 409 `run_active` while running; unknown ids → 404 `check_run_not_found`.
+  - `POST api/checks/baselines/import[?suite_id=]` (≤ 10 MiB, else 413 `payload_too_large`) → 201 `{id, kind:
+    "baseline", requests}`; `format`/`version`/shape (and the engine's `Baseline.from_dict`) → 400
+    `invalid_baseline`. Redacted on import: suite headers/URLs, request paths, response headers, JSON bodies by
+    key, text bodies by `Redactor.text`.
+- **Background process** (`check.control`): `check_hooks(store, settings)` pre-inserts the `running` row
+  (redacted suite, `base_url`, `source: "ui"`) and spawns `python -m redline_core.check.control run
+  runs/<id>.check.json --store PATH --run-id ID` (detached; log `runs/<id>.log`; pid file; the `.check.json`
+  holds the raw header values, mode 0600, removed at the end). The child runs `run_suite` with `StoreCheckSink`,
+  `StoreServerMetrics`, a stop event backed by `runs/<id>.stop` and a 15 min cap (then `stopped`, error
+  "stopped: runs started from the UI are limited to 15 min"); a failure before the engine starts still finishes
+  the row as `failed`. Adapters pass PUT bodies to `dispatch` and accept bodies up to `api.MAX_API_BODY`
+  (11 MiB): Django reads past `DATA_UPLOAD_MAX_MEMORY_SIZE` (after the access gate), Litestar ≥ 2.13 gets
+  `request_max_body_size`.
+
 
 ### 19.6 UI (`#/checks`)
 

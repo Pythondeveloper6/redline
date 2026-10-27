@@ -48,6 +48,7 @@ from .storage.base import FilterError, Filters, Store, parse_period, parse_windo
 from .storage.derive import fingerprint_key
 
 __all__ = [
+    "MAX_API_BODY",
     "ExecutorFactory",
     "RawResponse",
     "RedlineAPI",
@@ -109,6 +110,9 @@ _RUN_STOP = re.compile(rf"^api/runs/{_ID}/stop$")
 _ISSUE_KINDS = ISSUE_KINDS
 _BUCKETS = {"1h": 3_600.0, "1d": 86_400.0}
 _LOAD_MODES = ("constant", "ramp", "steps")
+#: Largest request body adapters should hand to :meth:`RedlineAPI.dispatch` (an imported
+#: check baseline may be 10 MiB; the core answers 413 ``payload_too_large`` beyond it).
+MAX_API_BODY = 11 * 1024 * 1024
 #: ``GET api/indexes`` answers are cached this long per ``(window, db)``.
 INDEX_CACHE_S = 30.0
 
@@ -151,6 +155,9 @@ class RedlineAPI:
         run_stopper: RunStopper | None = None,
         config: Any = None,
         access: Any = None,
+        check_launcher: Callable[..., str] | None = None,
+        check_stopper: RunStopper | None = None,
+        debug: Callable[[], Any] | None = None,
     ) -> None:
         self.store = store
         self.settings = settings or Settings()
@@ -164,6 +171,26 @@ class RedlineAPI:
         self.run_stopper = run_stopper
         self._index_cache: dict[tuple[float, str], tuple[float, dict[str, Any]]] = {}
         self._index_lock = threading.Lock()
+        #: The framework's debug flag (``checks_from_ui="auto"``); default: the gate's.
+        self.debug = debug
+        from .api_checks import CheckRoutes
+
+        #: ``api/checks`` (§19.5). Without injected hooks they are built on first use from
+        #: the store (:func:`redline_core.check.control.check_hooks`).
+        self.checks = CheckRoutes(self, check_launcher, check_stopper)
+
+    def debug_mode(self) -> bool:
+        """Whether the framework is in debug mode right now (``debug`` callable, else the
+        access gate's ``debug``); errors count as "not debug"."""
+        fn = self.debug
+        if fn is None and self.access is not None:
+            fn = getattr(self.access, "debug", None)
+        if fn is None:
+            return False
+        try:
+            return bool(fn())
+        except Exception:
+            return False
 
     # routing ---------------------------------------------------------------
     def dispatch(
@@ -213,6 +240,8 @@ class RedlineAPI:
         }
         if path in get_routes:
             return get_routes[path](params) if method == "GET" else _not_allowed()
+        if path == "api/checks" or path.startswith("api/checks/"):
+            return self.checks.route(method, path, params, body, base_url)
         if path == "api/runs":
             if method == "GET":
                 return self.list_runs(params)
@@ -291,6 +320,7 @@ class RedlineAPI:
         s = self.settings
         features = {name: s.feature(name) for name in FEATURES}
         features["load_from_ui"] = s.load_from_ui and s.feature("load") and not s.read_only
+        features["checks_from_ui"] = self.checks.from_ui_allowed()
         return features
 
     def _access_meta(self) -> dict[str, Any]:
