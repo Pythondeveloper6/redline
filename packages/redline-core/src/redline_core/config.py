@@ -134,7 +134,7 @@ GROUPS: dict[str, tuple[str, ...]] = {
         "ui_enabled",
         "mount_path",
     ),
-    "features": ("features", "load_from_ui", "base_url"),
+    "features": ("features", "load_from_ui", "checks_from_ui", "base_url"),
 }
 
 
@@ -231,7 +231,7 @@ _FIELD_TYPES: dict[str, str] = {f.name: str(f.type) for f in dataclasses.fields(
 
 def _kind(name: str) -> str:
     t = _FIELD_TYPES[name].replace(" ", "")
-    if name in ("badge", "server_timing", "cookie_secure"):
+    if name in ("badge", "server_timing", "checks_from_ui", "cookie_secure"):
         return "badge"
     if t.startswith("tuple["):
         return "list"
@@ -663,6 +663,11 @@ def config_warnings(settings: Settings, sources: Mapping[str, str] | None = None
         out.append(
             "load_from_ui is on: anyone with access to Redline can start a load test "
             "against this application."
+        )
+    if s.checks_from_ui is True and s.access not in ("local",):
+        out.append(
+            "checks_from_ui is on: anyone with access to Redline can start refactor-check runs "
+            "(sequential GET requests) against this application."
         )
     if not s.history_retention_days:
         out.append("history_retention_days is off: the history tables grow forever.")

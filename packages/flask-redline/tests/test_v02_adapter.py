@@ -283,3 +283,35 @@ def test_cli_scenario_from_url_map_and_traffic(make_env, tmp_path):
     assert data["base_url"] == "http://127.0.0.1:8080"
     assert run(env, "scenario", "-o", str(out)).exit_code != 0  # exists, no --force
     assert run(env, "scenario", "-o", str(out), "--force").exit_code == 0
+
+
+# ---------------------------------------------------------------------------- checks
+CHECK_SUITE = {"repeat": 1, "warmup": 0, "requests": [{"name": "home", "path": "/"}]}
+
+
+def test_checks_suites_and_runs(make_env, monkeypatch):
+    from redline_core.check import control as check_control
+
+    seen = {}
+
+    def fake_launch(suite, base_url, store_path, **kw):
+        seen.update(base_url=base_url, store_path=store_path, **kw)
+        return kw["run_id"]
+
+    monkeypatch.setattr(check_control, "launch_check", fake_launch)
+    env = make_env()
+    c = env.client()
+    r = c.post("/_redline/api/checks/suites", json={"name": "s", "suite": CHECK_SUITE})
+    assert r.status_code == 201, r.json
+    sid = r.json["id"]
+    r = c.put(f"/_redline/api/checks/suites/{sid}", json={"name": "s2", "suite": CHECK_SUITE})
+    assert r.status_code == 200 and r.json["name"] == "s2"
+    r = c.post("/_redline/api/checks/runs", json={"suite_id": sid, "kind": "baseline"})
+    assert r.status_code == 403 and r.json["error"]["code"] == "checks_from_ui_disabled"
+    env.app.debug = True  # "auto" follows app.debug, read per request
+    r = c.post("/_redline/api/checks/runs", json={"suite_id": sid, "kind": "baseline"})
+    assert r.status_code == 202, r.json
+    assert seen["base_url"] == "http://127.0.0.1:80"  # SERVER_PORT, never the Host header
+    assert c.get(f"/_redline/api/checks/runs/{r.json['id']}").json["status"] == "running"
+    r = c.get(f"/_redline/api/checks/suites/{sid}/export")
+    assert r.status_code == 200 and r.mimetype == "text/plain"

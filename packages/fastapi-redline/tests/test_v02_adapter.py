@@ -202,3 +202,41 @@ def test_runs_post_launches_against_app_origin(make_env, monkeypatch):
         # cross-site POST is refused by the CSRF guard
         bad = c.post("/_redline/api/runs", json=RUN, headers={"Origin": "http://evil.example"})
         assert bad.status_code == 403
+
+
+# ---------------------------------------------------------------------------- checks
+CHECK_SUITE = {"repeat": 1, "warmup": 0, "requests": [{"name": "home", "path": "/"}]}
+
+
+def test_checks_suites_and_runs(make_env, monkeypatch):
+    from redline_core.check import control as check_control
+
+    seen = {}
+
+    def fake_launch(suite, base_url, store_path, **kw):
+        seen.update(base_url=base_url, store_path=store_path, **kw)
+        return kw["run_id"]
+
+    monkeypatch.setattr(check_control, "launch_check", fake_launch)
+    env = make_env()  # app.debug is off: checks_from_ui="auto" refuses
+    with TestClient(env.app, base_url="http://localhost:8000") as c:
+        r = c.post("/_redline/api/checks/suites", json={"name": "s", "suite": CHECK_SUITE})
+        assert r.status_code == 201, r.text
+        sid = r.json()["id"]
+        r = c.put(f"/_redline/api/checks/suites/{sid}", json={"name": "s2", "suite": CHECK_SUITE})
+        assert r.status_code == 200 and r.json()["name"] == "s2"  # PUT bodies reach the core
+        r = c.post("/_redline/api/checks/runs", json={"suite_id": sid, "kind": "baseline"})
+        assert r.status_code == 403 and r.json()["error"]["code"] == "checks_from_ui_disabled"
+    env = make_env(settings={"checks_from_ui": True})
+    with TestClient(env.app, base_url="http://localhost:8000", root_path="/app") as c:
+        sid = c.post("/_redline/api/checks/suites", json={"name": "s", "suite": CHECK_SUITE})
+        sid = sid.json()["id"]
+        r = c.post("/_redline/api/checks/runs", json={"suite_id": sid, "kind": "baseline"})
+        assert r.status_code == 202, r.text
+        assert seen["base_url"] == "http://127.0.0.1:8000/app"  # listening port, never Host
+        assert seen["store_path"] == env.redline.store.path
+        run = c.get(f"/_redline/api/checks/runs/{r.json()['id']}").json()
+        assert run["status"] == "running" and run["kind"] == "baseline"
+        r = c.get(f"/_redline/api/checks/suites/{sid}/export")
+        assert r.status_code == 200 and r.headers["content-type"].startswith("text/plain")
+        assert "[[requests]]" in r.text
