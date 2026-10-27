@@ -3,7 +3,8 @@ import { createPortal } from 'react-dom'
 import { copyText } from '../lib/format'
 import { tokenizeSql, formatSql } from '../lib/sql'
 import type { IssueKind, Severity } from '../types'
-import { ISSUE_LABEL } from '../lib/format'
+import { ISSUE_LABEL, ISSUE_STYLE } from '../lib/format'
+import CallsiteLink from './CallsiteLink'
 
 export function Icon({ d, size = 14, className = '' }: { d: string; size?: number; className?: string }) {
   return (
@@ -16,7 +17,7 @@ export const I = {
   copy: 'M9 9h10v10H9zM5 15V5h10', check: 'M5 12l5 5 9-10', x: 'M6 6l12 12M18 6L6 18', sun: 'M12 4V2M12 22v-2M4 12H2M22 12h-2M5.6 5.6L4.2 4.2M19.8 19.8l-1.4-1.4M5.6 18.4l-1.4 1.4M19.8 4.2l-1.4 1.4M12 8a4 4 0 100 8 4 4 0 000-8z',
   moon: 'M20 14.5A8 8 0 019.5 4 8 8 0 1020 14.5z', pause: 'M8 5v14M16 5v14', play: 'M7 4l13 8-13 8z',
   down: 'M12 4v12M6 12l6 6 6-6', search: 'M11 4a7 7 0 100 14 7 7 0 000-14zM21 21l-5-5', trash: 'M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3',
-  chev: 'M9 6l6 6-6 6', zap: 'M13 2L4 14h7l-1 8 9-12h-7z', back: 'M15 6l-6 6 6 6', alert: 'M12 9v4M12 17h.01M10.3 3.9L2.4 18a2 2 0 001.7 3h15.8a2 2 0 001.7-3L13.7 3.9a2 2 0 00-3.4 0z',
+  chev: 'M9 6l6 6-6 6', zap: 'M13 2L4 14h7l-1 8 9-12h-7z', back: 'M15 6l-6 6 6 6', logout: 'M10 5H5v14h5M15 8l4 4-4 4M19 12H9', alert: 'M12 9v4M12 17h.01M10.3 3.9L2.4 18a2 2 0 001.7 3h15.8a2 2 0 001.7-3L13.7 3.9a2 2 0 00-3.4 0z',
 }
 
 export function CopyButton({ text, label = 'Copy', className = '' }: { text: string; label?: string; className?: string }) {
@@ -39,9 +40,9 @@ export const statusTone = (s: number) => (s >= 500 ? 'bad' : s >= 400 ? 'warn' :
 export function Status({ code }: { code: number }) { return <Pill tone={statusTone(code)}><span className="num font-semibold">{code}</span></Pill> }
 
 export const sevTone = (s: Severity) => (s === 'critical' ? 'bad' : s === 'warning' ? 'warn' : 'info') as keyof typeof TONE
-export function IssueBadge({ kind }: { kind: IssueKind }) {
-  const tone = kind === 'n_plus_one' || kind === 'slow_query' ? 'bad' : kind === 'duplicate_query' ? 'warn' : 'info'
-  return <Pill tone={tone}>{ISSUE_LABEL[kind]}</Pill>
+export function IssueBadge({ kind, icon = false }: { kind: IssueKind; icon?: boolean }) {
+  const st = ISSUE_STYLE[kind]
+  return <Pill tone={st?.tone ?? 'info'}>{icon && st && <Icon d={st.d} size={11} />}{ISSUE_LABEL[kind] ?? kind}</Pill>
 }
 export function Sev({ s }: { s: Severity }) { return <Pill tone={sevTone(s)}>{s}</Pill> }
 
@@ -179,8 +180,7 @@ export function Tabs<T extends string>({ tabs, value, onChange }: { tabs: { id: 
 }
 
 export function Callsite({ cs }: { cs: { file: string; line: number; function: string } | null }) {
-  if (!cs) return null
-  return <span className="mono text-muted">{cs.file}<span className="text-faint">:</span>{cs.line}</span>
+  return <CallsiteLink callsite={cs} />
 }
 
 /** Small data-fetching hook. */

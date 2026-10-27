@@ -141,18 +141,55 @@ REDLINE = {"STORE": "myproject.redline.MirroringStore"}
 An import error, or a value that does not produce a `Store`, raises
 `ImproperlyConfigured` (and the system check `django_redline.E001`).
 
+## What 0.2 adds for Django
+
+| Feature | Where to read |
+|---|---|
+| `transaction.atomic` recorded as `transaction` spans (with `ATOMIC_REQUESTS`), long-transaction and external-call-in-transaction detection | [Transactions and locks](transactions.md) |
+| DRF serializers timed as `serializer` spans | [Slow serializers](serializers.md) |
+| Row counts on queries, large and unbounded results, `len(qs)` vs `.count()` / `.exists()` | [Large and unbounded results](result-size.md) |
+| A sync ORM call inside an `async def` view reported as blocking the event loop | [Blocking in async](async-blocking.md) |
+| Django's cache framework analysed per key pattern | [Cache efficiency](cache-efficiency.md) |
+| Strawberry and Graphene resolvers (and `strawberry-django`) | [GraphQL](graphql.md) |
+| Django Ninja | [Django Ninja](django-ninja.md) |
+| `manage.py redline_scan` (templates and DRF) | [Static N+1 scan](static-scan.md) |
+| `manage.py redline_scenario`, then `redline load` | [Load testing](load-testing.md) |
+| `Server-Timing`, the floating badge (when `DEBUG`), live mode, snapshots | [Server-Timing and the badge](server-timing-badge.md) |
+| `REDLINE["PRESET"]`, `redline.toml`, `REDLINE_*` | [Configuration](configuration.md) |
+
+The badge is `"auto"` by default, which in Django means **on when `DEBUG` is true**. Nothing
+changes in `MIDDLEWARE` or `urls.py`.
+
 ## Access control
 
-Every view, page, assets and API, first checks `REDLINE["PERMISSION"]`. Before that, it
-calls `request.get_host()`, so `ALLOWED_HOSTS` is enforced on Redline's views even without
-`CommonMiddleware` (a defence against [DNS rebinding](security.md#dns-rebinding)).
+Django's default access policy is `framework`: the permission check below, and it stays the
+default under the `production` preset (a preset does not change it). The other policies
+(`token`, `basic`, IP allow-lists, `read_only`, ...) are available through the same `REDLINE`
+dict and are described on [Access control](access-control.md). When `ACCESS` is not
+`"framework"`, `PERMISSION` is not consulted.
+
+Every view, page, assets and API, first checks `ALLOWED_HOSTS` (it calls
+`request.get_host()`, so this holds even without `CommonMiddleware`, a defence against
+[DNS rebinding](security.md#dns-rebinding)) and then the access gate, with
+`REDLINE["PERMISSION"]` as the framework hook. Top-level files such as `badge.js` skip
+`PERMISSION` but not the network rules.
 
 | | Default | |
 |---|---|---|
-| Who | active staff: `user.is_active and user.is_staff` | |
+| Who | active superusers: `user.is_active and user.is_superuser` | changed in 0.2 (was staff) |
 | Anonymous, on the page | redirected to `admin:login` (or `LOGIN_URL` if the admin is not installed), with `?next=` | |
 | Signed in without access, on the page | `403` plain text | |
 | On the API | `403` JSON `{"error": {"code": "forbidden", ...}}` | |
+
+!!! warning "Changed in 0.2: superusers, not staff"
+
+    Until 0.1 any active **staff** user could open Redline. Staff status is often given
+    for the admin of a single model, while Redline shows every user's requests (headers,
+    SQL, bodies), so the default now asks for a superuser. To keep the 0.1 rule:
+
+    ```python
+    REDLINE = {"PERMISSION": "django_redline.conf.staff_permission"}
+    ```
 
 Override it with a callable `(request) -> bool`, or its dotted path:
 
@@ -160,7 +197,7 @@ Override it with a callable `(request) -> bool`, or its dotted path:
 # myproject/redline.py
 def can_view(request):
     user = request.user
-    return user.is_active and user.is_superuser
+    return user.is_active and user.groups.filter(name="performance").exists()
 ```
 
 ```python
@@ -191,7 +228,10 @@ data-header="...">`, and the SPA sends it back. Because the token is in the page
 not read from a cookie, this works with `CSRF_COOKIE_HTTPONLY = True` and with
 `CSRF_USE_SESSIONS = True`.
 
-Scripts calling the API must log in, keep the session cookie, and send the token.
+Scripts calling the API must log in, keep the session cookie, and send the token. The
+exception is `ACCESS = "token"`: a request carrying `Authorization: Bearer <token>` skips
+Django's CSRF check. The gate's own CSRF rule (`Sec-Fetch-Site: cross-site` or `same-site`,
+or a mismatched `Origin`, refused with `403 csrf_failed`) applies as well.
 
 ## How it hooks in
 
@@ -237,8 +277,8 @@ Details worth knowing:
 | Response status, headers | `Set-Cookie` values from `response.cookies` are included, then redacted |
 | Response body | only for non-streaming responses; **streaming and file responses are never consumed**. The size comes from `Content-Length` |
 | Exceptions | `process_exception` remembers a view's exception for the trace and returns `None`: it **never handles or swallows** it. It becomes the trace's `error` only when the final response is a 5xx: `Http404`, `PermissionDenied`, `BadRequest` and friends turn into 4xx responses and are **not errors** (no `error` on the trace, not kept by `ALWAYS_KEEP_ERRORS`). An exception that escapes the stack is recorded as a 500 and re-raised |
-| `X-Redline-Run` | becomes `run_id` and `step` tags |
-| `?_redline=profile` (or `1`, `true`, `yes`, `on`) / `X-Redline-Profile: 1` | starts the [profiler](flamegraphs.md); the same values as FastAPI |
+| `X-Redline-Run` | becomes `run_id` and `step` tags (kept only for a run that is running in the store) |
+| `?_redline=profile` (or `1`, `true`, `yes`, `on`) / `X-Redline-Profile: 1` | starts the [profiler](flamegraphs.md); the same values as FastAPI. Honoured with `DEBUG = True`, or when the request carries Redline credentials under `token`/`basic` (a `PERMISSION` cannot run in the middleware) |
 
 With `DEBUG = True`, a **kept** response gets an `X-Redline-Trace: <trace id>` header so you
 can find it. It is never sent in production.
@@ -314,8 +354,11 @@ Redline is enabled; the others always run.
 |---|---|
 | `manage.py redline_clear [--noinput]` | Deletes every recorded trace. Asks for confirmation (`Delete all N Redline traces? [y/N]`) unless `--noinput` or `--no-input` |
 | `manage.py redline_prune [--max-age-days N] [--max-rows N]` | Applies [retention](storage.md#retention) now. Defaults to the `MAX_AGE_DAYS` and `MAX_ROWS` settings. `0` disables that rule for this run (it never deletes everything: that is `redline_clear`). Negative values are an error |
+| `manage.py redline_scan [PATHS] [--json] [--fail] [--dialect django\|jinja] [--no-drf]` | [Static N+1 scan](static-scan.md): templates that read a relation in a loop, and DRF serializers whose queryset lacks the matching `select_related` / `prefetch_related`. `--fail` exits 1 on findings |
+| `manage.py redline_scenario [-o FILE] [--base-url URL] [--force]` | Writes a [load-test scenario](load-testing.md#generating-scenarios) from your URLconf (stdout without `-o`) |
 
-Both build the runtime, flush pending writes, and print how many traces they removed. Run
+`redline_clear` and `redline_prune` build the runtime, flush pending writes, and print how
+many traces they removed. `redline_clear` keeps [history](history.md). Run
 `redline_prune` from cron if your app is idle for long stretches (the writer prunes as
 it writes, so an idle app does not prune on its own).
 

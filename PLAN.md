@@ -127,3 +127,16 @@ Scope: profile, N+1 with fix diffs, EXPLAIN and the UI, for Django and FastAPI.
    Save light and dark screenshots to `docs/assets/screenshots/`.
 5. Benchmarks run and the numbers are recorded in the docs.
 6. `uv run --with mkdocs-material mkdocs build --strict` passes.
+
+## v0.2 build (branch `v0.2`, contract §8–§17)
+
+Scope agreed with the owner on 2026-10-27: every analysis/UX feature from the follow-up list, Flask (and Litestar) adapters, stress testing, and history (before/after over time). Built in waves by subagents in their own git worktrees; the lead merges, rebuilds the UI bundle and regenerates `uv.lock` after each wave, then removes the worktrees.
+
+| Wave | Slices |
+|---|---|
+| 0 | core foundation (model, settings, detector registry, histogram, logs/locals, Server-Timing) · `redline_core.contrib` (SQLAlchemy/httpx moved from fastapi-redline; requests, redis, asyncpg, psycopg) · UI quick wins (palette, keyboard, open-in-editor, cURL/HTTPie, replay, compare skeleton) |
+| 1 | store v2 + history + API routes (Opus) · flask-redline · async blocking + transactions + pool wait (Opus) · Server-Timing/badge/SSE/snapshot in adapters |
+| 2 | load tester `redline load` (Opus) · result-size/count/serializer/external detectors · workload index advisor + unused indexes (Opus) · GraphQL resolvers |
+| 3 | UI pages: History + Load · UI pages: Database/Cache/External/logs/exception/live · litestar-redline + Django Ninja · static N+1 scan |
+| 3b | **configuration and access control** (contract §18: presets dev/staging/production, `redline.toml` + `REDLINE_*` env, one access policy for all adapters — local/token/basic/framework/custom, IP allow-lists, trusted proxies, read-only mode, per-feature switches, login screen, Settings page, `redline config` / `doctor` / `hash-password`) (Opus) |
+| 4 | docs · examples + CI matrix · security/code review (Opus) · browser verification, version 0.2.0a1 |

@@ -1,17 +1,48 @@
 """The prebuilt web UI shipped inside the wheel.
 
 The React app in ``frontend/`` is built with ``base: './'`` into ``static/`` next to this
-file. Adapters serve :func:`index_html` at their mount root and files under ``assets/``
-through :func:`asset_path`, which refuses anything outside the static directory. The UI
-uses hash routing, so no catch-all route is needed.
+file. Adapters serve :func:`index_html` at their mount root, files under ``assets/`` and
+top-level files such as ``badge.js`` / ``favicon.svg`` through :func:`asset_path`, which
+refuses anything outside the static directory. The UI uses hash routing, so no catch-all
+route is needed.
+
+The floating badge (``CONTRACT.md`` §14/§15) is injected into the app's own HTML pages by
+the adapters with :func:`badge_snippet` + :func:`inject_badge`, gated by
+:func:`badge_enabled` and :func:`badge_allowed`.
 """
 
 from __future__ import annotations
 
+import html
+import json
 import mimetypes
+import re
+from collections.abc import Mapping
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
-__all__ = ["asset_path", "content_type", "index_html", "is_built", "static_dir"]
+if TYPE_CHECKING:
+    from ..conf import Settings
+    from ..recorder import TraceBuilder
+
+__all__ = [
+    "BADGE_MAX_BYTES",
+    "asset_path",
+    "badge_allowed",
+    "badge_enabled",
+    "badge_snippet",
+    "badge_summary",
+    "content_type",
+    "csp_allows_badge",
+    "index_html",
+    "inject_badge",
+    "is_built",
+    "server_timing_enabled",
+    "static_dir",
+]
+
+#: Adapters never buffer an HTML body larger than this to inject the badge.
+BADGE_MAX_BYTES = 2 * 1024 * 1024
 
 _STATIC = Path(__file__).resolve().parent / "static"
 
@@ -66,3 +97,124 @@ def content_type(path: Path | str) -> str:
     if guessed.startswith("text/") or guessed in ("application/json", "image/svg+xml"):
         return f"{guessed}; charset=utf-8"
     return guessed
+
+
+# ---------------------------------------------------------------------------- badge
+_BODY_CLOSE = re.compile(rb"</body\s*>", re.IGNORECASE)
+_DIRECTIVE = re.compile(r"\s*;\s*")
+
+
+def badge_enabled(settings: Settings, debug: bool) -> bool:
+    """Whether the badge is on: ``badge=True/False`` as given, ``"auto"`` = ``debug``."""
+    if not settings.enabled:
+        return False
+    if settings.badge == "auto":
+        return bool(debug)
+    return bool(settings.badge)
+
+
+def server_timing_enabled(settings: Settings, debug: bool) -> bool:
+    """Whether recorded responses get ``Server-Timing``: ``True``/``False`` as given,
+    ``"auto"`` = ``debug`` (it tells any client the trace id and query count/time)."""
+    if not settings.enabled:
+        return False
+    if settings.server_timing == "auto":
+        return bool(debug)
+    return bool(settings.server_timing)
+
+
+#: Directives that govern ``<script src>``, most specific first (CSP3 fallback order).
+_SCRIPT_DIRECTIVES = ("script-src-elem", "script-src", "default-src")
+
+
+def csp_allows_badge(csp: str | None) -> bool:
+    """Whether a ``Content-Security-Policy`` lets the page load ``<mount>/badge.js``.
+
+    ``csp`` may hold several policies joined with ``,`` (several headers, or one header
+    listing several); every one must allow it. In each, the directive that governs script
+    elements (``script-src-elem``, else ``script-src``, else ``default-src``; the first
+    occurrence of a directive wins) must list ``'self'`` or ``*`` and not
+    ``'strict-dynamic'`` (browsers then ignore ``'self'``, and the badge carries no nonce).
+    A policy without any of them allows it. Anything stricter (nonces, hashes, other hosts
+    only) skips the injection rather than producing a CSP violation in the console.
+    """
+    if not csp:
+        return True
+    for policy in csp.split(","):
+        directives: dict[str, list[str]] = {}
+        for part in _DIRECTIVE.split(policy.strip()):
+            name, _, value = part.strip().partition(" ")
+            if name:
+                directives.setdefault(name.lower(), value.lower().split())
+        for name in _SCRIPT_DIRECTIVES:
+            sources = directives.get(name)
+            if sources is not None:
+                break
+        else:
+            continue
+        if "'strict-dynamic'" in sources or not ("'self'" in sources or "*" in sources):
+            return False
+    return True
+
+
+def badge_allowed(
+    status: int | None,
+    content_type: str | None,
+    *,
+    content_encoding: str | None = None,
+    csp: str | None = None,
+    content_disposition: str | None = None,
+) -> bool:
+    """The response-side checks: 2xx, ``text/html``, not compressed, not a download
+    (no ``Content-Disposition``), CSP allows it (all policies joined with ``,``)."""
+    if status is None or not 200 <= status < 300 or content_disposition:
+        return False
+    if not content_type or not content_type.split(";")[0].strip().lower() == "text/html":
+        return False
+    if content_encoding and content_encoding.strip().lower() not in ("", "identity"):
+        return False
+    return csp_allows_badge(csp)
+
+
+def badge_summary(builder: TraceBuilder, status: int | None) -> dict[str, Any]:
+    """What the badge shows before the trace is finished (``data-redline-summary``).
+
+    Issues are only known once ``finish_trace`` ran detection, so ``issue_count`` is
+    ``None`` and ``issue_kinds`` empty here: the badge fetches ``<mount>/api/traces/<id>``
+    for them when it is opened (the trace is saved a moment after the response).
+    """
+    return {
+        "duration_ms": round(builder.elapsed_ms(), 1),
+        "query_count": builder.query_count,
+        "query_ms": round(builder.query_ms, 1),
+        "issue_count": None,
+        "issue_kinds": [],
+        "status": status,
+    }
+
+
+def badge_snippet(trace_id: str, mount_url: str, summary: Mapping[str, Any]) -> str:
+    """The ``<script>`` tag that loads the badge (``CONTRACT.md`` §14).
+
+    ``mount_url`` is Redline's mount as the browser sees it (``/_redline`` or
+    ``/app/_redline``, no trailing slash). Every attribute is HTML-escaped.
+    """
+    mount = mount_url.rstrip("/")
+    data = json.dumps(dict(summary), separators=(",", ":"), default=str)
+    esc = html.escape
+    return (
+        f'<script src="{esc(mount)}/badge.js" defer'
+        f' data-redline-trace="{esc(trace_id)}"'
+        f' data-redline-mount="{esc(mount)}"'
+        f" data-redline-summary='{esc(data)}'></script>"
+    )
+
+
+def inject_badge(body: bytes, snippet: str) -> bytes | None:
+    """``body`` with ``snippet`` inserted before the last ``</body>`` (any case);
+    ``None`` when there is no ``</body>`` (fragments, non-HTML)."""
+    matches = list(_BODY_CLOSE.finditer(body))
+    if not matches:
+        return None
+    i = matches[-1].start()
+    return body[:i] + snippet.encode("utf-8") + body[i:]

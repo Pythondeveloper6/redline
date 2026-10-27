@@ -4,10 +4,15 @@ import pytest
 from asgiref.sync import sync_to_async
 from django.test import override_settings
 
+from django_redline.runtime import get_runtime
+
 pytestmark = pytest.mark.django_db
 
 
-def test_records_route_view_spans_and_redacts(client, latest):
+def test_records_route_view_spans_and_redacts(client, latest, rt):
+    from redline_core.runs import Run
+
+    rt.store.save_run(Run(id="run42"))  # X-Redline-Run tags only a run the store knows
     response = client.get(
         "/plain/7/?q=1&token=abc",
         HTTP_AUTHORIZATION="Bearer secret",
@@ -126,17 +131,19 @@ def fine_profiler(monkeypatch):
     )
 
 
-def test_profile_opt_in(client, latest, rt, fine_profiler):
+def test_profile_opt_in(client, latest, rt, fine_profiler, settings):
+    settings.DEBUG = True  # the flag is honoured in debug mode (or with Redline credentials)
     client.get("/plain/?_redline=profile")
     trace = latest()
-    assert rt.store.has_profile(trace.id)
-    profile = rt.store.get_profile(trace.id)
+    assert get_runtime().store.has_profile(trace.id)
+    profile = get_runtime().store.get_profile(trace.id)
     assert profile["profiles"]
 
 
-def test_profile_header(client, latest, rt, fine_profiler):
+def test_profile_header(client, latest, rt, fine_profiler, settings):
+    settings.DEBUG = True
     client.get("/plain/", HTTP_X_REDLINE_PROFILE="1")
-    assert rt.store.has_profile(latest().id)
+    assert get_runtime().store.has_profile(latest().id)
 
 
 def test_cache_spans(client, latest):

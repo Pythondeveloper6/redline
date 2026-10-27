@@ -5,34 +5,35 @@
 Redline is a small pipeline. Understanding it explains every setting and every
 limitation, so this page is worth reading once.
 
-```text
- request ──► adapter middleware ──► your app ──► response
-                  │                    │
-        start_trace()           hooks: SQL, cache,
-                  │             template, httpx, span()
-                  ▼                    │
-              TraceBuilder  ◄──────────┘   (state in contextvars)
-                  │
-            finish_trace()
-                  │
-   sampling decision (keep? why?)
-                  │ kept
-   redact ► detect issues ► suggest fixes
-                  │
-        Store.save()  ── queue ──►  writer thread ──► .redline/redline.db
-                                                          │
-                                  JSON API  ◄── UI  ◄─────┘
+```mermaid
+flowchart TD
+    req([request]) --> mw[adapter middleware]
+    mw --> app[your app]
+    app --> res([response])
+    mw -- "start_trace()" --> tb[TraceBuilder]
+    app -- "hooks: SQL, cache, template, httpx, span()" --> tb
+    tb -- "state in contextvars" --> fin["finish_trace()"]
+    fin --> samp{"sampling decision<br/>keep? why?"}
+    samp -- kept --> proc["redact, detect issues, suggest fixes"]
+    proc --> save["Store.save()"]
+    save -- queue --> wr[writer thread]
+    wr --> db[(".redline/redline.db")]
+    db --> ui["JSON API and UI"]
 ```
 
-Three packages share this pipeline:
+Five packages share this pipeline:
 
 - **`redline-core`** owns everything in the middle: the data model, the recorder, SQL
   fingerprinting, callsite capture, redaction, sampling, the detectors, EXPLAIN analysis,
   the store, the JSON API and the UI bundle. It imports no web framework and has no
   runtime dependencies.
-- **`django-redline`** and **`fastapi-redline`** own the edges: how a request starts and
-  ends, how SQL and cache calls are observed, how URLs and auth work, and which ORM the
-  fix suggester understands.
+- **`django-redline`**, **`fastapi-redline`**, **`flask-redline`** and
+  **`litestar-redline`** own the edges: how a request starts and ends, how SQL and cache
+  calls are observed, how URLs and auth work, and which ORM the fix suggester understands.
+  They all enforce the same [access policy](access-control.md).
+- **`redline_core.contrib`** holds the optional hooks (SQLAlchemy, httpx, requests, redis,
+  asyncpg, psycopg, Marshmallow, Strawberry, Graphene). Nothing there is imported unless you
+  ask. See [Integrations](integrations.md).
 
 ## A trace and its spans
 
@@ -89,9 +90,10 @@ This split is the heart of the overhead model.
 | Work | When |
 |---|---|
 | Timing, span objects, SQL fingerprint, callsite capture, parameter redaction by column | **every non-ignored request**, as the query runs |
-| Header, query and body redaction | only when the trace is **kept** |
-| The detectors (N+1, duplicates, slow, too many) and fix suggestions | only when the trace is **kept** |
-| Serialising and writing to SQLite | only when the trace is **kept**, on the writer thread |
+| Header, query and body redaction, log and exception-local redaction | only when the trace is **kept** |
+| The detectors (N+1, duplicates, slow, too many, and the 0.2 detectors) and fix suggestions | only when the trace is **kept** |
+| Serialising and writing to SQLite, including the derived summary rows | only when the trace is **kept**, on the writer thread |
+| Log records, event-loop lag samples | while the request is in flight (a log record outside a request is one `ContextVar.get()`) |
 
 So lowering `sample_rate` removes the analysis and the disk cost of the requests you
 discard, but **not** the per-query recording cost. See
@@ -184,18 +186,29 @@ Otherwise it is dropped. The practical production recipe is therefore a low
 One sharp edge: `always_keep_slower_than_ms = 0` keeps every request, because every
 duration is "at least" 0 ms.
 
+## What the detectors read
+
+Each kind of finding reads a kind of span. The v0.1 four read `sql` spans; the 0.2 ones read
+the new kinds (`serializer`, `resolver`, `transaction`, `blocking`, `pool_wait`) and extra
+facts on `sql` spans (`rows`, `has_limit`, `in_transaction`). The adapters and integrations
+create them, and the detectors in `redline_core.detectors` read them when the trace is
+finished. One detector failing is logged and skipped. See [Detectors overview](detectors.md).
+
 ## Storage
 
 Kept traces are handed to `Store.save()`, which only puts them on a bounded queue. A
 daemon writer thread drains the queue in batches, one SQLite transaction per batch, and
-prunes by age and row count every 200 writes. If the queue is full the trace is
+prunes by age and row count every 200 writes. In the same transaction it derives small
+summary rows (per-trace SQL, outbound-call and cache summaries, hourly rollups with latency
+histograms, the issue index) that power the [Database](database.md), [Cache](cache-efficiency.md),
+[External](external-calls.md) and [History](history.md) pages. If the queue is full the trace is
 **dropped and counted** (`store.dropped`, shown by `GET api/meta`) rather than slowing a
 request. Details in [Storage](storage.md).
 
 ## Redaction
 
-Header, query-string, body and SQL-parameter redaction runs on kept traces before they
-reach the store, on by default. Secrets never reach disk. See [Security](security.md#redaction).
+Header, query-string, body, SQL-parameter, log-message and exception-local redaction runs on
+kept traces before they reach the store, on by default. Secrets never reach disk. See [Security](security.md#redaction).
 
 ## The overhead model
 
@@ -208,10 +221,11 @@ Cost has four sources:
 | Per-kept-trace analysis (redaction, detectors, serialising) | kept traces | `sample_rate`, always-keep rules |
 | Profiling | profiled requests | `profile`, `profile_sample_rate` |
 
-Measured on an Apple M2 Pro (Python 3.13, 2026-10-26, `benchmarks/RESULTS.md`), the
-per-request bookkeeping is **0.03 to 0.06 ms**, and per-query recording **12.5 µs**
-(Django) or **25.6 µs** (FastAPI, including SQLAlchemy event dispatch) when nothing is
-kept, rising to **22 to 44 µs** when every trace is kept and analysed. Disabled, Redline
+Measured on an Apple M2 Pro (Python 3.14, 2026-10-27, `benchmarks/RESULTS.md`), the
+per-request bookkeeping is **0.04 to 0.09 ms**, and per-query recording **15 to 31 µs**
+(including SQLAlchemy event dispatch on FastAPI, Flask and Litestar) when nothing is
+kept, rising to **28 to 51 µs** when every trace is kept and analysed (v0.1 on Python
+3.13: 12.5 to 44 µs). Disabled, Redline
 costs a few µs per request. See [Performance and overhead](performance.md#measured-numbers)
 for the full table and how to reproduce it.
 
@@ -225,7 +239,7 @@ only up to `max_body_bytes`.
 
 - **A separate SQLite file**, never your application database: no bloat, no migrations,
   and Redline's own writes can never be recorded as queries.
-- **A pure ASGI middleware** on FastAPI, not `BaseHTTPMiddleware`, which would break
+- **A pure ASGI middleware** on FastAPI and Litestar, not `BaseHTTPMiddleware`, which would break
   context propagation for sync endpoints and buffer streaming responses.
 - **Recording never breaks a request.** Every adapter hook and `finish_trace` is wrapped:
   an error in Redline is logged on the `redline` logger and the request carries on.

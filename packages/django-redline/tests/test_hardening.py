@@ -48,9 +48,10 @@ def fine_profiler(monkeypatch):
 
 
 @pytest.mark.parametrize("value", ["profile", "1", "true", "yes", "on"])
-def test_profile_query_values_match_fastapi(client, latest, rt, fine_profiler, value):
+def test_profile_query_values_match_fastapi(client, latest, fine_profiler, settings, value):
+    settings.DEBUG = True  # honoured in debug mode (or with Redline credentials)
     client.get(f"/plain/?_redline={value}")
-    assert rt.store.has_profile(latest().id)
+    assert get_runtime().store.has_profile(latest().id)
 
 
 def test_profile_query_off_value(client, latest, rt):

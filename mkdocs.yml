@@ -1,5 +1,5 @@
 site_name: Redline
-site_description: "A request profiler and backend analyzer for Django and FastAPI. N+1 detection with fix diffs, one-click EXPLAIN, flamegraphs and a fast web UI."
+site_description: "A request profiler, backend analyzer and load tester for Django, FastAPI, Flask and Litestar. N+1 detection with fix diffs, one-click EXPLAIN, flamegraphs, load testing and a fast web UI."
 site_author: Mahmoud Ahmed
 site_url: https://pythondeveloper6.github.io/redline/
 repo_url: https://github.com/Pythondeveloper6/redline
@@ -43,7 +43,6 @@ theme:
   features:
     - navigation.instant
     - navigation.instant.progress
-    - navigation.tracking
     - navigation.tabs
     - navigation.sections
     - navigation.top
@@ -53,6 +52,7 @@ theme:
     - search.suggest
     - search.highlight
     - search.share
+    - content.tooltips
     - content.code.copy
     - content.code.annotate
     - content.tabs.link
@@ -91,34 +91,69 @@ markdown_extensions:
   - pymdownx.inlinehilite
   - pymdownx.keys
   - pymdownx.snippets
-  - pymdownx.superfences
+  - pymdownx.mark
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
   - pymdownx.tabbed:
       alternate_style: true
 
 nav:
   - Home: index.md
-  - Guide:
+  - Get started:
       - Getting started: getting-started.md
       - How it works: how-it-works.md
       - The UI: the-ui.md
+      - Server-Timing and the badge: server-timing-badge.md
+  - Guide:
       - N+1 detection: n-plus-one.md
       - EXPLAIN: explain.md
       - Flamegraphs: flamegraphs.md
       - Custom spans: custom-spans.md
       - Issues and endpoints: issues-and-endpoints.md
+  - Analysis:
+      - Detectors overview: detectors.md
+      - Queries and data:
+          - Database: database.md
+          - Static N+1 scan: static-scan.md
+          - Large and unbounded results: result-size.md
+          - Transactions and locks: transactions.md
+          - GraphQL: graphql.md
+      - Runtime behaviour:
+          - Blocking in async: async-blocking.md
+          - Slow serializers: serializers.md
+          - External calls: external-calls.md
+          - Cache efficiency: cache-efficiency.md
+          - Logs and exceptions: logs-and-exceptions.md
+  - Load and history:
+      - Load testing: load-testing.md
+      - History and releases: history.md
   - Integrations:
-      - Django: django.md
-      - FastAPI: fastapi.md
-      - The HTTP API: http-api.md
+      - Frameworks:
+          - Django: django.md
+          - Django Ninja: django-ninja.md
+          - FastAPI: fastapi.md
+          - Flask: flask.md
+          - Litestar: litestar.md
+      - Libraries (requests, Redis, ...): integrations.md
       - Extending: extending.md
   - Operations:
-      - Settings reference: settings.md
+      - Configuration: configuration.md
+      - Access control: access-control.md
       - Production: production.md
       - Security: security.md
       - Storage: storage.md
       - Performance and overhead: performance.md
-  - Roadmap: roadmap.md
-  - FAQ: faq.md
-  - About:
-      - Changelog: changelog.md
-      - Contributing: contributing.md
+  - Reference:
+      - Settings reference: settings.md
+      - The HTTP API: http-api.md
+      - Command line: cli.md
+      - Project:
+          - Roadmap: roadmap.md
+          - FAQ: faq.md
+          - Changelog: changelog.md
+          - Contributing: contributing.md

@@ -1,0 +1,9 @@
+{% comment %}Deliberate N+1 loops for the redline_scan tests.{% endcomment %}
+<ul>
+{% for order in orders %}
+  <li>{{ order.customer.name }} ({{ order.status }})
+    {% for item in order.items.all %}{{ item.product.name }}{% endfor %}
+    {{ order.created.year }}
+  </li>
+{% endfor %}
+</ul>

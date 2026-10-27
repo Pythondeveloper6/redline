@@ -34,9 +34,12 @@ from django.core.handlers.base import BaseHandler
 from django.db import connections
 from django.db.backends.signals import connection_created
 
+from redline_core.blocking import note_sync_call
 from redline_core.callsite import MAX_STACK
 from redline_core.model import Callsite, Frame
 from redline_core.recorder import SpanContext, current, record_query, record_span
+
+from ._drf import install_drf
 
 __all__ = [
     "ViewFrame",
@@ -96,6 +99,10 @@ def install() -> None:
     install_cache_handler()
     _install_templates()
     _install_view_hook()
+    install_drf()
+    from .transactions import install_atomic
+
+    install_atomic()
 
 
 # ── SQL ─────────────────────────────────────────────────────────────────────────────
@@ -108,6 +115,7 @@ class QueryRecorder:
 
     def __call__(self, execute: Callable[..., Any], sql: Any, params: Any, many: bool, context):
         if current() is None or _suppressed.get():
+            _detach_counter(context.get("cursor"))  # a reused cursor stops counting
             return execute(sql, params, many, context)
         start = _perf()
         try:
@@ -141,6 +149,83 @@ def _record(sql: Any, params: Any, many: bool, context: dict, start: float, dura
     )
     if span is not None:
         attribute_to_view(span)
+        if rows is None and not many and cursor is not None and span.data.get("explainable"):
+            _count_fetched_rows(cursor, span)
+        else:
+            _detach_counter(cursor)
+        note_sync_call(span, "sync ORM")  # sync ORM on the event loop (async views)
+    else:
+        _detach_counter(cursor)
+
+
+class _RowCounter:
+    """Counts the rows Django fetches from ``cursor`` into ``span.data["rows"]``.
+
+    Used where ``cursor.rowcount`` is unusable (sqlite, server-side cursors): the
+    ``CursorWrapper`` gets instance-level ``fetchone``/``fetchmany``/``fetchall`` that
+    forward to the real ones and add what they return. ``rows`` therefore means "rows read
+    so far"; a partly consumed iterator reports the rows it actually read.
+
+    One counter per cursor (``cursor._redline_rows``), installed once with the cursor's
+    true fetch methods: every later execute on the same (reused) cursor retargets it to
+    the new span with a fresh count, or detaches it (``data = None``) when that execute is
+    not counted, so the methods never stack up.
+    """
+
+    __slots__ = ("_all", "_many", "_one", "data", "n")
+
+    def __init__(self, cursor: Any) -> None:
+        self.data: dict[str, Any] | None = None
+        self.n = 0
+        self._one, self._many, self._all = cursor.fetchone, cursor.fetchmany, cursor.fetchall
+
+    def fetchone(self) -> Any:
+        row = self._one()
+        if self.data is not None:
+            if row is not None:
+                self.n += 1
+            self.data["rows"] = self.n
+        return row
+
+    def fetchmany(self, *args: Any, **kwargs: Any) -> Any:
+        rows = self._many(*args, **kwargs)
+        if self.data is not None:
+            self.n += len(rows)
+            self.data["rows"] = self.n
+        return rows
+
+    def fetchall(self) -> Any:
+        rows = self._all()
+        if self.data is not None:
+            self.n += len(rows)
+            self.data["rows"] = self.n
+        return rows
+
+
+def _count_fetched_rows(cursor: Any, span: Any) -> None:
+    try:
+        counter = cursor.__dict__.get("_redline_rows")
+        if counter is None:
+            counter = _RowCounter(cursor)
+            cursor.fetchone, cursor.fetchmany, cursor.fetchall = (
+                counter.fetchone,
+                counter.fetchmany,
+                counter.fetchall,
+            )
+            cursor._redline_rows = counter
+        counter.n = 0
+        counter.data = span.data
+    except Exception:  # a cursor we cannot decorate just leaves rows unknown
+        pass
+
+
+def _detach_counter(cursor: Any) -> None:
+    counter = getattr(cursor, "__dict__", _NO_DICT).get("_redline_rows")
+    if counter is not None:
+        counter.data = None
+
+
+_NO_DICT: dict[str, Any] = {}
 
 
 _wrapper = QueryRecorder()
@@ -299,7 +384,12 @@ _MANY_OPS = ("set_many", "delete_many")
 
 
 def _key_text(key: Any) -> str:
+    """The key as recorded: session ids and secret-looking parts masked
+    (:meth:`~redline_core.redact.Redactor.cache_key`), then capped at 200 characters."""
     text = key if isinstance(key, str) else repr(key)
+    builder = current()
+    if builder is not None:
+        text = builder.recorder.redactor.cache_key(text)
     return text[:200]
 
 

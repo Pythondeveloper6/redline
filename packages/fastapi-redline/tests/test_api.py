@@ -9,6 +9,8 @@ from fastapi import Depends, HTTPException
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.testclient import TestClient
 
+from .conftest import allow_all
+
 
 def basic(user="admin", password="pw"):
     return {"Authorization": "Basic " + base64.b64encode(f"{user}:{password}".encode()).decode()}
@@ -138,7 +140,7 @@ def test_warning_logged_without_dependencies(make_env, caplog):
 
     with caplog.at_level(logging.WARNING, logger="redline"):
         make_env(dependencies=None)
-    assert "no auth dependency" in caplog.text
+    assert "with access='local'" in caplog.text
 
 
 def test_basic_auth_dependency(make_env):
@@ -314,7 +316,7 @@ def test_disabled_installs_no_listeners_and_no_middleware(tmp_path):
         app,
         engine=engine,
         settings={"enabled": False, "storage_path": str(tmp_path / "r.db")},
-        dependencies=[],
+        dependencies=[allow_all],
     )
     try:
         assert not event.contains(engine, "before_cursor_execute", _any_listener(engine))

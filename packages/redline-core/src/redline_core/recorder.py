@@ -33,7 +33,10 @@ from __future__ import annotations
 
 import functools
 import inspect
+import json
+import linecache
 import logging
+import re
 import threading
 import time
 import traceback
@@ -44,10 +47,10 @@ from typing import TYPE_CHECKING, Any, TypeVar, overload
 
 from . import sql as sqlmod
 from .callsite import CallsiteCapturer
-from .conf import Settings
+from .conf import Settings, resolve_release
 from .detect import Detector, FixSuggester
-from .model import Callsite, Framework, Span, SpanKind, Trace, new_id
-from .redact import Redactor, json_safe
+from .model import Callsite, Frame, Framework, LogRecord, Span, SpanKind, Trace, new_id
+from .redact import MASK, Redactor, json_safe
 from .sampling import Sampler
 
 if TYPE_CHECKING:
@@ -82,6 +85,10 @@ _MAX_MANY_ROWS = 10  # executemany: keep the first N parameter rows
 _ALWAYS_KEPT = frozenset(("middleware", "view"))
 #: Distinct (fingerprint, callsite) groups tracked for spans beyond the cap.
 _MAX_OVERFLOW_GROUPS = 1_000
+_MAX_ERROR_FRAMES = 20  # project frames kept in ``Trace.error["frames"]``
+_MAX_LOCALS = 30  # locals kept per frame
+_MAX_REPR = 300  # chars kept per local
+_MAX_LOG_CHARS = 2_000  # chars kept per captured log message
 
 
 class OverflowGroup:
@@ -131,10 +138,14 @@ class TraceBuilder:
         "finished",
         "framework",
         "id",
+        "logs",
+        "logs_dropped",
         "max_spans",
         "method",
+        "on_finish",
         "overflow",
         "path",
+        "path_params",
         "profiler",
         "query_count",
         "query_ms",
@@ -173,6 +184,8 @@ class TraceBuilder:
         self.framework = framework
         self.method = method.upper()
         self.path = path
+        #: The route's parameters (``{"token": "…"}``), used to mask secret path segments.
+        self.path_params: Mapping[str, Any] | None = None
         self.route = route
         self.view = view
         self.req_headers = headers
@@ -188,10 +201,15 @@ class TraceBuilder:
         self.query_ms = 0.0
         self.max_spans = recorder.settings.max_spans_per_trace or 0
         self.dropped_spans = 0
+        self.logs: list[LogRecord] = []
+        self.logs_dropped = 0
         self.overflow: dict[tuple[str, str | None], OverflowGroup] = {}
         self.started_at = time.time()
         self.t0 = _perf()
         self.profiler: Any = None
+        #: Callbacks run at the start of :meth:`Recorder.finish_trace` (e.g. the event-loop
+        #: monitor flushing a stall that is still in progress); ``None`` when there are none.
+        self.on_finish: list[Callable[[TraceBuilder], None]] | None = None
         self._lock = threading.Lock()
         self._token: Token[TraceBuilder | None] | None = None
         self._parent_token: Token[str | None] | None = None
@@ -200,18 +218,58 @@ class TraceBuilder:
         return f"<TraceBuilder {self.method} {self.path} spans={len(self.spans)}>"
 
     # mutation from adapters / user code -------------------------------------
-    def set_route(self, route: str | None, view: str | None = None) -> None:
-        """Record the resolved route template and view (known only after routing)."""
+    def set_route(
+        self,
+        route: str | None,
+        view: str | None = None,
+        params: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Record the resolved route template, view and path parameters (known only after
+        routing). Parameters with secret-looking names are masked in the stored path."""
         if route is not None:
             self.route = route
         if view is not None:
             self.view = view
+        if params is not None:
+            self.path_params = params
 
     def tag(self, key: str, value: Any) -> None:
         self.tags[str(key)] = str(value)
 
     def elapsed_ms(self) -> float:
         return (_perf() - self.t0) * 1000.0
+
+    def server_timing(self) -> str:
+        """The ``Server-Timing`` header value for the request so far (``CONTRACT.md`` §14).
+
+        ``total;dur=…, db;dur=…;desc="12 queries", cache;dur=…, http;dur=…, tpl;dur=…,
+        redline;desc="<trace id>"`` with durations in ms (one decimal); groups with no
+        spans are left out. Empty for an inert builder; never raises.
+        """
+        if not self.active:
+            return ""
+        try:
+            with self._lock:
+                spans = list(self.spans)
+                queries = self.query_count
+                query_ms = self.query_ms
+            sums = {"cache": 0.0, "http_out": 0.0, "template": 0.0}
+            seen: set[str] = set()
+            for s in spans:
+                if s.kind in sums:
+                    sums[s.kind] += s.duration_ms
+                    seen.add(s.kind)
+            parts = [f"total;dur={self.elapsed_ms():.1f}"]
+            if queries:
+                noun = "query" if queries == 1 else "queries"
+                parts.append(f'db;dur={query_ms:.1f};desc="{queries} {noun}"')
+            for kind, label in (("cache", "cache"), ("http_out", "http"), ("template", "tpl")):
+                if kind in seen:
+                    parts.append(f"{label};dur={sums[kind]:.1f}")
+            parts.append(f'redline;desc="{self.id}"')
+            return ", ".join(parts)
+        except Exception:  # pragma: no cover - a header must never break a response
+            return ""
 
     @property
     def full(self) -> bool:
@@ -263,6 +321,12 @@ class Recorder:
         self.redactor = Redactor(self.settings)
         self.detector = Detector(self.settings, suggesters)
         self.capturer = capturer or CallsiteCapturer(self.settings.project_root)
+        #: ``Settings.release`` or the automatic value, resolved once.
+        self.release = resolve_release(self.settings)
+        self._log_level = getattr(logging, self.settings.log_level, logging.INFO)
+        self._capture_logs = self.settings.capture_logs and self.settings.feature("logs")
+        if self.settings.enabled and self._capture_logs:
+            _install_log_capture()
         #: The trace most recently finished by :meth:`recording` (handy in tests).
         self.last_trace: Trace | None = None
 
@@ -336,16 +400,31 @@ class Recorder:
         route: str | None = None,
         view: str | None = None,
         error: BaseException | Mapping[str, Any] | None = None,
+        path_params: Mapping[str, Any] | None = None,
     ) -> Trace:
         """Stop recording and return the finished trace (stored if sampling keeps it).
 
         Response ``headers``/``body`` are redacted like the request's. ``error`` is the
-        unhandled exception, if any.
+        unhandled exception, if any. ``path_params`` are the route's parameters: values of
+        secret-looking ones are masked in the stored path (:meth:`Redactor.path`).
         """
+        if builder.on_finish:
+            for callback in builder.on_finish:
+                try:
+                    callback(builder)
+                except Exception:  # a hook must never break the response
+                    logger.exception("Redline finish hook failed")
+            builder.on_finish = None
         end = _perf()
         builder.finished = True
         _reset(builder)
-        builder.set_route(route, view)
+        builder.set_route(route, view, path_params)
+        try:
+            builder.path = self.redactor.path(
+                builder.path, builder.path_params, resolved=builder.route is not None
+            )
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("Redline failed to redact the path")
         profile = None
         if builder.profiler is not None:
             title = f"{builder.method} {builder.route or builder.path}"
@@ -368,11 +447,14 @@ class Recorder:
             duration_ms=round(duration, 3),
             tags=dict(builder.tags),
             profile=profile,
-            error=_error_dict(error),
+            error=_error_dict(error, self.redactor),
+            release=self.release,
         )
         if not builder.active:
             return trace
         with builder._lock:
+            trace.logs = list(builder.logs)
+            trace.logs_dropped = builder.logs_dropped
             spans = sorted(builder.spans, key=lambda s: s.start_ms)
             trace.query_count = builder.query_count
             trace.query_ms = round(builder.query_ms, 3)
@@ -393,6 +475,16 @@ class Recorder:
         if reason is None:
             return trace
         trace.tags["sampled_by"] = reason
+        if (
+            isinstance(error, BaseException)
+            and self.settings.capture_locals
+            and self.settings.feature("locals")
+            and trace.error
+        ):
+            try:
+                trace.error["frames"] = self._error_frames(error)
+            except Exception:  # never let analysis break the response
+                logger.exception("Redline failed to capture exception locals")
         try:
             trace.request = self._request_dict(builder)
             trace.response = self._response_dict(headers, body, size)
@@ -419,6 +511,46 @@ class Recorder:
         else:
             self.last_trace = self.finish_trace(builder, status=200)
 
+    # exception locals ------------------------------------------------------
+    def _error_frames(self, error: BaseException) -> list[dict[str, Any]]:
+        """Project frames of ``error``'s traceback with their redacted locals."""
+        frames: list[tuple[Any, int, str]] = []
+        tb = error.__traceback__
+        while tb is not None:
+            display = self.capturer.classify(tb.tb_frame.f_code.co_filename)
+            if display is not None:
+                frames.append((tb.tb_frame, tb.tb_lineno, display))
+            tb = tb.tb_next
+        redactor = self.redactor
+        out: list[dict[str, Any]] = []
+        for frame, line, display in frames[-_MAX_ERROR_FRAMES:]:
+            filename = frame.f_code.co_filename
+            local_vars: dict[str, str] = {}
+            for name, value in list(frame.f_locals.items()):
+                if len(local_vars) >= _MAX_LOCALS:
+                    break
+                name = str(name)
+                if name.startswith("__"):
+                    continue
+                if redactor.is_secret_key(name):
+                    local_vars[name] = MASK
+                    continue
+                try:
+                    text = _local_repr(redactor, value)
+                except Exception:
+                    text = "<unrepresentable>"
+                local_vars[name] = text if len(text) <= _MAX_REPR else text[:_MAX_REPR] + "…"
+            out.append(
+                {
+                    "file": display,
+                    "line": line,
+                    "function": frame.f_code.co_name,
+                    "code": redactor.text(linecache.getline(filename, line).strip()) or None,
+                    "locals": local_vars,
+                }
+            )
+        return out
+
     # redaction helpers -----------------------------------------------------
     def _request_dict(self, b: TraceBuilder) -> dict[str, Any]:
         r = self.redactor
@@ -440,8 +572,200 @@ class Recorder:
             size = len(body.encode("utf-8") if isinstance(body, str) else body)
         text, truncated = (None, False)
         if self.settings.capture_response_body:
-            text, truncated = r.body(body, _header(hdrs, "content-type"))
+            # Response bodies are mostly HTML: the free-text scan would cost ~2 ms per 20 kB
+            # page on the finish path, so only JSON/form/multipart keys are masked here.
+            text, truncated = r.body(body, _header(hdrs, "content-type"), free_text=False)
         return {"headers": hdrs, "body": text, "body_truncated": truncated, "size": size}
+
+
+# ── exception locals ─────────────────────────────────────────────────────────────────
+
+_LOCAL_DEPTH = 4  # container nesting masked in a local's value
+_LOCAL_ITEMS = 50  # items kept per container (the repr is cut at _MAX_REPR anyway)
+_LOCAL_TEXT = 20_000  # chars of a str/bytes value or repr scanned for secrets
+
+
+class _More:
+    """Stands in for the items of a container beyond :data:`_LOCAL_ITEMS`."""
+
+    def __repr__(self) -> str:
+        return "…"
+
+
+def _local_repr(redactor: Redactor, value: Any) -> str:
+    """``repr(value)`` with secrets masked: keys matching ``redact_keys`` at any depth of
+    dicts/lists/tuples, JSON and ``key=value`` secrets inside str/bytes, and
+    finally the whole repr through :meth:`Redactor.text` (URLs, ``?token=…`` in reprs)."""
+    text = repr(_mask_local(redactor, value, _LOCAL_DEPTH))
+    return redactor.text(text[:_LOCAL_TEXT])
+
+
+def _mask_local(redactor: Redactor, value: Any, depth: int) -> Any:
+    if isinstance(value, str):
+        return _mask_local_text(redactor, value)
+    if isinstance(value, (bytes, bytearray)):
+        try:
+            decoded = bytes(value[:_LOCAL_TEXT]).decode("utf-8")
+        except UnicodeDecodeError:
+            return value
+        masked = _mask_local_text(redactor, decoded)
+        return value if masked == decoded else masked.encode("utf-8")
+    if depth <= 0 or not isinstance(value, (Mapping, list, tuple)):
+        return value
+    if isinstance(value, Mapping):
+        out: dict[Any, Any] = {}
+        for i, (k, v) in enumerate(value.items()):
+            if i >= _LOCAL_ITEMS:
+                out["…"] = _More()
+                break
+            secret = isinstance(k, str) and redactor.is_secret_key(k)
+            out[k] = MASK if secret else _mask_local(redactor, v, depth - 1)
+        return out
+    items = [_mask_local(redactor, v, depth - 1) for v in value[:_LOCAL_ITEMS]]
+    if len(value) > _LOCAL_ITEMS:
+        items.append(_More())
+    return tuple(items) if isinstance(value, tuple) else items
+
+
+def _mask_local_text(redactor: Redactor, text: str) -> str:
+    """A str local with JSON secrets masked (like a body), then ``key=value`` pairs
+    (which covers form-encoded text and query strings)."""
+    text = text[:_LOCAL_TEXT]
+    if text.lstrip()[:1] in ("{", "["):
+        try:
+            data = json.loads(text)
+            masked = redactor.mapping(data)
+            if masked != data:
+                return json.dumps(masked, ensure_ascii=False)
+        except (ValueError, RecursionError):
+            pass
+    return redactor.text(text)
+
+
+# ── log capture ──────────────────────────────────────────────────────────────────────
+
+
+class _CaptureFactory:
+    """``logging`` record factory that files records under the request being recorded.
+
+    Installed with :func:`logging.setLogRecordFactory` around whatever factory was current,
+    so Redline adds no handler and changes no logger level: the app's logging configuration
+    (``basicConfig``, ``dictConfig``, ``force=True``) neither sees Redline nor can remove it.
+    :mod:`logging` only creates records for enabled loggers, so capture follows the app's
+    levels. With no active trace a record costs one ``ContextVar.get()``. Records from the
+    ``redline`` loggers are ignored, so Redline's own logging can never recurse into it.
+    """
+
+    __slots__ = ("enabled", "previous")
+
+    def __init__(self, previous: Callable[..., logging.LogRecord]) -> None:
+        self.previous = previous
+        #: ``False`` once uninstalled while another factory wraps this one: pass-through.
+        self.enabled = True
+
+    def __call__(self, *args: Any, **kwargs: Any) -> logging.LogRecord:
+        record = self.previous(*args, **kwargs)
+        if self.enabled:
+            builder = _trace.get()
+            if builder is not None:
+                _capture_log(builder, record)
+        return record
+
+
+def _capture_log(builder: TraceBuilder, record: logging.LogRecord) -> None:
+    if builder.finished or not builder.active:
+        return
+    try:
+        _capture(builder, record)
+    except Exception:  # logging must never break the app
+        pass
+
+
+def _capture(builder: TraceBuilder, record: logging.LogRecord) -> None:
+    recorder = builder.recorder
+    if not recorder._capture_logs or record.levelno < recorder._log_level:
+        return
+    name = record.name
+    if not isinstance(name, str) or name == "redline" or name.startswith("redline."):
+        return  # ``makeLogRecord`` builds a nameless record first; Redline's own logs
+    if len(builder.logs) >= recorder.settings.max_logs_per_trace:
+        with builder._lock:
+            builder.logs_dropped += 1
+        return
+    try:
+        message = record.getMessage()
+    except Exception:
+        message = str(record.msg)
+    message = recorder.redactor.text(message[:20_000])[:_MAX_LOG_CHARS]
+    entry = LogRecord(
+        t_ms=round(builder.elapsed_ms(), 3),
+        level=record.levelname if record.levelname in _LEVELS else _level_name(record.levelno),
+        logger=name,
+        message=message,
+        callsite=_log_callsite(recorder, record),
+    )
+    with builder._lock:
+        if len(builder.logs) >= recorder.settings.max_logs_per_trace:
+            builder.logs_dropped += 1
+        else:
+            builder.logs.append(entry)
+
+
+_LEVELS = frozenset(("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"))
+
+
+def _level_name(levelno: int) -> str:
+    for limit, name in ((50, "CRITICAL"), (40, "ERROR"), (30, "WARNING"), (20, "INFO")):
+        if levelno >= limit:
+            return name
+    return "DEBUG"
+
+
+def _log_callsite(recorder: Recorder, record: logging.LogRecord) -> Callsite | None:
+    path, line = record.pathname, record.lineno
+    if not path:
+        return None
+    display = recorder.capturer.classify(path)
+    if display is None:  # library code: keep the path as logged
+        return Callsite(file=path, line=line, function=record.funcName or "")
+    function = record.funcName or ""
+    return Callsite(
+        file=display,
+        line=line,
+        function=function,
+        code=linecache.getline(path, line).strip() or None,
+        stack=(Frame(file=display, line=line, function=function),),
+    )
+
+
+_log_lock = threading.Lock()
+_log_factory: _CaptureFactory | None = None
+
+
+def _install_log_capture() -> None:
+    """Wrap the current log record factory with the capture factory (idempotent)."""
+    global _log_factory
+    with _log_lock:
+        if _log_factory is not None:
+            return
+        _log_factory = _CaptureFactory(logging.getLogRecordFactory())
+        logging.setLogRecordFactory(_log_factory)
+
+
+def _uninstall_log_capture() -> None:
+    """Undo :func:`_install_log_capture`.
+
+    The previous factory is restored when the capture factory is still the current one;
+    when the app has wrapped it since, it stays in that chain but only passes through.
+    """
+    global _log_factory
+    with _log_lock:
+        factory, _log_factory = _log_factory, None
+        if factory is None:
+            return
+        factory.enabled = False
+        if logging.getLogRecordFactory() is factory:
+            logging.setLogRecordFactory(factory.previous)
 
 
 # ── module-level API (the default recorder) ──────────────────────────────────────────
@@ -458,6 +782,7 @@ def configure(
     """Install the process-wide default :class:`Recorder` and return it."""
     global _default
     with _default_lock:
+        _uninstall_log_capture()  # the new recorder re-installs it if it wants logs
         _default = Recorder(settings, store, suggesters)
     return _default
 
@@ -561,6 +886,7 @@ def record_query(
         "rows": rows,
         "many": many,
         "explainable": (not many) and sqlmod.is_explainable(sql),
+        "has_limit": sqlmod.has_limit(sql),
     }
     callsite = builder.recorder.capturer.capture(skip=2) if capture_callsite else None
     return record_span(
@@ -708,14 +1034,28 @@ def _header(headers: Mapping[str, str], name: str) -> str | None:
     return None
 
 
+_TRACE_ID = re.compile(r"[0-9a-fA-F]{32}")
+
+
 def _apply_run_header(builder: TraceBuilder, headers: Any) -> None:
-    """Parse ``X-Redline-Run: <run_id>;step=<n>`` (sent by the load tester) into tags."""
+    """Turn Redline's request headers into tags.
+
+    ``X-Redline-Run: <run_id>;step=<n>`` (the load tester) becomes ``run_id`` / ``step``;
+    ``X-Redline-Replay-Of: <trace id>`` (the UI's Replay) becomes ``replay_of`` when it is
+    a 32-character hex id.
+    """
     if not headers:
         return
     items = headers.items() if isinstance(headers, Mapping) else headers
     for key, value in items:
         k = key.decode("latin-1") if isinstance(key, bytes) else str(key)
-        if k.lower() != "x-redline-run":
+        k = k.lower()
+        if k == "x-redline-replay-of":
+            v = value.decode("latin-1") if isinstance(value, bytes) else str(value)
+            if _TRACE_ID.fullmatch(v.strip()):
+                builder.tags["replay_of"] = v.strip().lower()
+            continue
+        if k != "x-redline-run":
             continue
         v = value.decode("latin-1") if isinstance(value, bytes) else str(value)
         run_id, _, rest = v.partition(";")
@@ -725,18 +1065,33 @@ def _apply_run_header(builder: TraceBuilder, headers: Any) -> None:
             k2, _, v2 = part.partition("=")
             if k2.strip() == "step" and v2.strip():
                 builder.tags["step"] = v2.strip()[:16]
-        return
 
 
-def _error_dict(error: BaseException | Mapping[str, Any] | None) -> dict[str, Any] | None:
+def _error_dict(
+    error: BaseException | Mapping[str, Any] | None, redactor: Redactor
+) -> dict[str, Any] | None:
+    """The stored ``Trace.error``: the message and the formatted traceback (chained
+    exceptions included) go through :meth:`Redactor.text` – URL passwords, secret query
+    values, ``key=value`` secrets, JWTs and card numbers are masked."""
     if error is None:
         return None
     if isinstance(error, Mapping):
-        return {str(k): v for k, v in error.items()}
+        return {
+            str(k): redactor.text(v) if isinstance(v, str) and k != "type" else v
+            for k, v in error.items()
+        }
+    try:
+        message = str(error)
+    except Exception:
+        message = "<unprintable>"
+    try:
+        tb = "".join(traceback.format_exception(type(error), error, error.__traceback__))
+    except Exception:
+        tb = ""
+    if len(tb) > 40_000:  # cut at a line start so no ``key=value`` pair is split
+        tb = tb[-40_000:].partition("\n")[2]
     return {
         "type": type(error).__name__,
-        "message": str(error)[:2000],
-        "traceback": "".join(traceback.format_exception(type(error), error, error.__traceback__))[
-            -20_000:
-        ],
+        "message": redactor.text(message[:4000])[:2000],
+        "traceback": redactor.text(tb[-40_000:])[-20_000:],
     }

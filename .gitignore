@@ -16,3 +16,6 @@ node_modules/
 frontend/dist/
 .DS_Store
 frontend/screenshots/
+
+# agent worktrees
+.claude/

@@ -109,6 +109,8 @@ _FRAMEWORK_MARKERS: tuple[str, ...] = (
     "/django/middleware/",
     "/django_redline/",
     "/fastapi_redline/",
+    "/flask_redline/",
+    "/litestar_redline/",
     "/redline_core/",
     "/starlette/",
     "/fastapi/",
@@ -116,6 +118,9 @@ _FRAMEWORK_MARKERS: tuple[str, ...] = (
     "/asyncio/",
     "/uvicorn/",
     "/asgiref/",
+    "/flask/app.py",
+    "/werkzeug/",
+    "/litestar/",
 )
 
 

@@ -149,7 +149,17 @@ function buildError(): Trace {
     },
     response: { headers: { 'content-type': 'text/html' }, body: '<h1>Server Error (500)</h1>', body_truncated: false, size: 27 },
     spans: [root, view, q], issues: [], tags: {}, has_profile: false,
-    error: { type: 'shop.models.Order.DoesNotExist', message: 'Order matching query does not exist.', traceback: 'Traceback (most recent call last):\n  File "django/core/handlers/exception.py", line 55, in inner\n    response = get_response(request)\n  File "shop/views.py", line 112, in checkout\n    order = Order.objects.select_for_update().get(pk=pk)\n  File "django/db/models/query.py", line 637, in get\n    raise self.model.DoesNotExist(\nshop.models.Order.DoesNotExist: Order matching query does not exist.' },
+    logs: [
+      { t_ms: 1.2, level: 'INFO', logger: 'shop.views', message: 'checkout started for order 99999', callsite: { file: 'shop/views.py', line: 108, function: 'checkout', code: 'logger.info("checkout started for order %s", pk)', stack: [] } },
+      { t_ms: 3.0, level: 'DEBUG', logger: 'django.db.backends', message: '(0.002) SELECT "shop_order"."id" FROM "shop_order" WHERE "shop_order"."id" = 99999 FOR UPDATE; args=(99999,)', callsite: null },
+      { t_ms: 9.4, level: 'WARNING', logger: 'shop.payments', message: 'coupon SPRING expires in 2 days', callsite: { file: 'shop/payments.py', line: 41, function: 'apply_coupon', code: null, stack: [] } },
+      { t_ms: 16.8, level: 'ERROR', logger: 'django.request', message: 'Internal Server Error: /checkout/99999/', callsite: null },
+    ],
+    logs_dropped: 3,
+    error: { frames: [
+      { file: 'shop/views.py', line: 98, function: 'checkout', code: 'cart = load_cart(request)', locals: { request: '<WSGIRequest: POST \'/checkout/99999/\'>', pk: '99999', coupon: "'SPRING'" } },
+      { file: 'shop/views.py', line: 112, function: 'checkout', code: 'order = Order.objects.select_for_update().get(pk=pk)', locals: { pk: '99999', card_number: '[redacted]', password: '[redacted]', payload: "{'coupon': 'SPRING', 'address': {'city': 'Berlin'}}", user: '<User: dev@example.com>' } },
+    ], type: 'shop.models.Order.DoesNotExist', message: 'Order matching query does not exist.', traceback: 'Traceback (most recent call last):\n  File "django/core/handlers/exception.py", line 55, in inner\n    response = get_response(request)\n  File "shop/views.py", line 112, in checkout\n    order = Order.objects.select_for_update().get(pk=pk)\n  File "django/db/models/query.py", line 637, in get\n    raise self.model.DoesNotExist(\nshop.models.Order.DoesNotExist: Order matching query does not exist.' },
   }
 }
 
@@ -175,7 +185,56 @@ function buildSqlite(): Trace {
   }
 }
 
-export const SPECIAL: Trace[] = [buildNPlusOne(), buildDuplicate(), buildSlow(), buildError(), buildSqlite()]
+function buildAsync(): Trace {
+  const root = sp({ kind: 'middleware', name: 'RedlineMiddleware', start_ms: 0, duration_ms: 486 })
+  const view = sp({ kind: 'view', name: 'app.graphql.orders', start_ms: 2, duration_ms: 480, parent_id: root.id })
+  const c = cs('app/resolvers.py', 54, 'resolve_customer', 'return await db.fetch_one(Customer, id=order.customer_id)')
+  const spans: Span[] = [root, view]
+  const tx = sp({ kind: 'transaction', name: 'transaction default', start_ms: 10, duration_ms: 310, parent_id: view.id, data: { db_alias: 'default', outcome: 'commit', queries: 4, http_out: 1 } })
+  spans.push(tx)
+  spans.push(sql('INSERT INTO audit_log (actor, action) VALUES (?, ?)', 12, 2.2, tx.id, c, { in_transaction: true, rows: 1, explainable: false }))
+  const call = sp({ kind: 'http_out', name: 'POST payments.example.com/v1/charge', start_ms: 20, duration_ms: 280, parent_id: tx.id, callsite: cs('app/billing.py', 33, 'charge', 'httpx.post(PAY_URL, json=body)'), data: { method: 'POST', url: 'https://payments.example.com/v1/charge', status: 200, host: 'payments.example.com' } })
+  spans.push(call)
+  const ser = sp({ kind: 'serializer', name: 'OrderSerializer', start_ms: 325, duration_ms: 96, parent_id: view.id, data: { library: 'drf', serializer: 'OrderSerializer', items: 240, many: true } })
+  spans.push(ser)
+  const big = sql('SELECT orders.*, orders.notes, orders.raw_payload FROM orders', 330, 88, ser.id, cs('app/views.py', 71, 'list_orders', 'Order.objects.all()'), { rows: 24000, has_limit: false, wide_columns: ['notes', 'raw_payload'] })
+  spans.push(big)
+  const res = [0, 1, 2].map(i => sp({ kind: 'resolver', name: `Order.customer`, start_ms: 425 + i * 18, duration_ms: 14, parent_id: view.id, data: { path: 'orders.*.customer', field: 'customer', parent_type: 'Order' } }))
+  spans.push(...res)
+  const blk = sp({ kind: 'blocking', name: 'time.sleep', start_ms: 90, duration_ms: 120, parent_id: view.id, callsite: cs('app/legacy.py', 12, 'warm_cache', 'time.sleep(0.12)'), data: { reason: 'sync_call', call: 'time.sleep', lag_ms: 118 } })
+  const lag = sp({ kind: 'blocking', name: 'event loop lag', start_ms: 440, duration_ms: 35, parent_id: view.id, data: { reason: 'loop_lag', call: null, lag_ms: 34.6 } })
+  const pw = sp({ kind: 'pool_wait', name: 'wait for connection', start_ms: 4, duration_ms: 24, parent_id: view.id, data: { db_alias: 'default', pool_size: 10, checked_out: 10 } })
+  spans.push(blk, lag, pw)
+  const mk = (kind: IssueKind, severity: Issue['severity'], title: string, detail: string, ids: string[], count: number, total: number, extra: Record<string, any>, callsite: Callsite | null = c): Issue =>
+    issueOf({ kind, severity, title, detail, span_ids: ids, fingerprint: null, callsite, count, total_ms: total, suggestion: null, extra }, spans)
+  const issues: Issue[] = [
+    mk('external_in_transaction', 'critical', 'HTTP call to payments.example.com while a transaction is open', 'The transaction held its connection and row locks for 310 ms while waiting for an external service. Call the API before opening the transaction.', [tx.id, call.id], 1, 280, { host: 'payments.example.com', queries: 4 }, call.callsite),
+    mk('long_transaction', 'warning', 'Transaction held open for 310 ms', 'Long transactions hold locks and a pooled connection.', [tx.id], 1, 310, { queries: 4, http_out: 1 }),
+    mk('large_result', 'warning', 'Query returned 24,000 rows', 'Fetching this many rows into memory is slow and memory hungry. Paginate or select fewer columns.', [big.id], 1, 88, { rows: 24000, wide_columns: ['notes', 'raw_payload'] }, big.callsite),
+    mk('unbounded_query', 'info', 'SELECT without LIMIT on orders', 'No LIMIT: the response grows with the table.', [big.id], 1, 88, { rows: 24000 }, big.callsite),
+    mk('slow_serializer', 'warning', 'OrderSerializer took 96 ms for 240 items', 'Serialising many objects dominates the request. Check for per-item queries and SerializerMethodFields.', [ser.id], 1, 96, { library: 'drf', serializer: 'OrderSerializer', items: 240 }, null),
+    mk('n_plus_one', 'critical', 'N+1 in GraphQL resolver orders.*.customer', 'The resolver for Order.customer runs once per order.', res.map(r => r.id), 3, 42, { resolver_path: 'orders.*.customer' }),
+    mk('blocking_in_async', 'critical', 'time.sleep blocked the event loop for 118 ms', 'A synchronous call inside an async view stalls every other request on this worker. Use asyncio.sleep or run it in a thread.', [blk.id, lag.id], 2, 153, { call: 'time.sleep', lag_ms: 118 }, blk.callsite),
+    mk('inefficient_count', 'info', 'len(queryset) loads every row to count them', 'Use queryset.count() so the database counts.', [], 1, 4, { pattern: 'len', expr: 'len(orders)', old: 'len(orders)', new: 'orders.count()', fix_line: 71 }),
+    mk('slow_external', 'warning', 'POST payments.example.com took 280 ms', 'The external call is the slowest part of the request.', [call.id], 1, 280, { host: 'payments.example.com' }, call.callsite),
+    mk('duplicate_external', 'warning', 'GET rates.example.com called 3 times', 'Cache the response or call it once.', [], 3, 140, { host: 'rates.example.com' }, null),
+    mk('retry_storm', 'critical', 'POST payments.example.com retried 4 times', 'Retries without backoff amplify an outage.', [], 4, 900, { host: 'payments.example.com', attempts: 4 }, null),
+  ]
+  const queries = spans.filter(x => x.kind === 'sql')
+  return {
+    id: 'f6a8b5c3' + '0'.repeat(24), framework: 'fastapi', method: 'POST', path: '/graphql', route: '/graphql', view: 'app.graphql.orders', status: 200,
+    started_at: NOW - 33, duration_ms: 486, query_count: queries.length, query_ms: queries.reduce((a, x) => a + x.duration_ms, 0),
+    request: { headers: { host: 'localhost:8001', 'content-type': 'application/json' }, query: {}, body: '{"query":"{ orders { id customer { name } } }"}', body_truncated: false, client: '127.0.0.1' },
+    response: { headers: { 'content-type': 'application/json' }, body: '{"data":{"orders":[]}}', body_truncated: false, size: 1480220 },
+    spans, issues, tags: {}, error: null, has_profile: false,
+    logs: [
+      { t_ms: 3, level: 'INFO', logger: 'app.graphql', message: 'executing query orders', callsite: null },
+      { t_ms: 95, level: 'WARNING', logger: 'asyncio', message: 'Executing <Task pending name=\'Task-12\'> took 0.118 seconds', callsite: null },
+    ], logs_dropped: 0,
+  }
+}
+
+export const SPECIAL: Trace[] = [buildNPlusOne(), buildDuplicate(), buildSlow(), buildError(), buildSqlite(), buildAsync()]
 
 // ---------- generic traces ----------
 const ROUTES: [string, string, string, string][] = [
@@ -212,6 +271,13 @@ function genericTrace(i: number): Trace {
   }
 }
 for (let i = 0; i < 110; i++) generic.push(genericTrace(i))
+/** One more generic trace stamped with the current time (dev Live mode). */
+export function genericTraceAt(): Trace {
+  const t = genericTrace(0)
+  t.started_at = Date.now() / 1000
+  t.id = hex()
+  return t
+}
 
 export const ALL: Trace[] = [...SPECIAL, ...generic].sort((a, b) => b.started_at - a.started_at)
 

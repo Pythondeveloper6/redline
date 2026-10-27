@@ -8,20 +8,35 @@ import builtins
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from ..model import Callsite, Suggestion, Trace
 
+if TYPE_CHECKING:
+    from ..runs import Run, RunStep
+
 __all__ = [
     "WINDOWS",
+    "Bottlenecks",
+    "CacheStats",
     "EndpointStats",
+    "ExtendedStore",
+    "ExternalStats",
     "FilterError",
     "Filters",
+    "History",
     "IssueGroup",
+    "IssueIndexEntry",
     "Page",
+    "Period",
+    "PeriodComparison",
+    "PeriodStats",
+    "ReleaseInfo",
+    "SqlStats",
     "Store",
     "decode_cursor",
     "encode_cursor",
+    "parse_period",
     "parse_window",
     "percentile",
 ]
@@ -89,6 +104,12 @@ class Filters:
     has_issues: bool = False
     route: str | None = None
     tag: tuple[str, str] | None = None
+    #: Substring of a query's normalised SQL (literals are ``?``), case-insensitive.
+    sql: str | None = None
+    #: Only traces that started strictly after this epoch.
+    since: float | None = None
+    #: Only replays of this trace (the ``replay_of`` tag).
+    replay_of: str | None = None
 
     @classmethod
     def from_params(cls, params: Mapping[str, Any]) -> Filters:
@@ -103,7 +124,7 @@ class Filters:
             value = str(value).strip()
             return value or None
 
-        f = cls(q=text("q"), route=text("route"))
+        f = cls(q=text("q"), route=text("route"), sql=text("sql"), replay_of=text("replay_of"))
         method = text("method")
         f.method = method.upper() if method else None
         status = text("status")
@@ -132,6 +153,12 @@ class Filters:
             if not sep or not key:
                 raise FilterError("tag must look like key:value.")
             f.tag = (key, value)
+        since = text("since")
+        if since is not None:
+            try:
+                f.since = float(since)
+            except ValueError:
+                raise FilterError("since must be an epoch timestamp in seconds.") from None
         return f
 
 
@@ -215,6 +242,258 @@ class IssueGroup:
         }
 
 
+#: A period for :meth:`ExtendedStore.compare_periods`: ``("release", name)`` or
+#: ``("range", start, end)`` (epoch seconds, end exclusive).
+Period = tuple[str, str] | tuple[str, float, float]
+
+
+def parse_period(text: str | None) -> Period:
+    """``release:<name>`` or ``range:<start>-<end>`` (epoch seconds) → a :data:`Period`."""
+    raw = (text or "").strip()
+    kind, sep, rest = raw.partition(":")
+    if sep and kind == "release" and rest.strip():
+        return ("release", rest.strip())
+    if sep and kind == "range":
+        m = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)\s*", rest)
+        if m and float(m.group(1)) < float(m.group(2)):
+            return ("range", float(m.group(1)), float(m.group(2)))
+    raise FilterError(
+        f"Invalid period {text!r}; use release:<name> or range:<start>-<end> (epoch seconds)."
+    )
+
+
+def _r(value: float | None, digits: int = 3) -> float | None:
+    return None if value is None else round(value, digits)
+
+
+@dataclass
+class SqlStats:
+    """One SQL fingerprint aggregated over a window (``GET api/sql``, the index advisor).
+
+    ``fingerprint`` is the 16-hex :func:`redline_core.sql.fingerprint_hash`; ``sql`` is the
+    normalised statement (literals replaced by ``?``). ``count`` counts executions, ``traces``
+    the requests that ran it. Spans folded away by the span cap are not included.
+    """
+
+    fingerprint: str
+    sql: str
+    count: int
+    traces: int
+    total_ms: float
+    max_ms: float
+    routes: builtins.list[str]
+    sample_trace_id: str
+    vendor: str = "other"
+    #: Mean rows per execution over the executions whose row count is known.
+    mean_rows: float | None = None
+
+    @property
+    def mean_ms(self) -> float:
+        return self.total_ms / self.count if self.count else 0.0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "fingerprint": self.fingerprint,
+            "sql": self.sql,
+            "count": self.count,
+            "traces": self.traces,
+            "total_ms": round(self.total_ms, 3),
+            "max_ms": round(self.max_ms, 3),
+            "mean_ms": round(self.mean_ms, 3),
+            "mean_rows": _r(self.mean_rows, 2),
+            "routes": self.routes,
+            "sample_trace_id": self.sample_trace_id,
+            "vendor": self.vendor,
+        }
+
+
+@dataclass
+class CacheStats:
+    """Cache usage per ``(backend, key_pattern)`` (``GET api/cache``).
+
+    ``hit_rate`` is ``hits / (hits + misses)`` (``None`` when no read reported a hit or
+    miss). ``unread_sets`` is the number of sets on a pattern that had no reads at all in the
+    window. ``stampedes`` counts bursts: ≥ 3 different requests missing the same pattern
+    within 1 s (request start times; each burst counted once).
+    """
+
+    backend: str
+    key_pattern: str
+    gets: int
+    hits: int
+    misses: int
+    hit_rate: float | None
+    sets: int
+    deletes: int
+    unread_sets: int
+    stampedes: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "backend": self.backend,
+            "key_pattern": self.key_pattern,
+            "gets": self.gets,
+            "hits": self.hits,
+            "misses": self.misses,
+            "hit_rate": _r(self.hit_rate, 4),
+            "sets": self.sets,
+            "deletes": self.deletes,
+            "unread_sets": self.unread_sets,
+            "stampedes": self.stampedes,
+        }
+
+
+@dataclass
+class ExternalStats:
+    """Outbound HTTP per ``(method, url_pattern)`` (``GET api/external``).
+
+    ``p95_ms`` comes from a histogram where each call is taken at its request's mean
+    duration for that pattern (exact when a request calls the pattern once). ``errors`` are
+    calls answered 5xx or 429 or without a response. ``duplicates`` counts requests that
+    called the pattern ≥ 2 times, ``retries`` requests with ≥ 3 calls and ≥ 1 error.
+    """
+
+    method: str
+    host: str
+    url_pattern: str
+    count: int
+    total_ms: float
+    p95_ms: float
+    max_ms: float
+    errors: int
+    duplicates: int
+    retries: int
+
+    @property
+    def error_rate(self) -> float:
+        return self.errors / self.count if self.count else 0.0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "method": self.method,
+            "host": self.host,
+            "url_pattern": self.url_pattern,
+            "count": self.count,
+            "total_ms": round(self.total_ms, 3),
+            "p95_ms": round(self.p95_ms, 3),
+            "max_ms": round(self.max_ms, 3),
+            "errors": self.errors,
+            "error_rate": round(self.error_rate, 4),
+            "duplicates": self.duplicates,
+            "retries": self.retries,
+        }
+
+
+@dataclass
+class History:
+    """``GET api/history``: ``series`` of ``{t, count, p50_ms, p95_ms, p99_ms, error_rate,
+    avg_queries}`` (non-empty buckets only) and the releases first seen in the range."""
+
+    series: builtins.list[dict[str, Any]]
+    releases: builtins.list[dict[str, Any]]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"series": self.series, "releases": self.releases}
+
+
+@dataclass
+class ReleaseInfo:
+    release: str
+    first_seen: float
+    last_seen: float
+    requests: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "release": self.release,
+            "first_seen": self.first_seen,
+            "last_seen": self.last_seen,
+            "requests": self.requests,
+        }
+
+
+@dataclass
+class PeriodStats:
+    """One endpoint over one period of :meth:`ExtendedStore.compare_periods`."""
+
+    count: int
+    error_rate: float
+    p50_ms: float
+    p95_ms: float
+    p99_ms: float
+    avg_ms: float
+    avg_queries: float
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "count": self.count,
+            "error_rate": round(self.error_rate, 4),
+            "p50_ms": round(self.p50_ms, 3),
+            "p95_ms": round(self.p95_ms, 3),
+            "p99_ms": round(self.p99_ms, 3),
+            "avg_ms": round(self.avg_ms, 3),
+            "avg_queries": round(self.avg_queries, 2),
+        }
+
+
+@dataclass
+class PeriodComparison:
+    """``GET api/history/compare``. ``a`` is the baseline, ``b`` the period under test."""
+
+    a: dict[str, Any]
+    b: dict[str, Any]
+    endpoints: builtins.list[dict[str, Any]]
+    issues: dict[str, builtins.list[dict[str, Any]]]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"a": self.a, "b": self.b, "endpoints": self.endpoints, "issues": self.issues}
+
+
+@dataclass
+class IssueIndexEntry:
+    """An issue's long-lived history (survives trace pruning)."""
+
+    id: str
+    kind: str
+    severity: str
+    title: str
+    route: str
+    first_seen: float
+    last_seen: float
+    first_release: str | None
+    last_release: str | None
+    occurrences: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "kind": self.kind,
+            "severity": self.severity,
+            "title": self.title,
+            "route": self.route,
+            "first_seen": self.first_seen,
+            "last_seen": self.last_seen,
+            "first_release": self.first_release,
+            "last_release": self.last_release,
+            "occurrences": self.occurrences,
+        }
+
+
+@dataclass
+class Bottlenecks:
+    """``GET api/runs/{id}/bottlenecks``: what grew as the load stepped up.
+
+    ``items``: ``{key, kind: "sql" | "route", label, callsite, per_step: [{step, mean_ms,
+    p95_ms, count}], growth}`` sorted by ``growth`` (last step's mean / first step's mean).
+    """
+
+    steps: builtins.list[dict[str, Any]]
+    items: builtins.list[dict[str, Any]]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"steps": self.steps, "items": self.items}
+
+
 @runtime_checkable
 class Store(Protocol):
     """Where traces live. ``save`` must never block the request path."""
@@ -236,3 +515,47 @@ class Store(Protocol):
     def count(self) -> int: ...
     def flush(self, timeout: float | None = None) -> bool: ...
     def close(self) -> None: ...
+
+
+@runtime_checkable
+class ExtendedStore(Store, Protocol):
+    """The v0.2 analytics, history and load-run surface (``CONTRACT.md`` §11).
+
+    Optional: a custom store implementing only :class:`Store` keeps working, and the API
+    answers 501 ``not_supported`` for an endpoint whose method is missing or raises
+    ``NotImplementedError``. ``window`` arguments are seconds back from now.
+    """
+
+    def search_sql(
+        self, q: str | None, window: float, limit: int = 100
+    ) -> builtins.list[SqlStats]: ...
+    def sql_workload(self, window: float) -> builtins.list[SqlStats]: ...
+    def cache_stats(self, window: float) -> builtins.list[CacheStats]: ...
+    def external_stats(self, window: float) -> builtins.list[ExternalStats]: ...
+    def history(
+        self,
+        route: str | None,
+        method: str | None,
+        start: float,
+        end: float,
+        bucket: float = 3_600.0,
+    ) -> History: ...
+    def releases(self) -> builtins.list[ReleaseInfo]: ...
+    def compare_periods(self, a: Period, b: Period) -> PeriodComparison: ...
+    def issue_index(self, window: float | None = None) -> builtins.list[IssueIndexEntry]: ...
+    def save_run(self, run: Run) -> None: ...
+    def save_run_step(self, run_id: str, step: RunStep) -> None: ...
+    def finish_run(
+        self, run_id: str, status: str, summary: dict[str, Any] | None = None
+    ) -> None: ...
+    def get_run(self, run_id: str) -> Run | None: ...
+    def list_runs(self, limit: int = 50) -> builtins.list[Run]: ...
+    def delete_run(self, run_id: str) -> int: ...
+    def run_bottlenecks(self, run_id: str) -> Bottlenecks | None: ...
+    def traces_since(
+        self,
+        started_at: float,
+        trace_id: str = "",
+        limit: int = 100,
+        after_seq: int | None = None,
+    ) -> builtins.list[dict[str, Any]]: ...

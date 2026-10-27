@@ -46,6 +46,21 @@ profiles on the other. Any other value (`?_redline=0`) is ignored.
 A profiled request is **always stored**, even if it is fast and the sample rate would
 have dropped it (`tags["sampled_by"]` is then `profile`).
 
+!!! note "Who may ask"
+
+    The trigger is honoured only when the framework is in debug mode or the request carries
+    valid Redline credentials under the active `access` policy: a client `local` lets in,
+    `Authorization: Bearer <token>` / Basic credentials (or the login cookie), or your
+    `access_check`. Anyone else's trigger is ignored, so strangers cannot make you profile
+    and store their requests. With `access = "framework"` only debug mode counts. On a
+    server, send the token:
+
+    ```bash
+    curl -H "X-Redline-Profile: 1" -H "Authorization: Bearer $REDLINE_TOKEN" https://app.example/slow/
+    ```
+
+    The `production` preset sets `profile = "off"`.
+
 ## Modes
 
 The `profile` setting chooses who gets profiled.
