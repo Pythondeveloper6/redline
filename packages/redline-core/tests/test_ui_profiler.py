@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import builtins
 
+import time
+
 import pytest
 
 from redline_core import profiler, ui
@@ -114,7 +116,9 @@ def test_profile_title_is_the_request():
 
     rec = Recorder(Settings(profile="all"))
     b = rec.start_trace(method="GET", path="/orders/")
-    sum(range(200000))
+    end = time.perf_counter() + 0.02  # long enough for samples on a busy machine
+    while time.perf_counter() < end:
+        sum(range(100))
     t = rec.finish_trace(b, status=200, route="/orders/", view="shop.views.order_list")
     want = "GET /orders/ — shop.views.order_list"
     assert t.profile["name"] == want and t.profile["profiles"][0]["name"] == want
