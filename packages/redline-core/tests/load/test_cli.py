@@ -290,6 +290,57 @@ def test_cli_store_sink_and_ui_hint(tmp_path, capsys, http_server, monkeypatch):
     assert not (rdir / "abc123.pid").exists() and not (rdir / "abc123.stop").exists()
 
 
+def test_ui_hint_follows_the_ui_mount():
+    base = "http://127.0.0.1:8000/app"
+    assert cli._ui_hint(base, "r1") == "http://127.0.0.1:8000/_redline/#/load/r1"
+    assert cli._ui_hint(base, "r1", "/redline") == "http://127.0.0.1:8000/redline/#/load/r1"
+    assert cli._ui_hint(base, "r1", "/x/rl/") == "http://127.0.0.1:8000/x/rl/#/load/r1"
+    assert (
+        cli._ui_hint(base, "r1", "https://ops.example/redline")
+        == "https://ops.example/redline/#/load/r1"
+    )
+
+
+def test_ui_url_from_scenario_and_validation():
+    from redline_core.load.profile import ScenarioError
+
+    data = {"base_url": "http://h", "requests": [{"path": "/"}]}
+    assert load_scenario({**data, "ui_url": "/redline/"}).ui_url == "/redline"
+    assert load_scenario(data).ui_url is None
+    for bad in ("redline", "//evil.example", "ftp://x", 3):
+        with pytest.raises(ScenarioError):
+            load_scenario({**data, "ui_url": bad})
+
+
+def test_ui_mount_from_project_config(tmp_path, monkeypatch):
+    monkeypatch.delenv("REDLINE_MOUNT_PATH", raising=False)
+    monkeypatch.delenv("REDLINE_CONFIG", raising=False)
+    monkeypatch.chdir(tmp_path)
+    assert cli._configured_mount() is None
+    (tmp_path / "redline.toml").write_text('mount_path = "/ops/redline"\n')
+    assert cli._configured_mount() == "/ops/redline"
+    (tmp_path / "redline.toml").write_text("max_rows = -1\n")  # invalid: no crash, no mount
+    assert cli._configured_mount() is None
+
+
+@pytest.mark.slow
+def test_cli_prints_the_ui_link_for_the_configured_mount(
+    tmp_path, capsys, http_server, monkeypatch
+):
+    _, url = http_server
+    monkeypatch.setattr(cli, "_open_store_sink", lambda path, err: StoreSink(FakeStore()))
+    monkeypatch.delenv("REDLINE_MOUNT_PATH", raising=False)
+    monkeypatch.delenv("REDLINE_CONFIG", raising=False)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "redline.toml").write_text('mount_path = "/redline"\n')
+    sc = write_scenario(tmp_path, url)
+    argv = ["load", sc, "--rps", "5", "--duration", "1s", "--workers", "1", "--run-id", "r9"]
+    assert cli.main([*argv, "--store", str(tmp_path / "s.db")]) == 0
+    assert f"Open the run in Redline: {url}/redline/#/load/r9" in capsys.readouterr().out
+    assert cli.main([*argv, "--store", str(tmp_path / "s.db"), "--ui-url", "/django-rl"]) == 0
+    assert f"{url}/django-rl/#/load/r9" in capsys.readouterr().out
+
+
 @pytest.mark.slow
 def test_cli_store_without_run_support_falls_back_to_json(
     tmp_path, capsys, http_server, monkeypatch

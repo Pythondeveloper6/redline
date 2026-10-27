@@ -24,16 +24,20 @@ and the file and line of the log call (project-relative, clickable if
 
 ### How it is captured
 
-Redline installs a log-record factory (it never adds a handler to the root logger and never
-changes a logger's level). Each record your application creates is filed under whichever
-request is active in the current `contextvars` context, so concurrent requests and threads
-do not mix. Outside a request a record costs a single `ContextVar.get()`. Records from
-Redline's own `redline` loggers are ignored so it can never recurse.
+Redline does not add a logging handler or change any logger's level. The first recorder
+with `capture_logs` wraps the log record factory (`logging.setLogRecordFactory`, keeping
+whatever factory was installed before), so your own `logging.basicConfig(...)`,
+`dictConfig(...)` or `basicConfig(force=True)` work exactly as without Redline, before or
+after it is configured. Each record is filed under whichever request is active in the
+current `contextvars` context, so concurrent requests and threads do not mix. Outside a
+request a record costs a single `ContextVar.get()`. Records from Redline's own `redline`
+loggers are ignored so it can never recurse.
 
-Capture **follows your application's logger levels**: a record your logging configuration
-filters out (below the logger's effective level) is never created, so it is never captured.
-To see `DEBUG` records in a trace, enable `DEBUG` for that logger in your logging
-configuration; `log_level` cannot lower the bar, only raise it.
+Python only creates a record when the logger is enabled for its level, so capture follows
+**your** logging levels and `log_level` is an additional minimum on top. To capture INFO
+your loggers must be at INFO: Django's default `LOGGING` and most configured apps are. An
+app that never configured logging has its root logger at WARNING, so only WARNING and above
+are captured there (call `logging.basicConfig(level=logging.INFO)` to get INFO too).
 
 | Setting | Default | Meaning |
 |---|---|---|

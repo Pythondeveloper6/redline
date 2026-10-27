@@ -234,6 +234,20 @@ def html_csp() -> object:
     return HTML_PAGE, {"Content-Security-Policy": "script-src 'nonce-abc'"}
 
 
+@bp.get("/html-download")
+def html_download() -> object:
+    return HTML_PAGE, {"Content-Disposition": 'attachment; filename="page.html"'}
+
+
+@bp.get("/html-csp-two")
+def html_csp_two() -> object:
+    # two policies (two headers): the second forbids the badge
+    return HTML_PAGE, [
+        ("Content-Security-Policy", "default-src 'self'"),
+        ("Content-Security-Policy", "script-src 'none'"),
+    ]
+
+
 @bp.get("/html-fragment")
 def html_fragment() -> str:
     return "<p>no body tag</p>"

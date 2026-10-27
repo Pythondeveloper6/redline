@@ -11,7 +11,8 @@ import pytest
 from redline_core.conf import Settings
 from redline_core.recorder import (
     Recorder,
-    _log_handler,
+    _capture_log,
+    _uninstall_log_capture,
     configure,
     record_query,
     record_span,
@@ -32,7 +33,7 @@ def _root_level():
     root.setLevel(logging.DEBUG)
     yield
     root.setLevel(prev)
-    root.removeHandler(_log_handler)
+    _uninstall_log_capture()
 
 
 def run(rec: Recorder, fn, **fields):
@@ -128,15 +129,58 @@ def test_redline_logger_ignored():
     assert [r.message for r in run(make(), work).logs] == ["mine"]
 
 
-def test_handler_install_is_idempotent_and_removed_on_reconfigure():
+def test_capture_install_is_idempotent_and_removed_on_reconfigure():
+    from redline_core import recorder as recmod
+
     root = logging.getLogger()
+    handlers = list(root.handlers)
+    original = logging.getLogRecordFactory()
     make()
+    installed = logging.getLogRecordFactory()
     make()
-    assert root.handlers.count(_log_handler) == 1
+    assert logging.getLogRecordFactory() is installed is recmod._log_factory
+    assert installed.previous is original  # one wrapper, not two
+    assert root.handlers == handlers  # no handler is ever added
     configure(Settings(project_root=HERE, capture_logs=False))
-    assert _log_handler not in root.handlers
+    assert logging.getLogRecordFactory() is original
     configure(Settings(project_root=HERE))
-    assert root.handlers.count(_log_handler) == 1
+    assert logging.getLogRecordFactory().previous is original
+
+
+def test_uninstall_restores_the_previous_factory_and_is_chain_safe():
+    original = logging.getLogRecordFactory()
+    seen = []
+
+    def app_factory(*args, **kwargs):
+        record = original(*args, **kwargs)
+        record.app_tag = "x"
+        return record
+
+    logging.setLogRecordFactory(app_factory)
+    try:
+        rec = make()
+        assert logging.getLogRecordFactory() is not app_factory
+        trace = run(rec, lambda: seen.append(log.makeRecord("shop", 30, "f", 1, "m", (), None)))
+        assert seen[0].app_tag == "x"  # the previous factory still runs
+        assert [r.message for r in trace.logs] == ["m"]
+        _uninstall_log_capture()
+        assert logging.getLogRecordFactory() is app_factory
+        # wrapped by the app after Redline: Redline stays in the chain as a pass-through
+        make()
+        ours = logging.getLogRecordFactory()
+
+        def outer(*args, **kwargs):
+            return ours(*args, **kwargs)
+
+        logging.setLogRecordFactory(outer)
+        _uninstall_log_capture()
+        assert logging.getLogRecordFactory() is outer
+        trace = run(make(capture_logs=True), lambda: log.warning("after"))
+        assert logging.getLogRecordFactory() is not outer  # re-installed around ``outer``
+        assert [r.message for r in trace.logs] == ["after"]  # captured exactly once
+    finally:
+        _uninstall_log_capture()
+        logging.setLogRecordFactory(original)
 
 
 def test_library_log_keeps_raw_path():
@@ -144,7 +188,9 @@ def test_library_log_keeps_raw_path():
     record = logging.LogRecord("lib", logging.WARNING, "/site/lib.py", 7, "msg", None, None)
 
     def work():
-        _log_handler.handle(record)
+        from redline_core.recorder import _trace
+
+        _capture_log(_trace.get(), record)
 
     trace = run(rec, work)
     assert trace.logs[0].callsite.file == "/site/lib.py" and trace.logs[0].callsite.line == 7
@@ -479,9 +525,8 @@ def test_exception_locals_values_are_redacted_not_only_names():
 
 
 def test_log_level_follows_a_configured_app():
-    """Logging configured by the app (pytest's handlers on root here): levels untouched."""
+    """Capture follows the app's levels; Redline never touches them."""
     root = logging.getLogger()
-    assert any(h is not _log_handler for h in root.handlers)
     root.setLevel(logging.WARNING)
     rec = make(log_level="INFO")
 
@@ -493,34 +538,87 @@ def test_log_level_follows_a_configured_app():
     assert root.level == logging.WARNING
 
 
-UNCONFIGURED = """
-import logging
-from redline_core.conf import Settings
-from redline_core.recorder import Recorder, _uninstall_log_handler
-
-assert not logging.getLogger().handlers and logging.getLogger().level == logging.WARNING
-rec = Recorder(Settings.from_mapping({"log_level": "INFO"}))
-log = logging.getLogger("shop")
-log.info("outside-info")
-with rec.recording(method="GET", path="/x"):
-    log.debug("in-debug")
-    log.info("in-info")
-    log.warning("in-warning")
-print([r.message for r in rec.last_trace.logs])
-_uninstall_log_handler()
-print(logging.getLogger().level)
-"""
-
-
-def test_log_level_in_an_unconfigured_app_captures_info_without_new_output():
+def _script(body: str):
     import subprocess
     import sys
 
-    out = subprocess.run(
-        [sys.executable, "-c", UNCONFIGURED], capture_output=True, text=True, check=True
-    )
-    captured, level = out.stdout.strip().splitlines()
-    assert captured == "['in-info', 'in-warning']"
-    assert level == str(logging.WARNING)  # restored on uninstall
-    # stderr is exactly what Python prints with no handler at all: WARNING and above
-    assert out.stderr == "in-warning\n"
+    return subprocess.run([sys.executable, "-c", body], capture_output=True, text=True, check=True)
+
+
+UNCONFIGURED = """
+import logging
+from redline_core.conf import Settings
+from redline_core.recorder import Recorder
+
+root = logging.getLogger()
+assert not root.handlers and root.level == logging.WARNING
+rec = Recorder(Settings.from_mapping({"log_level": "INFO"}))
+log = logging.getLogger("shop")
+log.warning("outside-warning")
+with rec.recording(method="GET", path="/x"):
+    log.info("in-info")
+    log.warning("in-warning")
+print([r.message for r in rec.last_trace.logs])
+print(root.level, len(root.handlers))
+"""
+
+
+def test_unconfigured_app_captures_warning_without_changing_stderr():
+    out = _script(UNCONFIGURED)
+    captured, state = out.stdout.strip().splitlines()
+    assert captured == "['in-warning']"  # INFO is not enabled by the app: never created
+    assert state == f"{logging.WARNING} 0"  # no level change, no handler
+    # stderr is exactly what Python prints with no handler at all (logging.lastResort)
+    assert out.stderr == "outside-warning\nin-warning\n"
+
+
+BASIC_CONFIG_AFTER = """
+import logging
+from redline_core.conf import Settings
+from redline_core.recorder import Recorder
+
+rec = Recorder(Settings.from_mapping({"log_level": "INFO"}))
+logging.basicConfig(level=logging.INFO, format="APP %(levelname)s %(message)s")
+log = logging.getLogger("shop")
+with rec.recording(method="GET", path="/x"):
+    log.info("hello")
+print([r.message for r in rec.last_trace.logs])
+"""
+
+
+def test_basic_config_after_redline_still_prints():
+    out = _script(BASIC_CONFIG_AFTER)
+    assert out.stdout.strip() == "['hello']"
+    assert out.stderr == "APP INFO hello\n"
+
+
+DICT_CONFIG_AFTER = """
+import logging, logging.config, sys
+from redline_core.conf import Settings
+from redline_core.recorder import Recorder
+
+rec = Recorder(Settings.from_mapping({"log_level": "INFO"}))
+logging.config.dictConfig({
+    "version": 1,
+    "handlers": {"h": {"class": "logging.StreamHandler", "stream": "ext://sys.stdout"}},
+    "root": {"level": "INFO", "handlers": ["h"]},
+})
+log = logging.getLogger("shop")
+with rec.recording(method="GET", path="/x"):
+    log.info("kept")
+print([r.message for r in rec.last_trace.logs])
+logging.basicConfig(force=True, level=logging.INFO, stream=sys.stdout)
+with rec.recording(method="GET", path="/y"):
+    log.info("forced")
+print([r.message for r in rec.last_trace.logs])
+"""
+
+
+def test_dict_config_and_force_after_redline_keep_capture():
+    out = _script(DICT_CONFIG_AFTER)
+    assert out.stdout.strip().splitlines() == [
+        "kept",
+        "['kept']",
+        "INFO:shop:forced",
+        "['forced']",
+    ]
