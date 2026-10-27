@@ -14,3 +14,5 @@ export function getRoutes(): RouteEntry[] { return [...routes.values()] }
 registerRoute({ path: '/requests', label: 'Requests', keywords: 'traces list live', hint: 'Recorded requests' })
 registerRoute({ path: '/endpoints', label: 'Endpoints', keywords: 'routes p95 latency stats', hint: 'Per-route latency and query stats' })
 registerRoute({ path: '/issues', label: 'Issues', keywords: 'n+1 duplicate slow queries problems', hint: 'Detected problems' })
+registerRoute({ path: '/history', label: 'History', keywords: 'timeline releases regressions compare periods trends', hint: 'Latency over time, release comparison' })
+registerRoute({ path: '/load', label: 'Load tests', keywords: 'load runs rps knee bottlenecks stress', hint: 'Load runs and bottlenecks' })
