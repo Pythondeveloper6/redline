@@ -13,6 +13,8 @@ import dataclasses
 import difflib
 import os
 import re
+import subprocess
+import threading
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -21,14 +23,29 @@ __all__ = [
     "DEFAULT_IGNORE_PATHS",
     "DEFAULT_REDACT_HEADERS",
     "DEFAULT_REDACT_KEYS",
+    "EDITORS",
+    "LOG_LEVELS",
     "PROFILE_MODES",
     "ProfileMode",
     "Settings",
     "SettingsError",
+    "editor_url_template",
+    "resolve_release",
 ]
 
 ProfileMode = Literal["off", "opt_in", "sampled", "all"]
 PROFILE_MODES: tuple[str, ...] = ("off", "opt_in", "sampled", "all")
+
+LOG_LEVELS: tuple[str, ...] = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+#: Editor names accepted by ``Settings.editor`` and the URL template each one opens.
+EDITORS: dict[str, str | None] = {
+    "vscode": "vscode://file/{file}:{line}",
+    "cursor": "cursor://file/{file}:{line}",
+    "pycharm": "pycharm://open?file={file}&line={line}",
+    "idea": "idea://open?file={file}&line={line}",
+    "sublime": "subl://open?url=file://{file}&line={line}",
+    "none": None,
+}
 
 DEFAULT_IGNORE_PATHS: tuple[str, ...] = ("/static/", "/media/", "/favicon.ico")
 DEFAULT_REDACT_HEADERS: tuple[str, ...] = (
@@ -100,8 +117,39 @@ class Settings:
     # callsites
     project_root: str | None = None
 
+    # v0.2 detectors (CONTRACT.md section 10)
+    blocking_ms: float = 20.0
+    detect_blocking: bool = True
+    large_result_rows: int = 1_000
+    unbounded_rows: int = 200
+    slow_serializer_ms: float = 50.0
+    long_transaction_ms: float = 200.0
+    slow_external_ms: float = 500.0
+
+    # logs & exceptions
+    capture_logs: bool = True
+    #: Minimum level captured into a trace (case-insensitive; stored upper-case).
+    log_level: str = "INFO"
+    max_logs_per_trace: int = 200
+    capture_locals: bool = True
+
+    # developer experience
+    #: ``vscode``, ``cursor``, ``pycharm``, ``idea``, ``sublime``, ``none`` or a template
+    #: containing ``{file}`` (absolute path) and ``{line}``.
+    editor: str = "vscode"
+    server_timing: bool = True
+    #: Inject the floating badge into HTML responses; ``"auto"`` = when the framework is
+    #: in debug mode.
+    badge: bool | str = "auto"
+    #: ``None`` resolves automatically, see :func:`resolve_release`.
+    release: str | None = None
+
+    # history & load testing
+    history_retention_days: int | None = 90
+    load_from_ui: bool = False
+
     def __post_init__(self) -> None:
-        for name in (*_SEQ_FIELDS, *_PATH_FIELDS):
+        for name in (*_SEQ_FIELDS, *_PATH_FIELDS, "log_level", "badge"):
             object.__setattr__(self, name, _coerce(name, getattr(self, name)))
         _validate(self)
 
@@ -174,7 +222,7 @@ class Settings:
 _SEQ_FIELDS = {"ignore_paths", "redact_headers", "redact_keys"}
 _PATH_FIELDS = {"storage_path", "project_root"}
 #: Integer settings where ``0`` and ``None`` both mean "no limit".
-_OPTIONAL_LIMITS = ("max_rows", "max_age_days", "max_spans_per_trace")
+_OPTIONAL_LIMITS = ("max_rows", "max_age_days", "max_spans_per_trace", "history_retention_days")
 
 
 def _coerce(name: str, value: Any) -> Any:
@@ -184,6 +232,10 @@ def _coerce(name: str, value: Any) -> Any:
         if isinstance(value, bytes):
             value = os.fsdecode(value)
         return value
+    if name == "log_level" and isinstance(value, str):
+        return value.strip().upper()
+    if name == "badge" and isinstance(value, str):
+        return value.strip().lower() if value.strip().lower() == "auto" else value
     if name in _SEQ_FIELDS:
         if isinstance(value, str):
             value = (value,)
@@ -213,6 +265,11 @@ def _validate(s: Settings) -> None:
         "capture_request_body",
         "capture_response_body",
         "explain_analyze",
+        "detect_blocking",
+        "capture_logs",
+        "capture_locals",
+        "server_timing",
+        "load_from_ui",
     ):
         _check_type(s, name, (bool,), "True or False")
     for name in (
@@ -221,6 +278,9 @@ def _validate(s: Settings) -> None:
         "duplicate_threshold",
         "too_many_queries",
         "writer_queue_size",
+        "large_result_rows",
+        "unbounded_rows",
+        "max_logs_per_trace",
     ):
         _check_type(s, name, (int,), "an integer")
         if getattr(s, name) < 0:
@@ -241,6 +301,10 @@ def _validate(s: Settings) -> None:
         "profile_sample_rate",
         "always_keep_slower_than_ms",
         "slow_query_ms",
+        "blocking_ms",
+        "slow_serializer_ms",
+        "long_transaction_ms",
+        "slow_external_ms",
     ):
         _check_type(s, name, (int, float), "a number")
         if getattr(s, name) < 0:
@@ -256,6 +320,23 @@ def _validate(s: Settings) -> None:
             f"Redline setting 'profile' must be one of {', '.join(PROFILE_MODES)}; "
             f"got {s.profile!r}."
         )
+    if s.log_level not in LOG_LEVELS:
+        raise SettingsError(
+            f"Redline setting 'log_level' must be one of {', '.join(LOG_LEVELS)} "
+            f"(case-insensitive); got {s.log_level!r}."
+        )
+    if not isinstance(s.badge, bool) and s.badge != "auto":
+        raise SettingsError(
+            f"Redline setting 'badge' must be 'auto', True or False; got {s.badge!r}."
+        )
+    _check_type(s, "editor", (str,), "an editor name or a template")
+    if s.editor not in EDITORS and not ("{file}" in s.editor and "{line}" in s.editor):
+        raise SettingsError(
+            f"Redline setting 'editor' must be one of {', '.join(EDITORS)} or a template "
+            f"containing {{file}} and {{line}}; got {s.editor!r}."
+        )
+    if s.release is not None:
+        _check_type(s, "release", (str,), "a string or None")
     for name in _SEQ_FIELDS:
         value = getattr(s, name)
         if not isinstance(value, tuple) or not all(isinstance(v, str) for v in value):
@@ -265,3 +346,67 @@ def _validate(s: Settings) -> None:
             re.compile(pattern)
         except re.error as exc:
             raise SettingsError(f"Invalid regular expression {pattern!r}: {exc}.") from None
+
+
+# ── v0.2 helpers ─────────────────────────────────────────────────────────────────────
+
+_RELEASE_ENV = (
+    "REDLINE_RELEASE",
+    "GIT_SHA",
+    "SOURCE_VERSION",
+    "RENDER_GIT_COMMIT",
+    "HEROKU_SLUG_COMMIT",
+)
+_release_cache: dict[str, str | None] = {}
+_release_lock = threading.Lock()
+
+
+def _git_short_sha(cwd: str) -> str | None:
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=1.0,
+            check=False,
+        )
+    except Exception:  # no git, bad cwd, timeout...
+        return None
+    out = proc.stdout.strip() if proc.returncode == 0 else ""
+    return out or None
+
+
+def resolve_release(settings: Settings) -> str | None:
+    """The release label for ``settings`` (``Settings.release`` or the automatic rule).
+
+    Order: the explicit setting, env ``REDLINE_RELEASE``, then ``GIT_SHA`` /
+    ``SOURCE_VERSION`` / ``RENDER_GIT_COMMIT`` / ``HEROKU_SLUG_COMMIT``, then
+    ``git rev-parse --short HEAD`` in ``project_root`` (1 s timeout). The git lookup is
+    cached per process and per directory. Never raises.
+    """
+    try:
+        if settings.release:
+            return settings.release
+        for name in _RELEASE_ENV:
+            value = os.environ.get(name, "").strip()
+            if value:
+                return value
+        root = os.path.abspath(settings.project_root or os.getcwd())
+        with _release_lock:
+            if root in _release_cache:
+                return _release_cache[root]
+        sha = _git_short_sha(root)
+        with _release_lock:
+            _release_cache[root] = sha
+        return sha
+    except Exception:  # pragma: no cover - defensive
+        return None
+
+
+def editor_url_template(settings: Settings) -> str | None:
+    """The ``{file}``/``{line}`` URL template for ``settings.editor`` (``None`` = disabled)."""
+    editor = settings.editor
+    if editor in EDITORS:
+        return EDITORS[editor]
+    return editor

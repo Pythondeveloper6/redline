@@ -18,13 +18,15 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from collections.abc import Callable, Mapping
 from typing import Any
 
 from . import __version__
-from .conf import Settings
+from .conf import Settings, editor_url_template, resolve_release
 from .explain import ExplainError, ExplainExecutor, run_explain
+from .model import ISSUE_KINDS
 from .profiler import is_available as profiler_available
 from .storage.base import FilterError, Filters, Store, parse_window
 
@@ -37,7 +39,7 @@ ExecutorFactory = Callable[[str, str], "ExplainExecutor | None"]
 
 _TRACE = re.compile(r"^api/traces/([A-Za-z0-9_-]{1,64})$")
 _PROFILE = re.compile(r"^api/traces/([A-Za-z0-9_-]{1,64})/profile$")
-_ISSUE_KINDS = ("n_plus_one", "duplicate_query", "slow_query", "too_many_queries")
+_ISSUE_KINDS = ISSUE_KINDS
 
 
 def error(status: int, code: str, message: str) -> Response:
@@ -108,6 +110,11 @@ class RedlineAPI:
         return 200, {
             "version": __version__,
             "framework": self.framework,
+            "project_root": self.settings.project_root or os.getcwd(),
+            "editor": self.settings.editor,
+            "editor_url_template": editor_url_template(self.settings),
+            "release": resolve_release(self.settings),
+            "features": {"load_from_ui": self.settings.load_from_ui, "sse": True, "snapshot": True},
             "settings": settings,
             "storage": {
                 "rows": self.store.count(),

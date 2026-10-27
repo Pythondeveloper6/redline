@@ -67,7 +67,7 @@ def _finish(state: _Open, exc: BaseException | None) -> None:
         Span(
             id=state.id,
             parent_id=state.prev,
-            kind="resolver",  # type: ignore[arg-type]
+            kind="resolver",
             name=f"{data['parent_type']}.{data['field']}",
             start_ms=round(max(0.0, (state.start - builder.t0) * 1000.0), 3),
             duration_ms=round(ms, 3),
