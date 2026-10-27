@@ -42,6 +42,7 @@ from typing import Any
 
 from django.conf import settings
 from django.contrib.auth.views import redirect_to_login
+from django.core.exceptions import RequestDataTooBig
 from django.db import transaction
 from django.http import (
     FileResponse,
@@ -60,7 +61,7 @@ from django.views.decorators.csrf import csrf_exempt, ensure_csrf_cookie
 
 from redline_core import stream, ui
 from redline_core.access import Decision, RequestInfo
-from redline_core.api import RawResponse, own_base_url
+from redline_core.api import MAX_API_BODY, RawResponse, own_base_url
 from redline_core.storage import FilterError
 
 from .runtime import get_runtime
@@ -68,7 +69,7 @@ from .runtime import get_runtime
 __all__ = ["api", "asset", "index", "top_level"]
 
 _HASHED = re.compile(r"-[A-Za-z0-9_-]{8,}\.(?:js|css|mjs)$")
-_API_METHODS = ("GET", "POST", "DELETE")
+_API_METHODS = ("GET", "POST", "PUT", "DELETE")
 
 
 def _permission(request: HttpRequest) -> bool:
@@ -272,11 +273,17 @@ def _csrf_rejection(request: HttpRequest) -> HttpResponseBase | None:
 
 
 def _body(request: HttpRequest) -> bytes:
-    """The raw body; empty when the CSRF check already consumed a form-encoded stream."""
+    """The raw body; empty when the CSRF check already consumed a form-encoded stream.
+
+    Over ``DATA_UPLOAD_MAX_MEMORY_SIZE`` (an imported check baseline may be 10 MiB) the
+    stream is read up to :data:`~redline_core.api.MAX_API_BODY`; the core answers 413
+    beyond its own per-endpoint limits. Only reached after the access gate."""
     try:
         return request.body
     except RawPostDataException:
         return b""
+    except RequestDataTooBig:
+        return request.read(MAX_API_BODY + 1)
 
 
 def _no_response(request: HttpRequest) -> HttpResponse:  # pragma: no cover - never called
@@ -311,7 +318,7 @@ def api(request: HttpRequest, path: str = "") -> HttpResponseBase:
 
 def _dispatch(request: HttpRequest, path: str) -> HttpResponseBase:
     params = {key: request.GET.getlist(key) for key in request.GET}
-    body = _body(request) if request.method == "POST" else None
+    body = _body(request) if request.method in ("POST", "PUT") else None
     result = get_runtime().api.dispatch(
         request.method or "GET",
         f"api/{path}",

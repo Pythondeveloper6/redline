@@ -100,6 +100,7 @@ _ID = r"[A-Za-z0-9_-]{1,64}"
 _PROFILE = re.compile(rf"^api/traces/{_ID}/profile$")
 _SNAPSHOT = re.compile(rf"^api/traces/{_ID}/snapshot$")
 _RUNS = re.compile(r"^api/runs(/.*)?$")
+_CHECKS = re.compile(r"^api/checks(/.*)?$")
 
 
 # ── request & decision ────────────────────────────────────────────────────────────────
@@ -413,6 +414,8 @@ def _feature_for(method: str, path: str) -> str | None:
         return "snapshot"
     if _RUNS.match(path):
         return "load"
+    if _CHECKS.match(path):
+        return "checks"
     return None
 
 
