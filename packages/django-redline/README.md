@@ -54,7 +54,7 @@ urlpatterns = [
 ]
 ```
 
-Run your app, make some requests and open **`/redline/`** as a staff user.
+Run your app, make some requests and open **`/redline/`** as a superuser.
 
 ## What you get
 
@@ -128,7 +128,7 @@ The full list is in the settings reference of the docs (`redline_core.conf.Setti
 
 ## Security
 
-- **Access**: staff only by default (`user.is_active and user.is_staff`). Override it with
+- **Access**: superusers only by default (`user.is_active and user.is_superuser`; staff before 0.2). Override it with
   `REDLINE["PERMISSION"]`, a callable `(request) -> bool` or its dotted path. Anonymous visitors to
   the page are redirected to the admin login. The API answers `403` JSON. Redline's views also
   enforce `ALLOWED_HOSTS` (against DNS rebinding) and the page sends `X-Frame-Options: DENY`.

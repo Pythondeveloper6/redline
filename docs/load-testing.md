@@ -140,7 +140,10 @@ verdict: saturated (knee at step 8 (80 rps): error rate 3.1% > 1%)
 ### Correlating with the app
 
 Every request carries a header `X-Redline-Run: <run_id>;step=<n>`. A Redline-instrumented
-app turns it into the trace tags `run_id` and `step`. The **bottleneck** analysis joins
+app turns it into the trace tags `run_id` and `step`, as long as that run is in the app's
+store and running (or ended less than a minute ago): a made-up header tags nothing, and a
+run with `--no-store`, or written to another store, does not tag the app's traces. The
+**bottleneck** analysis joins
 those tags with the per-query summaries, so the app must be recording the load. Remember
 [sampling](production.md#sampling): in a profile that keeps 5% of requests you still get
 enough traces at high rps, but at 5 rps you may get none. Raise `sample_rate` on the
@@ -421,10 +424,13 @@ in environments where load is welcome. See [Security](security.md#load-from-the-
 
 **Where the run goes.** The request list can contain only paths (a single leading `/`; no
 scheme or host), so the form cannot aim the server at somebody else. The target is the
-`base_url` setting when you set it. Otherwise it is the URL the request was addressed to,
-and that is accepted only when its host is a loopback name or one in `allowed_hosts`. For
-any other host (a staging domain, a container name) `POST api/runs` answers
-`400 invalid_body` and asks you to set `base_url`:
+`base_url` setting when you set it. Otherwise it is `127.0.0.1` on the port the server is
+**listening** on (ASGI `scope["server"]`, WSGI `SERVER_PORT`), plus the script root; the
+`Host` header is never used, so a request cannot aim the run at another service on the
+machine. When the port is unknown (the app listens on a unix socket), or the app is not
+reachable on `127.0.0.1` (it listens on one specific interface, or behind a container
+port mapping), `POST api/runs` answers `400 invalid_body` or the run fails to connect: set
+`base_url`:
 
 ```toml
 # redline.toml

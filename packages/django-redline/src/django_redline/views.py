@@ -3,7 +3,7 @@
 Access
     Every view asks the core access gate (``redline_core.access``, ``CONTRACT.md`` §18).
     The default policy is ``access="framework"``: ``REDLINE["PERMISSION"]`` (default:
-    active staff users). Then the page redirects anonymous visitors to the admin login
+    active superusers). Then the page redirects anonymous visitors to the admin login
     (or ``LOGIN_URL``) and answers 403 to signed-in users without access; the API answers
     ``403`` JSON ``{"error": {"code": "forbidden", ...}}``. ``ACCESS = "token"``/``"basic"``
     /``"local"``/``"custom"`` switch to the core policies (with ``token``/``basic`` the
@@ -60,7 +60,7 @@ from django.views.decorators.csrf import csrf_exempt, ensure_csrf_cookie
 
 from redline_core import stream, ui
 from redline_core.access import Decision, RequestInfo
-from redline_core.api import RawResponse
+from redline_core.api import RawResponse, own_base_url
 from redline_core.storage import FilterError
 
 from .runtime import get_runtime
@@ -218,9 +218,13 @@ def _raw(result: RawResponse) -> HttpResponse:
     return response
 
 
-def _base_url(request: HttpRequest) -> str:
-    """The app's own root URL: ``scheme://host[:port]`` + script prefix, no trailing slash."""
-    return f"{request.scheme}://{request.get_host()}{get_script_prefix()}".rstrip("/")
+def _base_url(request: HttpRequest) -> str | None:
+    """The app's own root URL from the server's listening port (``SERVER_PORT``, never the
+    ``Host`` header) + script prefix, no trailing slash."""
+    scope = getattr(request, "scope", None)
+    scheme = scope.get("scheme") if isinstance(scope, dict) else None
+    scheme = scheme or request.META.get("wsgi.url_scheme")
+    return own_base_url(scheme, request.META.get("SERVER_PORT"), get_script_prefix())
 
 
 def _is_asgi(request: HttpRequest) -> bool:

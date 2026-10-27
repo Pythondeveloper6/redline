@@ -66,7 +66,16 @@ def shop(db):
 
 @pytest.fixture
 def staff(db, django_user_model):
-    return django_user_model.objects.create_user("staff", password="pw", is_staff=True)
+    """A user the default ``PERMISSION`` lets in (a superuser since 0.2)."""
+    return django_user_model.objects.create_user(
+        "staff", password="pw", is_staff=True, is_superuser=True
+    )
+
+
+@pytest.fixture
+def staff_only(db, django_user_model):
+    """Staff without superuser status: refused by the default ``PERMISSION`` since 0.2."""
+    return django_user_model.objects.create_user("staffonly", password="pw", is_staff=True)
 
 
 @pytest.fixture

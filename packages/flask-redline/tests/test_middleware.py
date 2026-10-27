@@ -208,6 +208,9 @@ def test_disabled_records_nothing_and_installs_nothing(make_env):
 
 def test_run_header_becomes_tags(make_env):
     env = make_env()
+    from redline_core.runs import Run
+
+    env.redline.store.save_run(Run(id="run42"))  # tags only a run the store knows
     env.client().get("/dup", headers={"X-Redline-Run": "run42;step=3"})
     t = env.trace()
     assert t.tags["run_id"] == "run42" and t.tags["step"] == "3"
@@ -345,7 +348,9 @@ def test_mounted_under_script_name(make_env):
     t = env.trace()
     assert t.path == "/shop/orders/5"
     assert t.route == "/shop/orders/<int:order_id>"
-    assert Client(mounted).get("/shop/_redline/api/meta", buffered=True).status_code == 200
+    local = {"REMOTE_ADDR": "127.0.0.1"}  # no REMOTE_ADDR is a unix socket: not local
+    meta = Client(mounted).get("/shop/_redline/api/meta", buffered=True, environ_base=local)
+    assert meta.status_code == 200
     assert [x["path"] for x in env.traces()] == ["/shop/orders/5"]
 
 

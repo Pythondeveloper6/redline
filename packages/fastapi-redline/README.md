@@ -22,7 +22,8 @@ from fastapi_redline import install
 app = FastAPI()
 engine = create_async_engine("sqlite+aiosqlite:///app.db")
 
-install(app, engine=engine)      # UI at http://localhost:8000/_redline/
+# access="local": localhost only (unset, Redline answers 404 outside debug mode)
+install(app, engine=engine, settings={"access": "local"})  # UI at http://localhost:8000/_redline/
 ```
 
 Traces are stored in their own SQLite file (`.redline/redline.db`), never in your database.
@@ -160,7 +161,7 @@ the one-line code hint with lower confidence instead. Both the lazy-load form
 
 The UI exposes your SQL, request bodies and EXPLAIN, so treat it like an admin tool.
 
-**Default.** With no `dependencies`, the `access` setting decides (default `local`): only loopback clients (127.0.0.0/8, `::1`, unix sockets)
+**Default.** With no `dependencies`, the `access` setting decides (default `local`, served only in debug mode until you set `access`): only loopback clients (127.0.0.0/8, `::1`; unix sockets only with `trust_unix_socket`)
 that address the server by a loopback name (`Host: localhost`, `127.0.0.1`, `[::1]`, any port;
 this blocks DNS rebinding)
 are served and a warning is logged at startup. Refusals, and `HTTPException`s from your own
@@ -198,7 +199,7 @@ def redline_auth(creds: HTTPBasicCredentials = Depends(basic)) -> None:
 install(app, engine=engine, dependencies=[Depends(redline_auth)])
 ```
 
-(`dependencies=[]` leaves it open on purpose. Don't, outside a private network.)
+(`dependencies=[]` is the same as passing none. A dependency that returns `False` is refused with 403; raising `HTTPException` is the normal way.)
 
 **CSRF.** The mutating endpoints (`DELETE` traces, `POST explain`) reject browser requests
 whose `Origin` does not match the request host, `Origin: null`, and

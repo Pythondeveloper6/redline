@@ -7,7 +7,7 @@ import httpx
 from litestar import Litestar, get
 from litestar.testing import TestClient
 
-from .conftest import client
+from .conftest import allow_all, client
 
 
 def aclient(env):
@@ -175,6 +175,9 @@ def test_disabled_records_nothing(make_env):
 
 def test_run_header_becomes_tags(make_env):
     env = make_env()
+    from redline_core.runs import Run
+
+    env.redline.store.save_run(Run(id="run42"))  # tags only a run the store knows
     with client(env) as c:
         c.get("/dup", headers={"X-Redline-Run": "run42;step=3"})
     t = env.trace()
@@ -183,6 +186,7 @@ def test_run_header_becomes_tags(make_env):
 
 def test_profile_opt_in_query_and_header(make_env):
     env = make_env()
+    env.app.debug = True  # honoured in debug mode (or with Redline credentials)
     with client(env) as c:
         c.get("/orders/1")
         c.get("/orders/1?_redline=profile")
@@ -245,7 +249,7 @@ def test_custom_path(tmp_path):
     from litestar_redline import RedlinePlugin
 
     plugin = RedlinePlugin(
-        settings={"storage_path": str(tmp_path / "r.db")}, path="tools/redline/", guards=[]
+        settings={"storage_path": str(tmp_path / "r.db")}, path="tools/redline/", guards=[allow_all]
     )
 
     @get("/ping")

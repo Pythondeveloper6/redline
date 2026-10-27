@@ -13,6 +13,8 @@ from fastapi_redline import install
 from fastapi_redline._serialize import uninstrument_serialization
 from redline_core.storage import SQLiteStore
 
+from .conftest import allow_all
+
 ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -43,7 +45,7 @@ def make_app(tmp_path, **settings):
         "sample_rate": 1.0,
         **settings,
     }
-    redline = install(app, settings=cfg, dependencies=[])
+    redline = install(app, settings=cfg, dependencies=[allow_all])
     return app, redline
 
 

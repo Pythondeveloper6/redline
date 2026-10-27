@@ -75,11 +75,11 @@ fail it). It takes `--json` and `--project-root DIR` like `redline config`.
 |---|---|
 | `storage` | the store path exists or can be created, and is writable |
 | `ui bundle` | the prebuilt UI is present in `redline-core` |
-| `access` | `open` fails (warns when `REDLINE_ALLOW_OPEN=1` is set); `local` outside the `dev` preset warns, because behind a proxy nobody can reach Redline |
+| `access` | `open` fails (warns when `REDLINE_ALLOW_OPEN=1` is set); `access` not set in the file or environment warns (FastAPI, Flask and Litestar answer `404` outside debug mode unless the app sets it in code); `trust_unix_socket` warns; `local` outside the `dev` preset warns, because behind a proxy nobody can reach Redline |
 | `token` | shorter than 24 characters (warn), an unreadable `token_file` (fail), a `token_file` readable by other users (warn) |
 | `basic` | an invalid hash (fail), fewer than 100 000 PBKDF2 iterations (warn) |
 | `sessions` | `token` or `basic` without `secret_key`: logins are per worker process (warn) |
-| `proxies` | a non-`local` policy outside `dev` with `trusted_proxies` empty (warn) |
+| `proxies` | `token`/`basic` with `trusted_proxies` empty (warn: behind a proxy every client shares one login rate-limit bucket, and `X-Forwarded-Proto` is not believed for the `Secure` cookie), or another non-`local` policy outside `dev` |
 | `capture` | the `production` preset capturing request or response bodies or locals (warn) |
 | `retention` | `history_retention_days` off, or `max_rows` and `max_age_days` both off (warn) |
 | `load` | `load_from_ui` on but `httpx` missing (warn) |

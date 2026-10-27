@@ -146,7 +146,7 @@ from django.urls import include, path
 urlpatterns = [..., path("redline/", include("django_redline.urls"))]
 ```
 
-Run your app, make some requests, and open **`/redline/`** as a staff user.
+Run your app, make some requests, and open **`/redline/`** as a superuser.
 `python manage.py check` tells you if anything is miswired. Django Ninja and DRF work with
 no extra setup.
 
@@ -160,7 +160,8 @@ from fastapi_redline import install
 app = FastAPI()
 engine = create_async_engine("sqlite+aiosqlite:///app.db")
 
-install(app, engine=engine)      # UI at http://localhost:8000/_redline/
+# access="local": localhost only (unset, Redline answers 404 outside debug mode)
+install(app, engine=engine, settings={"access": "local"})  # UI at http://localhost:8000/_redline/
 ```
 
 ### Flask
@@ -173,7 +174,8 @@ from flask_redline import Redline
 app = Flask(__name__)
 engine = create_engine("sqlite:///app.db")
 
-Redline(app, engine=engine)      # UI at http://localhost:5000/_redline/
+# access="local": localhost only (unset, Redline answers 404 outside debug mode)
+Redline(app, engine=engine, settings={"access": "local"})  # UI at http://localhost:5000/_redline/
 ```
 
 With Flask-SQLAlchemy, omit the engine: its engines are found automatically.
@@ -187,7 +189,10 @@ from litestar_redline import RedlinePlugin
 
 engine = create_async_engine("sqlite+aiosqlite:///app.db")
 
-app = Litestar(route_handlers=[...], plugins=[RedlinePlugin(engine=engine)])
+app = Litestar(
+    route_handlers=[...],
+    plugins=[RedlinePlugin(engine=engine, settings={"access": "local"})],  # localhost only
+)
 # UI at http://localhost:8000/_redline/
 ```
 
@@ -341,7 +346,7 @@ and the [settings reference](https://pythondeveloper6.github.io/redline/settings
 
 ## Security
 
-- **Access.** One policy for every framework: `local` (loopback only; Django: staff users),
+- **Access.** One policy for every framework: `local` (loopback only, served in debug mode until `access` is set; Django: superusers),
   `token`, `basic`, the framework's own hook, or your own check, plus IP allow-lists,
   trusted proxies, a read-only mode and per-feature switches. Behind a reverse proxy
   use a token and `trusted_proxies`; a loopback peer carrying forwarding headers is refused. See

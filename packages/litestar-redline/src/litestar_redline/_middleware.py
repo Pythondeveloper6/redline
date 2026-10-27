@@ -26,6 +26,7 @@ exception handler: an exception is already a response when it gets here, so the 
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from typing import Any
 
 from redline_core import Recorder, get_recorder, ui
@@ -136,10 +137,19 @@ def _badge_candidate(status: int, headers: list[tuple[bytes, bytes]]) -> bool:
 
 
 class RedlineMiddleware:
-    def __init__(self, app: Any, recorder: Recorder | None = None, mount: str = "") -> None:
+    def __init__(
+        self,
+        app: Any,
+        recorder: Recorder | None = None,
+        mount: str = "",
+        force_ok: Callable[[Any], bool] | None = None,
+    ) -> None:
         self.app = app
         self.recorder = recorder
         self.mount = mount
+        #: ``force_ok(scope)``: may this request force profiling (``X-Redline-Profile``,
+        #: ``?_redline=profile``)? Called only when such a flag is present.
+        self.force_ok = force_ok or (lambda scope: bool(getattr(scope.get("app"), "debug", False)))
 
     async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
         if scope["type"] != "http":
@@ -162,7 +172,7 @@ class RedlineMiddleware:
             headers=headers,
             query=query,
             client=client[0] if client else None,
-            profile_requested=_wants_profile(headers, query),
+            profile_requested=_wants_profile(headers, query) and self.force_ok(scope),
         )
         limit = settings.max_body_bytes
         req = _Capture(limit) if settings.capture_request_body else None

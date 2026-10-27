@@ -47,6 +47,10 @@ def test_resave_replaces(store):
 
 
 def _seed(store, now):
+    from redline_core.runs import Run
+
+    for run_id in ("r1", "r2"):  # run_id tags are kept only for runs the store knows
+        store.save_run(Run(id=run_id))
     cs = make_callsite()
     n1 = [
         sql_span('SELECT * FROM "items" WHERE "order_id" = %s', [i], callsite=cs) for i in range(6)

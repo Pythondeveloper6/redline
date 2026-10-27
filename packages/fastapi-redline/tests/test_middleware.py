@@ -6,6 +6,8 @@ import json
 import httpx
 from fastapi.testclient import TestClient
 
+from .conftest import allow_all
+
 
 def aclient(env):
     return httpx.AsyncClient(transport=httpx.ASGITransport(app=env.app), base_url="http://t")
@@ -156,6 +158,9 @@ def test_disabled_records_nothing(make_env):
 
 def test_run_header_becomes_tags(make_env):
     env = make_env()
+    from redline_core.runs import Run
+
+    env.redline.store.save_run(Run(id="run42"))  # tags only a run the store knows
     with TestClient(env.app) as c:
         c.get("/dup", headers={"X-Redline-Run": "run42;step=3"})
     t = env.trace()
@@ -164,6 +169,7 @@ def test_run_header_becomes_tags(make_env):
 
 def test_profile_opt_in_query_and_header(make_env):
     env = make_env()
+    env.app.debug = True  # honoured in debug mode (or with Redline credentials)
     with TestClient(env.app) as c:
         c.get("/orders/1")
         c.get("/orders/1?_redline=profile")
@@ -199,7 +205,7 @@ def test_existing_lifespan_is_preserved_and_store_closed(make_env):
         events.append("stop")
 
     app = FastAPI(lifespan=lifespan)
-    rl = install(app, settings={"storage_path": ":memory:"}, dependencies=[])
+    rl = install(app, settings={"storage_path": ":memory:"}, dependencies=[allow_all])
     with TestClient(app):
         assert events == ["start"]
     assert events == ["start", "stop"]

@@ -57,6 +57,7 @@ __all__ = [
     "find_config_file",
     "load_config_file",
     "mask_secrets",
+    "mask_url_userinfo",
     "parse_env",
     "parse_env_value",
     "resolve_settings",
@@ -121,6 +122,7 @@ GROUPS: dict[str, tuple[str, ...]] = {
         "allowed_ips",
         "allowed_hosts",
         "trusted_proxies",
+        "trust_unix_socket",
         "token",
         "token_file",
         "basic_users",
@@ -128,6 +130,7 @@ GROUPS: dict[str, tuple[str, ...]] = {
         "read_only",
         "session_ttl_s",
         "max_login_attempts",
+        "cookie_secure",
         "ui_enabled",
         "mount_path",
     ),
@@ -147,6 +150,12 @@ class ResolvedConfig:
     warnings: tuple[str, ...] = ()
     #: The ``REDLINE_*`` environment variable behind each ``env`` value.
     env_names: Mapping[str, str] = field(default_factory=dict)
+
+    @property
+    def access_explicit(self) -> bool:
+        """Whether ``access`` was set by the user (file, env or framework layer). A
+        default/adapter/preset ``local`` is served in framework debug mode only."""
+        return self.sources.get("access", "default") not in ("default", "adapter", "preset")
 
     def public(self, extra_warnings: tuple[str, ...] | list[str] = ()) -> dict[str, Any]:
         """``GET api/config``: secrets masked as ``"***"``, provenance and warnings."""
@@ -180,7 +189,25 @@ def mask_secrets(values: Mapping[str, Any]) -> dict[str, Any]:
             out[name] = dict.fromkeys(value, "***")
         elif value is not None:
             out[name] = "***"
+    if isinstance(out.get("base_url"), str):
+        out["base_url"] = mask_url_userinfo(out["base_url"])
     return out
+
+
+def mask_url_userinfo(url: str) -> str:
+    """``http://user:pw@host/x`` → ``http://***@host/x`` (unchanged without userinfo)."""
+    scheme, sep, rest = url.partition("://")
+    if not sep:
+        return url
+    end = len(rest)
+    for ch in "/?#":
+        i = rest.find(ch)
+        if i != -1:
+            end = min(end, i)
+    netloc = rest[:end]
+    if "@" not in netloc:
+        return url
+    return f"{scheme}://***@{netloc.rsplit('@', 1)[1]}{rest[end:]}"
 
 
 def _jsonable(value: Any) -> Any:
@@ -204,7 +231,7 @@ _FIELD_TYPES: dict[str, str] = {f.name: str(f.type) for f in dataclasses.fields(
 
 def _kind(name: str) -> str:
     t = _FIELD_TYPES[name].replace(" ", "")
-    if name in ("badge", "server_timing"):
+    if name in ("badge", "server_timing", "cookie_secure"):
         return "badge"
     if t.startswith("tuple["):
         return "list"
@@ -574,6 +601,19 @@ def config_warnings(settings: Settings, sources: Mapping[str, str] | None = None
             "access='open': anyone who can reach the app can read every captured request "
             "(headers, bodies, SQL). It is refused unless REDLINE_ALLOW_OPEN=1 is set."
         )
+    if s.access == "local" and sources.get("access") in ("default", "adapter", "preset"):
+        out.append(
+            "access is not set: the UI and API answer 404 unless the framework is in debug "
+            "mode (then the 'local' default applies). Set access explicitly – 'token' or "
+            "'basic' for a server, or 'local' to accept the same-host reverse-proxy risk."
+        )
+    if s.access == "local" and s.trust_unix_socket:
+        out.append(
+            "trust_unix_socket is on: a reverse proxy on this machine that reaches the app "
+            "over a unix socket makes every visitor local."
+        )
+    if s.cookie_secure is False and s.access in ("token", "basic"):
+        out.append("cookie_secure is False: the login cookie is sent over plain http as well.")
     if s.access == "local" and s.preset != "dev":
         out.append(
             f"access='local' with the {s.preset!r} preset: only loopback clients get in "

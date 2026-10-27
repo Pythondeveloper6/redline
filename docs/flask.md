@@ -32,7 +32,8 @@ from flask_redline import Redline
 app = Flask(__name__)
 engine = create_engine("sqlite:///app.db")
 
-Redline(app, engine=engine)      # UI at http://localhost:5000/_redline/
+# access="local": localhost only (unset, Redline answers 404 outside debug mode)
+Redline(app, engine=engine, settings={"access": "local"})  # UI at http://localhost:5000/_redline/
 ```
 
 With **Flask-SQLAlchemy** you do not even pass the engine. Its engines, including
@@ -133,7 +134,8 @@ The alias is stored on every query so that EXPLAIN runs on the right database.
   in the request's trace. A bare `threading.Thread` is not attributed to any request.
 - Your own spans: `with redline_core.span("pricing.compute"): ...`
   ([details](custom-spans.md)).
-- `X-Redline-Run: <id>;step=<n>` becomes tags (used by the [load tester](load-testing.md)).
+- `X-Redline-Run: <id>;step=<n>` becomes tags (used by the [load tester](load-testing.md)),
+  for a run that is running in the store.
 
 If you put `werkzeug.middleware.proxy_fix.ProxyFix` (or any other WSGI middleware) around
 the app, wrap it **after** creating `Redline`, so the recorded client address is the real
@@ -158,7 +160,9 @@ URLs are redacted (`?api_key=...` is masked). `uninstrument_httpx()` and
 ## Profiling
 
 Flamegraphs are opt-in per request: add `?_redline=profile` or the header
-`X-Redline-Profile: 1` (needs the `profile` extra). See [Flamegraphs](flamegraphs.md).
+`X-Redline-Profile: 1` (needs the `profile` extra). They are honoured with `app.debug` or
+from a request with valid Redline credentials (a client `local` lets in, a token…); see
+[Forcing capture](security.md#forcing-capture) and [Flamegraphs](flamegraphs.md).
 
 ## Fix suggestions
 
@@ -189,9 +193,14 @@ under gunicorn.
 The UI exposes your SQL, request bodies and EXPLAIN, so treat it like an admin tool.
 
 **Default.** With no `permission`, the [`access` policy](access-control.md) decides, and
-the default is `local`: only loopback clients (`127.0.0.0/8`, `::1`, unix sockets) that
-address the server by a loopback name (`Host: localhost`, `127.0.0.1`, `[::1]`, any port;
-this blocks DNS rebinding) are served, and a warning is logged at startup. Refusals are
+the default is `local`: only loopback clients (`127.0.0.0/8`, `::1`; a unix-socket peer
+only with `trust_unix_socket`) that address the server by a loopback name
+(`Host: localhost`, `127.0.0.1`, `[::1]`, any port; this blocks DNS rebinding) are served,
+and a warning is logged at startup. **While `access` is not set** (code,
+`app.config["REDLINE"]`, `redline.toml`, `REDLINE_ACCESS`), that default applies only when
+`app.debug` is on (`flask --debug run`, `app.run(debug=True)`); otherwise every Redline URL
+answers `404` and an error is logged at startup. Set `settings={"access": "local"}` on a
+development machine or `"token"` on a server. Refusals are
 JSON: `{"error": {"code": "forbidden", "message": "..."}}`.
 
 **Your own check.** `permission` is any `callable(request) -> bool`, called with Flask's

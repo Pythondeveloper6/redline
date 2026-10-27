@@ -21,7 +21,7 @@ from redline_core.load.control import run_hooks
 from redline_core.storage import SQLiteStore, Store
 
 from ._middleware import RedlineMiddleware
-from ._security import redline_guard
+from ._security import redline_guard, refuse_false, scope_info
 from ._serialize import instrument_serialization
 from ._sqlalchemy import (
     EngineLike,
@@ -156,10 +156,11 @@ def install(
         FastAPI dependencies protecting the UI and API, e.g.
         ``[Depends(require_admin)]``; giving them implies ``access="framework"`` unless
         the ``access`` setting is set explicitly. When omitted, the ``access`` setting
-        decides (default ``local``: loopback clients addressing
-        ``localhost``/``127.0.0.1``/``[::1]``); ``[]`` deliberately leaves it open.
-        ``HTTPException`` raised by these dependencies is answered in the API's error
-        shape.
+        decides. ``[]`` is the same as omitting it. Refuse by raising ``HTTPException``
+        (answered in the API's error shape); a dependency that *returns* ``False`` is
+        refused with 403 too. When ``access`` is not set at all, Redline answers 404
+        unless ``app.debug`` is on (then ``local``: loopback clients addressing
+        ``localhost``/``127.0.0.1``/``[::1]``).
     ``models``
         Declarative ``Base``/``registry`` (or a list) for fix suggestions; by default every
         registry SQLAlchemy knows about.
@@ -168,7 +169,9 @@ def install(
     """
     if getattr(app.state, "redline", None) is not None:
         raise RuntimeError("Redline is already installed on this app.")
-    resolved = resolve_settings(settings, native_hook=dependencies is not None)
+    # An empty list is no hook at all: the normal default rules apply, not "framework"
+    # with nothing to check.
+    resolved = resolve_settings(settings, native_hook=bool(dependencies))
     cfg = resolved.settings
     prefix = prefix if prefix is not None else (cfg.mount_path or "/_redline")
     prefix = "/" + prefix.strip("/")
@@ -177,7 +180,7 @@ def install(
     own = rf"^{re.escape(prefix)}(/|$)"
     if own not in cfg.ignore_paths:
         cfg = cfg.replace(ignore_paths=[*cfg.ignore_paths, own])
-    access = Access(cfg)
+    access = Access(cfg, access_explicit=resolved.access_explicit, debug=lambda: bool(app.debug))
 
     store = store if store is not None else SQLiteStore.from_settings(cfg)
     suggester = SQLAlchemyFixSuggester(models, project_root=cfg.project_root)
@@ -196,15 +199,9 @@ def install(
         redline.add_engine(eng, alias)
 
     deps: list[Any] = [Depends(redline_guard(access, prefix))]
-    if dependencies is not None:
-        deps += [d if isinstance(d, DependsParam) else Depends(d) for d in dependencies]
-    if cfg.access == "local":
-        logger.warning(
-            "Redline is mounted at %s with no auth dependency (access='local'): only "
-            "loopback clients are allowed. Set access='token' or 'basic', or pass "
-            "install(app, dependencies=[...]) before exposing it.",
-            prefix,
-        )
+    if dependencies:
+        deps.append(refuse_false(dependencies))
+    access.log_startup(prefix, "pass install(app, dependencies=[...])")
 
     router = build_router(redline, deps)
     before = len(app.router.routes)
@@ -216,7 +213,11 @@ def install(
 
     if cfg.enabled:  # disabled: no middleware and no SQLAlchemy listeners at all
         app.add_middleware(
-            RedlineMiddleware, recorder=recorder, prefix=prefix, debug=lambda: bool(app.debug)
+            RedlineMiddleware,
+            recorder=recorder,
+            prefix=prefix,
+            debug=lambda: bool(app.debug),
+            force_ok=lambda scope: access.may_force(scope_info(scope), debug=bool(app.debug)),
         )
         instrument_serialization()
 

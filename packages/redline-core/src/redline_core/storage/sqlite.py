@@ -30,6 +30,7 @@ tables backfilled from its traces) the first time it is opened.
 from __future__ import annotations
 
 import builtins
+import dataclasses
 import json
 import logging
 import os
@@ -65,6 +66,7 @@ from .base import (
     percentile,
 )
 from .derive import HOUR, Derived, derive, fingerprint_key
+from .private import ensure_private_dir, precreate, tighten
 
 __all__ = ["SQLiteStore"]
 
@@ -234,6 +236,9 @@ CREATE TABLE IF NOT EXISTS run_steps (
 """
 
 SCHEMA_VERSION = 3
+#: ``X-Redline-Run`` tags are kept for runs that ended at most this long ago (in-flight
+#: requests of the last step).
+_RUN_TAG_GRACE_S = 60.0
 DEAD_RUN_MESSAGE = "the load process exited unexpectedly"
 #: Tables holding one or more rows per trace, deleted with it.
 _TRACE_TABLES = ("profiles", "trace_tags", "issues", "trace_sql", "trace_ext", "trace_cache")
@@ -309,9 +314,12 @@ class SQLiteStore:
         self.written = 0
         self._since_prune = 0
         self._closed = False
+        self._runs_cache: tuple[float, set[str]] | None = None
         if path != ":memory:" and not path.startswith("file:"):
-            directory = os.path.dirname(os.path.abspath(path))
-            os.makedirs(directory, exist_ok=True)
+            # 0700 + a ".gitignore" of "*" when Redline creates the directory; the
+            # database (and so its -wal/-shm files) is created 0600
+            ensure_private_dir(os.path.dirname(os.path.abspath(path)))
+            precreate(path)
         self._lock = threading.RLock()
         self._start_lock = threading.Lock()
         self._conn = self._connect()
@@ -330,6 +338,8 @@ class SQLiteStore:
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.executescript(_SCHEMA)
         _migrate(conn)
+        if self.path != ":memory:" and not self.path.startswith("file:"):
+            tighten(self.path, f"{self.path}-wal", f"{self.path}-shm")  # older stores
         return conn
 
     def _reset_after_fork(self) -> None:
@@ -446,7 +456,41 @@ class SQLiteStore:
             if stop:
                 return
 
+    def _known_runs(self) -> set[str]:
+        """Ids of load runs that are running or ended less than a minute ago (re-read at
+        most once a second)."""
+        now = time.monotonic()
+        cached = self._runs_cache
+        if cached is not None and now - cached[0] < 1.0:
+            return cached[1]
+        try:
+            rows = self._query(
+                "SELECT id FROM runs WHERE status = 'running' OR finished_at >= ?",
+                (time.time() - _RUN_TAG_GRACE_S,),
+            )
+            ids = {r["id"] for r in rows}
+        except sqlite3.Error:  # pragma: no cover - e.g. a store being closed
+            ids = set()
+        self._runs_cache = (now, ids)
+        return ids
+
+    def _check_run_tags(self, traces: list[Trace]) -> list[Trace]:
+        """Drop ``run_id``/``step`` tags (from ``X-Redline-Run``, which any client can send)
+        unless the run exists in this store and is running (or just ended): a made-up
+        header cannot attach traffic to a load run, or invent one."""
+        if not any("run_id" in t.tags for t in traces):
+            return traces
+        known = self._known_runs()
+        out = []
+        for t in traces:
+            if "run_id" in t.tags and t.tags["run_id"] not in known:
+                tags = {k: v for k, v in t.tags.items() if k not in ("run_id", "step")}
+                t = dataclasses.replace(t, tags=tags)
+            out.append(t)
+        return out
+
     def _write(self, traces: list[Trace]) -> None:
+        traces = self._check_run_tags(traces)
         rows: builtins.list[tuple[Any, ...]] = []
         tags: builtins.list[tuple[str, str, str]] = []
         issues: builtins.list[tuple[Any, ...]] = []

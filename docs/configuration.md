@@ -31,11 +31,16 @@ sampling. The `preset` itself is read from the highest layer that sets it (frame
 env, then file, then adapter) and is `dev` if none does. The `features` table is merged key
 by key across layers rather than replaced.
 
-A **native access hook** (Django's staff check or `PERMISSION`, FastAPI `dependencies=`,
-Flask `permission=`, Litestar `guards=`) sets `access = "framework"` at the adapter layer,
-so any file, env or framework value for `access` wins, but a preset does not: Django with
-the `production` preset keeps its staff check. See
-[Access control](access-control.md#framework).
+A **native access hook** (Django's superuser check or `PERMISSION`, a non-empty FastAPI
+`dependencies=` or Litestar `guards=` list, a Flask `permission=`) sets
+`access = "framework"` at the adapter layer, so any file, env or framework value for
+`access` wins, but a preset does not: Django with the `production` preset keeps its
+permission check. See [Access control](access-control.md#framework).
+
+When **nothing sets `access`** (FastAPI, Flask, Litestar), the `local` default is served
+only while the framework is in debug mode; otherwise Redline answers `404` and logs an
+error at startup. Set `access` in any layer (file, `REDLINE_ACCESS`, code) to choose. See
+[Access control](access-control.md#policies).
 
 !!! tip "See what is in effect"
 
@@ -61,12 +66,13 @@ Presets are named bundles of defaults for the three situations most people are i
 | Request and response bodies | captured | captured | **not** captured |
 | `capture_locals` | on | **off** | **off** |
 | `log_level` | `INFO` | `INFO` | `WARNING` |
-| `access` | `local` (Django: staff) | `token` | `token`, **required** |
+| `access` | `local` (Django: superusers; others: debug mode only until set) | `token` | `token`, **required** |
 | `read_only` | no | no | **yes** |
 | `badge` | `auto` (on in debug) | `auto` | **off** |
 | `server_timing` | `auto` (on in debug) | `auto` | **off** |
 | `load_from_ui` | off | off | off |
 | `explain_analyze` | off | off | off |
+| `profile` | `opt_in` | `opt_in` | **off** |
 
 Outside `dev` the token must be at least 24 characters, or Redline refuses to start with a
 message that includes a one-line way to generate one.

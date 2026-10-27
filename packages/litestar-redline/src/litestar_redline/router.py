@@ -16,7 +16,7 @@ from litestar.exceptions import HTTPException
 from litestar.response import Redirect, Stream
 
 from redline_core import stream, ui
-from redline_core.api import RawResponse
+from redline_core.api import RawResponse, own_base_url
 from redline_core.storage import FilterError
 
 from ._security import RedlineHTTPError, request_info
@@ -94,11 +94,11 @@ def _params(request: Request[Any, Any, Any]) -> dict[str, Any]:
     return params
 
 
-def base_url(request: Request[Any, Any, Any]) -> str:
-    """The application's own root URL: ``scheme://host[:port]`` + ``root_path``, no
-    trailing slash (the only target ``POST api/runs`` can load)."""
-    url = request.url
-    return f"{url.scheme}://{url.netloc}{request.scope.get('root_path', '')}".rstrip("/")
+def base_url(request: Request[Any, Any, Any]) -> str | None:
+    """The application's own root URL from the server's listening port (``scope["server"]``,
+    never the ``Host`` header) + ``root_path``: the only target ``POST api/runs`` can load."""
+    scope = request.scope
+    return own_base_url(scope.get("scheme"), scope.get("server"), scope.get("root_path", ""))
 
 
 def build_router(plugin: Any, path: str, guards: Sequence[Any]) -> Router:

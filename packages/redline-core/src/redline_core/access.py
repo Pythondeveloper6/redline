@@ -94,6 +94,7 @@ _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 _FORWARD_HEADERS = ("x-forwarded-for", "x-real-ip", "forwarded")
 _MAX_LOGIN_BODY = 4096
 _OPEN_WARN_EVERY_S = 60.0
+_MAX_REVOKED = 10_000
 
 _ID = r"[A-Za-z0-9_-]{1,64}"
 _PROFILE = re.compile(rf"^api/traces/{_ID}/profile$")
@@ -228,10 +229,15 @@ def _in(addr: _Addr | None, nets: tuple[_Net, ...]) -> bool:
     return addr is not None and any(addr.version == n.version and addr in n for n in nets)
 
 
-def is_loopback(client: str | None) -> bool:
-    """Whether a client address is loopback (``None`` – a unix socket – counts)."""
+def is_loopback(client: str | None, *, unix_socket: bool = False) -> bool:
+    """Whether a client address is loopback.
+
+    ``None``/``""`` – a unix-socket peer – counts only with ``unix_socket=True`` (the
+    ``trust_unix_socket`` setting): a reverse proxy on this machine talking to the app over
+    a unix socket would otherwise make every visitor local.
+    """
     if client is None or client == "":
-        return True
+        return unix_socket
     if client == "localhost":
         return True
     addr = _parse_ip(client)
@@ -488,6 +494,8 @@ class Access:
         framework_ok: Callable[[], Any] | None = None,
         environ: Mapping[str, str] | None = None,
         clock: Callable[[], float] = time.time,
+        access_explicit: bool = True,
+        debug: Callable[[], Any] | None = None,
     ) -> None:
         environ = os.environ if environ is None else environ
         self.settings = settings
@@ -512,6 +520,15 @@ class Access:
         self._lock = threading.Lock()
         self._last_open_warning = 0.0
         self._notes: set[str] = set()
+        #: ``access`` was set explicitly (file, env or framework layer). When it was not and
+        #: the policy is ``local``, Redline only answers in framework debug mode (H3: a
+        #: same-host reverse proxy that adds no forwarding headers makes everyone local).
+        self.access_explicit = access_explicit
+        #: The framework's debug flag, read on each Redline request (``app.debug``…).
+        self.debug: Callable[[], Any] = debug or (lambda: False)
+        self._startup_logged = False
+        #: Logged-out session MACs → their expiry (per process, see :meth:`logout`).
+        self._revoked: dict[str, float] = {}
         if self.policy == "token":
             self._token = _read_token(settings)
             if self._token is None:  # pragma: no cover - Settings validates it
@@ -542,6 +559,46 @@ class Access:
     def login_kind(self) -> str | None:
         """``"token"`` / ``"basic"`` when the UI can log in, else ``None``."""
         return self.policy if self.policy in ("token", "basic") else None
+
+    @property
+    def implicit_local(self) -> bool:
+        """``local`` only because nothing set ``access``: served in debug mode only."""
+        return self.policy == "local" and not self.access_explicit
+
+    def locked(self) -> bool:
+        """Whether every Redline URL answers 404 because ``access`` was never set and the
+        framework is not in debug mode (see :attr:`implicit_local`)."""
+        if not self.implicit_local:
+            return False
+        try:
+            return not self.debug()
+        except Exception:  # pragma: no cover - a broken debug flag counts as "not debug"
+            return True
+
+    def log_startup(self, mount: str, hook: str = "") -> None:
+        """Log once how the gate is set up: an error when Redline is locked (``access`` not
+        set and no debug mode), a warning for ``access='local'``."""
+        if self._startup_logged:
+            return
+        self._startup_logged = True
+        if self.locked():
+            logger.error(
+                "Redline at %s answers 404 to everyone: the 'access' setting is not set and "
+                "the application is not in debug mode. Set access explicitly to enable the "
+                "UI – access='token' (with a token) or 'basic' to reach it on a server, or "
+                "access='local' to accept that a reverse proxy on this machine (one that "
+                "adds no X-Forwarded-For) would make every visitor local. "
+                "In debug mode (app.debug) the 'local' default applies.",
+                mount,
+            )
+        elif self.policy == "local":
+            logger.warning(
+                "Redline is mounted at %s with access='local': only loopback clients "
+                "addressing localhost are allowed. Set access='token' or 'basic'%s before "
+                "exposing it.",
+                mount,
+                f", or {hook}," if hook else "",
+            )
 
     def runtime_warnings(self) -> list[str]:
         """Things noticed while serving requests (e.g. an untrusted proxy in front)."""
@@ -600,9 +657,11 @@ class Access:
                     "Redline refused a request relayed by a proxy (access='local'): set "
                     "trusted_proxies, and use access='token' or 'basic' to expose it.",
                 )
-            local = (client.addr.is_loopback if client.addr else is_loopback(client.ip)) or _in(
-                client.addr, self._allowed
-            )
+            if client.addr is not None:
+                local = client.addr.is_loopback
+            else:
+                local = is_loopback(client.ip, unix_socket=self.settings.trust_unix_socket)
+            local = local or _in(client.addr, self._allowed)
             if not local:
                 return _deny(
                     403,
@@ -634,7 +693,7 @@ class Access:
         ``HTTPException``) propagate to the adapter.
         """
         s = self.settings
-        if not s.ui_enabled:
+        if not s.ui_enabled or self.locked():
             return _deny(404, "not_found", "Not found.")
         client = self.client(info)
         decision = self._decide(info, client, framework_ok)
@@ -691,6 +750,37 @@ class Access:
         if refusal := route_policy(info.method, path, s):
             return refusal
         return Decision(True, principal=principal)
+
+    def may_force(self, info: RequestInfo, *, debug: bool = False) -> bool:
+        """May this request force Redline's capture (``X-Redline-Profile: 1`` /
+        ``?_redline=profile``)?
+
+        Yes in framework debug mode; otherwise only when the request itself would be let
+        into Redline's API: a valid login cookie or ``Authorization`` header (``token`` /
+        ``basic``, failures count towards the rate limit), a loopback client (``local``),
+        ``access_check`` (``custom``) or ``open`` with ``REDLINE_ALLOW_OPEN=1``.
+        ``framework`` hooks cannot run outside the framework's own routing, so with that
+        policy only debug mode forces. Adapters call it only when a flag is present: the
+        normal request path never pays for it.
+        """
+        if debug:
+            return True
+        if not self.settings.ui_enabled or self.locked():
+            return False
+        probe = RequestInfo(
+            method="GET",
+            path="api/meta",
+            client_ip=info.client_ip,
+            headers=info.headers,
+            cookies=info.cookies,
+            host=info.host,
+            scheme=info.scheme,
+            mount=info.mount,
+        )
+        try:
+            return self._decide(probe, self.client(probe), lambda: False).allowed
+        except Exception:  # pragma: no cover - never break the application request
+            return False
 
     # -- credentials -----------------------------------------------------------
     def _login_required(self, info: RequestInfo, message: str | None = None) -> Decision:
@@ -824,7 +914,26 @@ class Access:
         now = self.clock()
         if expiry <= now or expiry > now + self.settings.session_ttl_s + 60:
             return None
+        if self._revoked and parts[3] in self._revoked:
+            return None
         return subject
+
+    def revoke_session(self, value: str) -> bool:
+        """Refuse a valid cookie value from now on, until it would expire anyway (in this
+        process only). Returns whether it was valid."""
+        if self.verify_session(value) is None:
+            return False
+        parts = value.split(".")
+        now = self.clock()
+        with self._lock:
+            if len(self._revoked) >= _MAX_REVOKED:
+                for mac, expiry in list(self._revoked.items()):
+                    if expiry <= now:
+                        del self._revoked[mac]
+                while len(self._revoked) >= _MAX_REVOKED:  # still full: forget the oldest
+                    del self._revoked[min(self._revoked, key=self._revoked.__getitem__)]
+            self._revoked[parts[3]] = float(parts[1])
+        return True
 
     def _session(self, info: RequestInfo) -> str | None:
         raw = info.cookies.get(SESSION_COOKIE)
@@ -841,7 +950,8 @@ class Access:
         cookie = (
             f"{SESSION_COOKIE}={value}; Path={path}; Max-Age={max_age}; HttpOnly; SameSite=Strict"
         )
-        if client.scheme == "https":
+        secure = self.settings.cookie_secure
+        if secure is True or (secure == "auto" and client.scheme == "https"):
             cookie += "; Secure"
         return cookie
 
@@ -903,6 +1013,16 @@ class Access:
         )
 
     def logout(self, info: RequestInfo) -> Decision:
+        """Clear the cookie and revoke the session it carried.
+
+        Revocation is kept in memory by this process until the cookie would have expired:
+        with several worker processes another worker still accepts the cookie (until it
+        expires, or ``secret_key``/the token/the password is rotated).
+        """
+        raw = info.cookies.get(SESSION_COOKIE)
+        if raw:
+            for value in raw.split("\x00"):
+                self.revoke_session(value)
         client = self.client(info)
         return Decision(
             True,

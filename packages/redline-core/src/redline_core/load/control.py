@@ -25,6 +25,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from ..storage.private import ensure_private_dir, open_private
 from .scenario import load_scenario, validate_base_url
 
 __all__ = ["StopFile", "launch_background", "run_hooks", "runs_dir", "stop_run"]
@@ -50,8 +51,8 @@ class StopFile:
         return self.path.exists()
 
     def set(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.touch()
+        ensure_private_dir(self.path.parent, gitignore=False)
+        os.close(open_private(self.path))
 
     def clear(self) -> None:
         try:
@@ -119,8 +120,7 @@ def launch_background(
     _check_ui_limits(scenario)
     run_id = run_id or uuid.uuid4().hex
     store = os.fspath(store_path or DEFAULT_STORE)
-    rdir = runs_dir(store)
-    rdir.mkdir(parents=True, exist_ok=True)
+    rdir = ensure_private_dir(runs_dir(store), gitignore=False)
     scenario_path = rdir / f"{_safe_id(run_id)}.scenario.json"
     _write_private(scenario_path, json.dumps(data, indent=2))
     cmd = [
@@ -137,7 +137,7 @@ def launch_background(
     ]
     if workers:
         cmd += ["--workers", str(workers)]
-    log = open(rdir / f"{run_id}.log", "ab")
+    log = os.fdopen(open_private(rdir / f"{run_id}.log", "ab"), "ab")
     try:
         kwargs: dict[str, Any] = {}
         if os.name == "nt":  # pragma: no cover
@@ -149,8 +149,14 @@ def launch_background(
         )
     finally:
         log.close()
-    (rdir / f"{run_id}.pid").write_text(str(proc.pid), encoding="ascii")
+    _write_small(rdir / f"{run_id}.pid", str(proc.pid))
     return run_id
+
+
+def _write_small(path: Path, text: str) -> None:
+    """Replace ``path``'s contents with ``text`` (mode 0600)."""
+    with os.fdopen(open_private(path, "wb"), "wb") as fh:
+        fh.write(text.encode("ascii"))
 
 
 def _write_private(path: Path, text: str) -> None:
@@ -226,8 +232,8 @@ def stop_run(run_id: str, store_path: str | os.PathLike[str] | None = None) -> b
 
 def write_pid(run_id: str, store_path: str | os.PathLike[str] | None) -> Path:
     path = runs_dir(store_path) / f"{_safe_id(run_id)}.pid"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(str(os.getpid()), encoding="ascii")
+    ensure_private_dir(path.parent, gitignore=False)
+    _write_small(path, str(os.getpid()))
     return path
 
 
