@@ -75,7 +75,7 @@ async function raw(method: string, url: string, body?: unknown): Promise<{ statu
   return { status: res.status, json: await res.json() }
 }
 
-async function call<T>(method: string, url: string, body?: unknown): Promise<T> {
+export async function call<T>(method: string, url: string, body?: unknown): Promise<T> {
   const { status, json } = await raw(method, url, body)
   if (status >= 400) {
     const e = json?.error
@@ -89,7 +89,7 @@ async function call<T>(method: string, url: string, body?: unknown): Promise<T> 
 
 const enc = encodeURIComponent
 
-const qs = (o: Record<string, string | number | undefined | null>) => {
+export const qs = (o: Record<string, string | number | undefined | null>) => {
   const p = new URLSearchParams()
   for (const [k, v] of Object.entries(o)) if (v !== undefined && v !== null && v !== '') p.set(k, String(v))
   const s = p.toString()
