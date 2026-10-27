@@ -60,6 +60,7 @@ Changelog = "https://github.com/Pythondeveloper6/redline/blob/main/CHANGELOG.md"
 dev = [
     "pytest>=8.3",
     "pytest-django>=4.9",
+    "djangorestframework>=3.15",
     "pytest-asyncio>=0.24",
     "ruff>=0.8",
     "pyinstrument>=5.0",

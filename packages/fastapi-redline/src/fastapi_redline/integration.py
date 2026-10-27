@@ -19,6 +19,7 @@ from redline_core.storage import SQLiteStore, Store
 
 from ._middleware import RedlineMiddleware
 from ._security import local_only
+from ._serialize import instrument_serialization
 from ._sqlalchemy import (
     EngineLike,
     alias_for,
@@ -152,6 +153,7 @@ def install(
 
     if cfg.enabled:  # disabled: no middleware and no SQLAlchemy listeners at all
         app.add_middleware(RedlineMiddleware, recorder=recorder)
+        instrument_serialization()
 
     original = app.router.lifespan_context
 

@@ -297,6 +297,13 @@ Span `data` for the new kinds and new keys:
 | blocking | `reason` ("loop_lag" \| "sync_call"), `call` (e.g. "time.sleep", "requests.get", "sync ORM"), `lag_ms` |
 | pool_wait | `db_alias`, `pool_size`, `checked_out` |
 
+Notes (sql data): `has_limit` is computed in core from the SQL text (top-level `LIMIT`, `FETCH FIRST|NEXT`,
+`TOP`, `ROWNUM`; a subquery's limit does not count). `rows` for SELECTs is `cursor.rowcount` when the driver has it,
+else the number of rows the ORM/driver has fetched so far (adapters update `span.data["rows"]` as rows are fetched).
+`wide_columns` is not on the hot path: the adapter's suggester fills `Issue.extra["wide_columns"]` (Django: field
+names; SQLAlchemy: attribute names). `inefficient_count` issues carry `extra` = `pattern` (`len|bool|truthy|count_cmp`),
+`expr`, `old`, `new`, `fix_line`.
+
 ## 9. Detectors (`redline_core.detect`, new modules in `redline_core.detectors`)
 
 `redline_core.detectors/<name>.py` each exposes `def detect(trace: Trace, settings: Settings) -> list[Issue]`.
