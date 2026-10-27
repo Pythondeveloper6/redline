@@ -1,16 +1,18 @@
 import { useId } from 'react'
 import { Link } from 'react-router-dom'
 import { useFeatures } from '../lib/meta'
-import { blockedReason, boxStats, fmtMs, gitShort, perfStyle, responseStyle, summaryCounts } from '../lib/check'
+import { blockedReason, boxStats, fmtMs, gitShort, PERF_NOT_JUDGED, perfStyle, responseStyle, summaryCounts } from '../lib/check'
 import type { CheckGit, CheckRunKind, CheckSummary, JsonDiffEntry, PerfStats } from '../types'
 import { DiffView, Pill } from './ui'
 
 /** Perf verdict badge: glyph + text + colour. */
 export function PerfBadge({ v, reason }: { v: string | null | undefined; reason?: string | null }) {
   const s = perfStyle(v)
+  const notJudged = v === 'n/a' && reason === 'broken'
   return (
-    <Pill tone={s.tone} title={s.help + (reason ? ` (reason: ${reason})` : '')}>
+    <Pill tone={s.tone} title={notJudged ? PERF_NOT_JUDGED : s.help + (reason ? ` (reason: ${reason})` : '')}>
       <span aria-hidden>{s.glyph}</span>{s.label}{v === 'slower' && reason === 'queries' ? <span className="font-normal opacity-80">(queries)</span> : null}
+      {notJudged ? <span className="font-normal opacity-80">(not judged: response broken)</span> : null}
     </Pill>
   )
 }
@@ -30,6 +32,7 @@ export function SummaryBadges({ summary }: { summary: CheckSummary | null | unde
   const c = summaryCounts(summary)
   const bits: { n: number; node: React.ReactNode }[] = [
     { n: c.broken, node: <Pill tone="bad"><span aria-hidden>✕</span>{c.broken} broken</Pill> },
+    { n: c.missing, node: <Pill tone="bad"><span aria-hidden>?</span>{c.missing} missing</Pill> },
     { n: c.changed, node: <Pill tone="warn"><span aria-hidden>Δ</span>{c.changed} changed</Pill> },
     { n: c.slower, node: <Pill tone="bad"><span aria-hidden>↑</span>{c.slower} slower</Pill> },
     { n: c.faster, node: <Pill tone="ok"><span aria-hidden>↓</span>{c.faster} faster</Pill> },

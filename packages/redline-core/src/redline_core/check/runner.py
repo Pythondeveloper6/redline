@@ -34,7 +34,7 @@ from dataclasses import dataclass, field
 from time import perf_counter
 from typing import Any, Literal, Protocol, Union, runtime_checkable
 
-from .baseline import Baseline, git_info
+from .baseline import Baseline, BaselineError, git_info
 from .diff import capture, detect_volatile
 from .report import Report, build_report, compare_request
 from .stats import summarize
@@ -184,6 +184,14 @@ def run_suite(
         raise ValueError(f"kind must be 'baseline' or 'compare' (got {kind!r})")
     if kind == "compare" and baseline is None:
         raise ValueError("a compare run needs a baseline")
+    if baseline is not None and kind == "compare" and suite.requests:
+        known = {b.get("name") for b in baseline.requests}
+        if not any(req.name in known for req in suite.requests):
+            who = baseline.label or baseline.file or baseline.id
+            raise BaselineError(
+                f"baseline {who} has none of this suite's requests "
+                "— was it recorded from a different suite?"
+            )
     try:
         import httpx
     except ImportError:

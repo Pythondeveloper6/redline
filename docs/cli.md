@@ -75,14 +75,16 @@ redline check show    REPORT.json       print a saved report again
 | `--json OUT` | compare, run | Write the full report as JSON |
 | `--markdown OUT` | compare, run | Write a Markdown PR comment |
 | `--junit OUT` | compare, run | Write JUnit XML, one test case per request |
-| `--fail-on LIST` | compare, run, show | Verdicts that make the exit code `1`: any of `slower`, `changed`, `broken`, `noisy`, `faster`, or `none`. Default `slower,changed,broken` |
+| `--fail-on LIST` | compare, run, show | Verdicts that make the exit code `1`: any of `slower`, `changed`, `broken`, `missing`, `noisy`, `faster`, or `none`. Default `slower,changed,broken,missing` |
 | `--slower-pct X`, `--slower-ms Y` | compare, run | Override `thresholds.slower_pct` and `thresholds.slower_ms` for this run |
 | `--no-color` | compare, run, show | No ANSI colours |
 
 `redline check init` takes `--from-traces` (required), `--store PATH`, `--route PATTERN`
 (repeatable `fnmatch` pattern on the route), `--limit N` (default `20`), `--base-url URL`,
 `-o`/`--out OUT` (default `check.toml`; `.json` writes JSON; `-` writes to stdout) and
-`--force`. It writes one request per read-only route Redline has seen, using the most recent
+`--force`. It writes `base_url` only when `--base-url` is given or the traces show a single
+host; otherwise it leaves a commented `# base_url = "http://127.0.0.1:8000"` line to fill in.
+It writes one request per read-only route Redline has seen, using the most recent
 concrete path; header values are never copied, and an `Authorization` or `Cookie` header gets
 a `${env:REDLINE_CHECK_AUTHORIZATION}` or `${env:REDLINE_CHECK_COOKIE}` placeholder.
 

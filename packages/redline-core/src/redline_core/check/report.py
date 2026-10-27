@@ -13,11 +13,15 @@ Verdict rules, per request:
   otherwise ``same``. With server-side metrics on both sides, a median query count above
   the baseline's + ``max_query_increase`` makes it ``slower`` (reason ``queries``) whatever
   the timing said. ``n/a`` when off, missing from the baseline, or either side has ≥ 50 %
-  failed calls.
+  failed calls. A request whose response is ``broken`` is never judged: perf is ``n/a``
+  with reason ``broken`` (the numbers stay visible), and fixed issues, gone SQL and query
+  decreases are listed under ``server.not_judged`` instead of counting as wins; it is left
+  out of the overall speed and the query totals.
 * **response**: ``broken`` (≥ 50 % failed calls – also when ``response = false``; the
   status class went from 2xx/3xx to 4xx/5xx; ``expect_status`` not met), ``changed``
   (another status change, a content-type/header change, or a body difference outside the
-  ignored and volatile paths), ``same``, or ``n/a``.
+  ignored and volatile paths), ``missing`` (the baseline has no such request), ``same``, or
+  ``n/a``.
 """
 
 from __future__ import annotations
@@ -51,11 +55,13 @@ FORMAT = "redline-check-report"
 VERSION = 1
 P_VALUE = 0.01
 NOISY_CV = 0.5
-DEFAULT_FAIL_ON = ("slower", "changed", "broken")
-#: Values ``--fail-on`` accepts (perf: slower/noisy/faster, response: changed/broken).
-FAIL_ON_CHOICES = ("slower", "changed", "broken", "noisy", "faster")
+DEFAULT_FAIL_ON = ("slower", "changed", "broken", "missing")
+#: Values ``--fail-on`` accepts (perf: slower/noisy/faster, response: changed/broken/missing).
+FAIL_ON_CHOICES = ("slower", "changed", "broken", "missing", "noisy", "faster")
 PERF_VERDICTS = ("faster", "slower", "same", "noisy", "n/a")
-RESPONSE_VERDICTS = ("same", "changed", "broken", "n/a")
+RESPONSE_VERDICTS = ("same", "changed", "broken", "missing", "n/a")
+#: Why a broken request has no perf verdict (terminal, Markdown and UI wording).
+PERF_NOT_JUDGED = "perf not judged: response broken"
 TOP_N = 5
 
 
@@ -238,6 +244,7 @@ def _response(
         "ignored": [],
     }
     if before is None:
+        out["verdict"] = "missing"
         out["reason"] = "not in the baseline"
         return out
     if after.get("broken"):
@@ -293,6 +300,11 @@ def compare_request(
         "volatile": after.get("volatile") or [],
         "volatile_headers": after.get("volatile_headers") or [],
     }
+    perf = _perf(req, before, after, thresholds)
+    server = _server(before, after)
+    response = _response(req, before, after, run_volatile)
+    if before is not None and response["verdict"] == "broken":
+        _not_judged(req, perf, server)
     return {
         "idx": after.get("idx"),
         "name": req.name,
@@ -300,10 +312,27 @@ def compare_request(
         "path": req.path,
         "calls": [before.get("calls") if before else None, after.get("calls")],
         "failed": [before.get("failed") if before else None, after.get("failed")],
-        "perf": _perf(req, before, after, thresholds),
-        "server": _server(before, after),
-        "response": _response(req, before, after, run_volatile),
+        "perf": perf,
+        "server": server,
+        "response": response,
     }
+
+
+def _not_judged(req: CheckRequest, perf: dict[str, Any], server: dict[str, Any]) -> None:
+    """A broken response makes the timing meaningless (an error page is fast, an error
+    handler skips the queries): no perf verdict, and no wins."""
+    if req.perf:
+        perf["verdict"] = "n/a"
+        perf["reason"] = "broken"
+        perf["note"] = PERF_NOT_JUDGED
+    moved = {
+        "fixed_issues": server["fixed_issues"],
+        "gone_sql": server["gone_sql"],
+        "queries_change": server["queries_change"],
+    }
+    server["fixed_issues"], server["gone_sql"], server["queries_change"] = [], [], None
+    server["not_judged"] = moved
+    server["note"] = PERF_NOT_JUDGED
 
 
 # ============================================================================ summary
@@ -327,7 +356,9 @@ def _summary(entries: list[dict[str, Any]], fail_on: Sequence[str]) -> dict[str,
     ratios: list[float] = []
     for e in entries:
         p = e["perf"]
-        if p["verdict"] == "n/a" or not p["before"] or not p["after"]:
+        if p["verdict"] == "n/a" or p.get("reason") == "broken":
+            continue
+        if not p["before"] or not p["after"]:
             continue
         if p["before"]["failed"] or p["after"]["failed"]:
             continue
@@ -338,6 +369,8 @@ def _summary(entries: list[dict[str, Any]], fail_on: Sequence[str]) -> dict[str,
     q_before = q_after = 0.0
     q_n = 0
     for e in entries:
+        if e["perf"].get("reason") == "broken" or e["response"]["verdict"] in ("broken", "missing"):
+            continue
         qb, qa = _queries(e["server"]["before"]), _queries(e["server"]["after"])
         if qb is not None and qa is not None:
             q_before += qb
@@ -374,6 +407,7 @@ def _summary(entries: list[dict[str, Any]], fail_on: Sequence[str]) -> dict[str,
         "slower": perf["slower"],
         "changed": resp["changed"],
         "broken": resp["broken"],
+        "missing": resp["missing"],
         "speed_ratio": None if gm is None else round(gm, 4),
         "speed_change_pct": None if gm is None else round((gm - 1.0) * 100.0, 2),
         "speed_requests": len(ratios),
@@ -400,8 +434,16 @@ def build_report(
     """Assemble a :class:`Report` from :func:`compare_request` entries."""
     summary = _summary(entries, fail_on)
     summary["not_in_baseline"] = [
-        e["name"] for e in entries if e["perf"].get("note") == "not in the baseline"
+        e["name"] for e in entries if e["response"]["verdict"] == "missing"
     ]
+    summary["warnings"] = []
+    if summary["not_in_baseline"]:
+        names = summary["not_in_baseline"]
+        shown = ", ".join(names[:5]) + (f" (+{len(names) - 5})" if len(names) > 5 else "")
+        summary["warnings"].append(
+            f"{len(names)} of {len(entries)} requests are not in the baseline ({shown}): "
+            "re-record it (they count as missing)"
+        )
     summary["not_in_suite"] = list(not_in_suite)
     return Report(
         id=str(run.get("id") or ""),
@@ -424,6 +466,7 @@ _COLORS = {
     "n/a": "2",
     "changed": "33",
     "broken": "1;31",
+    "missing": "1;31",
 }
 
 
@@ -643,6 +686,7 @@ class Report:
         if details:
             lines += self._details()
         lines += ["", self.headline()]
+        lines += [f"warning: {w}" for w in self.summary.get("warnings") or []]
         if not self.summary.get("server_side"):
             lines.append(
                 "server-side metrics: unavailable (pass --store with the app's Redline store, "
@@ -679,6 +723,8 @@ class Report:
             lines: list[str] = []
             if r["verdict"] in ("changed", "broken"):
                 lines += [f"  {x}" for x in _diff_lines(e, 12)]
+            if e["perf"].get("reason") == "broken":
+                lines.append(f"  {PERF_NOT_JUDGED}")
             for issue in srv.get("new_issues") or []:
                 lines.append(f"  new issue: {issue.get('kind')} – {issue.get('title') or ''}")
             for issue in srv.get("fixed_issues") or []:
@@ -725,6 +771,8 @@ class Report:
             qb, qa = _queries(srv.get("before")), _queries(srv.get("after"))
             q = f"{_fmt_q(qb)} → {_fmt_q(qa)}" if qb is not None and qa is not None else "–"
             pv = p["verdict"] + (" (queries)" if p.get("reason") == "queries" else "")
+            if p.get("reason") == "broken":
+                pv = f"n/a – {PERF_NOT_JUDGED}"
             rv = r["verdict"]
             if rv in ("changed", "broken") and r.get("reason"):
                 rv += f" ({r['reason']})"
@@ -735,6 +783,8 @@ class Report:
             body: list[str] = []
             if r["verdict"] == "broken" and r.get("reason"):
                 body.append(f"broken: {r['reason']}")
+            if e["perf"].get("reason") == "broken":
+                body.append(PERF_NOT_JUDGED)
             if r["verdict"] in ("changed", "broken"):
                 body += _diff_lines(e, 60)
             for issue in srv.get("new_issues") or []:
@@ -753,6 +803,8 @@ class Report:
                 "```",
                 "</details>",
             ]
+        for w in s.get("warnings") or []:
+            lines += ["", f"> **Warning:** {_md(w)}"]
         if not s.get("server_side"):
             lines += ["", "_Server-side metrics unavailable (no tagged traces in the store)._"]
         return "\n".join(lines) + "\n"
