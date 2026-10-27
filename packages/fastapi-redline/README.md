@@ -21,9 +21,16 @@ Traces are stored in their own SQLite file (`.redline/redline.db`), never in you
 ## Install
 
 ```bash
-pip install fastapi-redline                 # core + FastAPI/SQLAlchemy adapter
-pip install "fastapi-redline[profile]"      # + pyinstrument for flamegraphs
+pip install \
+  "fastapi-redline @ git+https://github.com/Pythondeveloper6/redline#subdirectory=packages/fastapi-redline" \
+  "redline-core @ git+https://github.com/Pythondeveloper6/redline#subdirectory=packages/redline-core"
 ```
+
+Not on PyPI yet: install from GitHub, naming `redline-core` in the same command (the adapter
+pins it exactly). Docs: <https://pythondeveloper6.github.io/redline/>.
+
+Add the extra to the core requirement for flamegraphs:
+`"redline-core[profile] @ git+https://github.com/Pythondeveloper6/redline#subdirectory=packages/redline-core"`.
 
 Python 3.10+, FastAPI 0.110+, SQLAlchemy 2.x.
 
