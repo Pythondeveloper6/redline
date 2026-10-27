@@ -53,8 +53,23 @@ def _matches(route: str, patterns: Sequence[str]) -> bool:
     return not patterns or any(fnmatch.fnmatchcase(route, p) or route == p for p in patterns)
 
 
-def _sample(store: Any, route: str, method: str) -> tuple[str, dict[str, str]] | None:
-    """``(path?query, {header: placeholder})`` of the most recent clean trace of a route."""
+def _origin(request: Mapping[str, Any]) -> str | None:
+    """``scheme://host`` of a recorded request (its ``Host`` header), or ``None``."""
+    headers = request.get("headers")
+    if not isinstance(headers, Mapping):
+        return None
+    lowered = {str(k).lower(): v for k, v in headers.items()}
+    host = lowered.get("host")
+    if not isinstance(host, str) or not host or not _clean(host) or "/" in host or " " in host:
+        return None
+    proto = lowered.get("x-forwarded-proto")
+    scheme = "https" if isinstance(proto, str) and proto.strip().lower() == "https" else "http"
+    return f"{scheme}://{host}"
+
+
+def _sample(store: Any, route: str, method: str) -> tuple[str, dict[str, str], str | None] | None:
+    """``(path?query, {header: placeholder}, origin)`` of the most recent clean trace of a
+    route."""
     from ..storage import Filters
 
     # Ask for successful responses only: a route whose latest calls all failed (a refactor
@@ -83,7 +98,11 @@ def _sample(store: Any, route: str, method: str) -> tuple[str, dict[str, str]] |
             hit = ENV_HEADERS.get(str(name).lower())
             if hit:
                 headers[hit[0]] = f"${{env:{hit[1]}}}"
-        return (f"{path}?{query}" if query and "?" not in path else path), headers
+        return (
+            (f"{path}?{query}" if query and "?" not in path else path),
+            headers,
+            _origin(request),
+        )
     return None
 
 
@@ -102,6 +121,7 @@ def from_traces(
     requests: list[dict[str, Any]] = []
     stats = sorted(store.endpoints(window_s), key=lambda e: e.count, reverse=True)
     seen: set[str] = set()
+    origins: set[str | None] = set()
     for ep in stats:
         if len(requests) >= limit:
             break
@@ -114,7 +134,8 @@ def from_traces(
         sample = _sample(store, route, method)
         if sample is None:
             continue
-        path, headers = sample
+        path, headers, origin = sample
+        origins.add(origin)
         req_name = f"{method} {route}"
         if req_name in seen:
             continue
@@ -129,12 +150,12 @@ def from_traces(
             + (" for those routes" if routes else "")
             + "; browse the app with Redline installed first"
         )
-    data = {
-        "name": name,
-        "base_url": base_url or DEFAULT_BASE_URL,
-        "repeat": 20,
-        "warmup": 3,
-        "requests": requests,
-    }
+    data: dict[str, Any] = {"name": name}
+    # Never guess the app's address: it is the --base-url, or the one host the traces show.
+    if base_url:
+        data["base_url"] = base_url
+    elif len(origins) == 1 and None not in origins:
+        data["base_url"] = next(iter(origins))
+    data.update(repeat=20, warmup=3, requests=requests)
     Suite.from_dict(data)  # never write a suite we could not run
     return data

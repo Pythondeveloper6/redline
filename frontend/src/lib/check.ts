@@ -18,6 +18,7 @@ export const RESPONSE_VERDICT: Record<ResponseVerdict, VerdictStyle> = {
   same: { label: 'same', glyph: '✓', tone: 'ok', help: 'Response is identical outside ignored fields' },
   changed: { label: 'changed', glyph: 'Δ', tone: 'warn', help: 'Status, content type or body differs' },
   broken: { label: 'broken', glyph: '✕', tone: 'bad', help: 'Now failing (4xx/5xx), unexpected status or too many failed calls' },
+  missing: { label: 'missing', glyph: '?', tone: 'bad', help: 'The baseline has no such request: record it again' },
   'n/a': { label: 'n/a', glyph: '–', tone: 'neutral', help: 'Not compared' },
 }
 export const perfStyle = (v: string | null | undefined): VerdictStyle => PERF_VERDICT[v as PerfVerdict] ?? PERF_VERDICT['n/a']
@@ -26,8 +27,12 @@ export const responseStyle = (v: string | null | undefined): VerdictStyle => RES
 export const perfLabel = (v: string | null | undefined) => { const s = perfStyle(v); return `${s.glyph} ${s.label}` }
 export const responseLabel = (v: string | null | undefined) => { const s = responseStyle(v); return `${s.glyph} ${s.label}` }
 
-/** A request passes when it is neither slower, changed nor broken (the default `--fail-on`). */
-export const requestPasses = (r: ReportRequest) => r.perf.verdict !== 'slower' && r.response.verdict !== 'changed' && r.response.verdict !== 'broken'
+/** A request passes when it is neither slower, changed, broken nor missing from the baseline (the default `--fail-on`). */
+export const requestPasses = (r: ReportRequest) => r.perf.verdict !== 'slower' && r.response.verdict !== 'changed' && r.response.verdict !== 'broken' && r.response.verdict !== 'missing'
+
+/** A broken response makes the timing meaningless: perf is not judged (CONTRACT §19.4). */
+export const PERF_NOT_JUDGED = 'perf not judged: response broken'
+export const perfNotJudged = (r: Pick<ReportRequest, 'perf'>) => r.perf.reason === 'broken'
 
 // ---- numbers --------------------------------------------------------------------------------------
 export function fmtMs(v: number | null | undefined): string {
@@ -58,7 +63,7 @@ export const gitShort = (g: { sha?: string | null; branch?: string | null; dirty
 export interface DerivedSummary {
   total: number
   faster: number; slower: number; same: number; noisy: number; perfNa: number
-  respSame: number; changed: number; broken: number; respNa: number
+  respSame: number; changed: number; broken: number; missing: number; respNa: number
   passed: number
   /** Geometric mean of after/before median ratios as a percent (negative = faster); null when nothing qualifies. */
   speedChangePct: number | null
@@ -71,7 +76,7 @@ export interface DerivedSummary {
 /** Derives the §19.4 summary from the per-request results (the UI never trusts a separate summary object). */
 export function summarize(requests: ReportRequest[]): DerivedSummary {
   const s: DerivedSummary = {
-    total: requests.length, faster: 0, slower: 0, same: 0, noisy: 0, perfNa: 0, respSame: 0, changed: 0, broken: 0, respNa: 0, passed: 0,
+    total: requests.length, faster: 0, slower: 0, same: 0, noisy: 0, perfNa: 0, respSame: 0, changed: 0, broken: 0, missing: 0, respNa: 0, passed: 0,
     speedChangePct: null, speedSamples: 0, queriesBefore: 0, queriesAfter: 0, queriesChange: 0, queriesChangePct: null, queriesSamples: 0, wins: [], regressions: [],
   }
   let logSum = 0
@@ -79,10 +84,12 @@ export function summarize(requests: ReportRequest[]): DerivedSummary {
     const pv = r.perf.verdict
     if (pv === 'faster') s.faster++; else if (pv === 'slower') s.slower++; else if (pv === 'same') s.same++; else if (pv === 'noisy') s.noisy++; else s.perfNa++
     const rv = r.response.verdict
-    if (rv === 'same') s.respSame++; else if (rv === 'changed') s.changed++; else if (rv === 'broken') s.broken++; else s.respNa++
+    if (rv === 'same') s.respSame++; else if (rv === 'changed') s.changed++; else if (rv === 'broken') s.broken++; else if (rv === 'missing') s.missing++; else s.respNa++
     if (requestPasses(r)) s.passed++
     const b = r.perf.before, a = r.perf.after
-    if (pv !== 'n/a' && b && a && b.median > 0 && a.median > 0 && !b.failed && !a.failed) {
+    // A broken response is not judged: it counts in neither the speed mean nor the query totals.
+    const judged = !perfNotJudged(r) && rv !== 'broken'
+    if (judged && pv !== 'n/a' && b && a && b.median > 0 && a.median > 0 && !b.failed && !a.failed) {
       logSum += Math.log(a.median / b.median); s.speedSamples++
       if (r.perf.change_pct != null) {
         // Only significant changes count as wins/regressions (same as the CLI summary).
@@ -91,7 +98,7 @@ export function summarize(requests: ReportRequest[]): DerivedSummary {
       }
     }
     const qb = r.server?.before?.queries_median, qa = r.server?.after?.queries_median
-    if (qb != null && qa != null) { s.queriesBefore += qb; s.queriesAfter += qa; s.queriesSamples++ }
+    if (judged && qb != null && qa != null) { s.queriesBefore += qb; s.queriesAfter += qa; s.queriesSamples++ }
   }
   if (s.speedSamples) s.speedChangePct = (Math.exp(logSum / s.speedSamples) - 1) * 100
   s.queriesChange = s.queriesAfter - s.queriesBefore
@@ -105,14 +112,14 @@ export function summarize(requests: ReportRequest[]): DerivedSummary {
 export function summaryCounts(sm: CheckSummary | null | undefined) {
   const c = { ...(sm ?? {}), ...(sm?.counts ?? {}) } as Record<string, number | undefined>
   const n = (k: string) => (typeof c[k] === 'number' ? (c[k] as number) : 0)
-  return { faster: n('faster'), slower: n('slower'), same: n('same'), noisy: n('noisy'), changed: n('changed'), broken: n('broken'), passed: n('passed') }
+  return { faster: n('faster'), slower: n('slower'), same: n('same'), noisy: n('noisy'), changed: n('changed'), broken: n('broken'), missing: n('missing'), passed: n('passed') }
 }
 
 // ---- sorting --------------------------------------------------------------------------------------
 export type SortKey = 'name' | 'perf' | 'before' | 'after' | 'change' | 'queries' | 'response'
 export type SortDir = 'asc' | 'desc'
 const PERF_RANK: Record<string, number> = { slower: 0, noisy: 1, same: 2, faster: 3, 'n/a': 4 }
-const RESP_RANK: Record<string, number> = { broken: 0, changed: 1, same: 2, 'n/a': 3 }
+const RESP_RANK: Record<string, number> = { broken: 0, missing: 0, changed: 1, same: 2, 'n/a': 3 }
 
 function sortValue(r: ReportRequest, k: SortKey): string | number | null {
   switch (k) {
@@ -300,6 +307,7 @@ export function reportToMarkdown(rep: CheckReport): string {
   if (sm.faster) parts.push(`${sm.faster} faster`)
   if (sm.changed) parts.push(`${sm.changed} changed`)
   if (sm.broken) parts.push(`${sm.broken} broken`)
+  if (sm.missing) parts.push(`${sm.missing} missing from the baseline`)
   if (sm.noisy) parts.push(`${sm.noisy} noisy`)
   if (sm.speedChangePct != null) parts.push(`overall speed ${fmtPct(sm.speedChangePct)}`)
   if (sm.queriesSamples) parts.push(`queries ${sm.queriesBefore} → ${sm.queriesAfter} (${fmtSigned(sm.queriesChange)})`)
@@ -310,7 +318,8 @@ export function reportToMarkdown(rep: CheckReport): string {
   out.push('| Request | Perf | Median before → after | Δ | Queries | Response |', '| --- | --- | --- | ---: | --- | --- |')
   for (const r of rep.requests) {
     const q = r.server?.before && r.server?.after ? `${r.server.before.queries_median} → ${r.server.after.queries_median}` : '-'
-    out.push(`| ${code(cell(`${r.method} ${r.path}`))} | ${perfLabel(r.perf.verdict)} | ${fmtMs(r.perf.before?.median)} → ${fmtMs(r.perf.after?.median)} | ${fmtPct(r.perf.change_pct)} | ${q} | ${responseLabel(r.response.verdict)} |`)
+    const pcell = perfNotJudged(r) ? `${perfLabel(r.perf.verdict)} (${PERF_NOT_JUDGED})` : perfLabel(r.perf.verdict)
+    out.push(`| ${code(cell(`${r.method} ${r.path}`))} | ${pcell} | ${fmtMs(r.perf.before?.median)} → ${fmtMs(r.perf.after?.median)} | ${fmtPct(r.perf.change_pct)} | ${q} | ${responseLabel(r.response.verdict)} |`)
   }
   const detail = rep.requests.filter(r => r.response.diff.length || r.response.text_diff || r.server?.new_issues.length || r.server?.fixed_issues.length || r.server?.new_sql.length)
   for (const r of detail) {
@@ -346,4 +355,43 @@ export function baselineRequestsOf(run: { requests?: BaselineRequest[] | null; r
   if (Array.isArray(run.requests)) return run.requests
   if (Array.isArray(run.results)) return run.results as BaselineRequest[]
   return []
+}
+
+// ---- stopped runs ---------------------------------------------------------------------------------------
+/**
+ * The notice under a stopped run. Partial results are shown (and labelled) or the "no results" message is,
+ * never both: `hasResults` says whether a table is rendered below.
+ */
+export function stoppedNotice(run: { progress?: { done: number; total: number } | null }, hasResults: boolean): string {
+  if (!hasResults) return 'This run was stopped before it finished. No results were kept.'
+  const p = run.progress
+  const label = p && p.total > 0 ? `partial: stopped after ${p.done.toLocaleString('en-US')} of ${p.total.toLocaleString('en-US')} calls` : 'partial: stopped before it finished'
+  return `This run was stopped; the results below are incomplete (${label}).`
+}
+
+// ---- baseline import ------------------------------------------------------------------------------------
+export const MAX_BASELINE_BYTES = 10 * 1024 * 1024
+/** Client-side check of a picked baseline file (the server enforces the same 10 MiB cap). */
+export function baselineFileError(file: { name: string; size: number }): string | null {
+  if (file.size > MAX_BASELINE_BYTES) return `${file.name} is larger than 10 MiB, the most a baseline import accepts.`
+  if (file.size === 0) return `${file.name} is empty.`
+  return null
+}
+/** Parses the text of a baseline file; the server validates the format. */
+export function parseBaselineText(text: string): { ok: true; doc: unknown } | { ok: false; error: string } {
+  try {
+    const doc = JSON.parse(text)
+    if (doc === null || typeof doc !== 'object' || Array.isArray(doc)) return { ok: false, error: 'This is JSON, but not a baseline (expected an object).' }
+    return { ok: true, doc }
+  } catch {
+    return { ok: false, error: 'This file is not valid JSON. Pick a baseline written by `redline check record`.' }
+  }
+}
+/** Explains an import API error by its code (`invalid_baseline`, `payload_too_large`). */
+export function importErrorMessage(code: string | undefined, message: string): string {
+  switch (code) {
+    case 'invalid_baseline': return `Not a usable baseline: ${message}`
+    case 'payload_too_large': return 'The baseline is larger than 10 MiB, the most an import accepts.'
+    default: return message
+  }
 }

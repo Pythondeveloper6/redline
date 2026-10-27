@@ -117,7 +117,8 @@ def test_perf_na():
     na = compare_request(req(), None, entry(STEADY), TH)["perf"]
     assert na["verdict"] == "n/a" and na["reason"] is None and na["note"] == "not in the baseline"
     failing = compare_request(req(), entry(STEADY), entry([1.0], failed=3), TH)["perf"]
-    assert failing["verdict"] == "n/a" and "failed" in failing["note"]
+    assert failing["verdict"] == "n/a" and failing["reason"] == "broken"
+    assert failing["note"] == "perf not judged: response broken"
 
 
 # ----------------------------------------------------------------------- response verdicts
@@ -169,13 +170,13 @@ def test_response_broken():
     off = rv(entry(STEADY), entry([1.0], failed=3, response=None), response=False)
     assert off["verdict"] == "broken"
     assert rv(entry(STEADY), entry(STEADY), response=False)["verdict"] == "n/a"
-    assert rv(None, entry(STEADY))["verdict"] == "n/a"
+    assert rv(None, entry(STEADY))["verdict"] == "missing"
     healed = rv(entry([], failed=4, response=None), entry(STEADY))
     assert healed["verdict"] == "changed"
 
 
 # ----------------------------------------------------------------------- summary
-def make_report(pairs, fail_on=("slower", "changed", "broken"), suite_requests=None):
+def make_report(pairs, fail_on=("slower", "changed", "broken", "missing"), suite_requests=None):
     names = [f"r{i}" for i in range(len(pairs))]
     suite = Suite.from_dict(
         {"name": "s", "requests": suite_requests or [{"name": n, "path": f"/{n}"} for n in names]}
@@ -269,7 +270,7 @@ def test_server_section_items():
 
 # ----------------------------------------------------------------------- fail-on, exit
 def test_parse_fail_on():
-    assert parse_fail_on(None) == ("slower", "changed", "broken")
+    assert parse_fail_on(None) == ("slower", "changed", "broken", "missing")
     assert parse_fail_on("slower, broken,slower") == ("slower", "broken")
     assert parse_fail_on("") == () and parse_fail_on("none") == ()
     assert parse_fail_on(["noisy"]) == ("noisy",)
@@ -402,3 +403,68 @@ def test_type_change_diff_quotes_strings():
         }
     }
     assert _diff_lines(e, 10) == ['~ n: 200 → "200" (type)']
+
+
+# ----------------------------------------------------------------------- broken is not judged
+def _n_plus_one_fix_server():
+    b = {
+        "queries_median": 30,
+        "sample_trace_id": "tb",
+        "sql": {"f1": {"count": 29, "sql": "SELECT item"}},
+        "issues": [{"kind": "n_plus_one", "fingerprint": "f1", "title": "N+1"}],
+    }
+    a = {"queries_median": 1, "sample_trace_id": "ta", "sql": {}, "issues": []}
+    return b, a
+
+
+def test_broken_response_is_not_judged_for_perf():
+    sb, sa = _n_plus_one_fix_server()
+    before = entry(STEADY, response=resp(status=200), server=sb)
+    after = entry(scaled(0.2), response=resp(status=500), server=sa)  # an error page is fast
+    e = compare_request(req(), before, after, TH)
+    assert e["response"]["verdict"] == "broken"
+    p = e["perf"]
+    assert p["verdict"] == "n/a" and p["reason"] == "broken"
+    assert p["note"] == "perf not judged: response broken"
+    assert p["change_pct"] is not None and p["before"] and p["after"]  # numbers stay visible
+    srv = e["server"]
+    assert srv["fixed_issues"] == [] and srv["gone_sql"] == [] and srv["queries_change"] is None
+    assert len(srv["not_judged"]["fixed_issues"]) == 1
+    assert srv["not_judged"]["queries_change"] == -29
+
+
+def test_broken_requests_are_left_out_of_the_summary_totals():
+    sb, sa = _n_plus_one_fix_server()
+    rep = make_report(
+        [
+            (
+                entry(STEADY, server={"queries_median": 4}),
+                entry(scaled(0.5), server={"queries_median": 2}),
+            ),
+            (
+                entry(STEADY, response=resp(status=200), server=sb),
+                entry(scaled(0.1), response=resp(status=500), server=sa),
+            ),
+        ]
+    )
+    s = rep.summary
+    assert s["speed_requests"] == 1 and s["speed_ratio"] == pytest.approx(0.5, abs=1e-3)
+    assert (s["queries_before"], s["queries_after"]) == (4, 2)
+    assert s["perf"]["faster"] == 1 and [w["name"] for w in s["wins"]] == ["r0"]
+    text = rep.to_terminal() + rep.to_markdown()
+    assert text.count("perf not judged: response broken") >= 2
+    assert "fixed issue" not in text
+
+
+# ----------------------------------------------------------------------- missing requests
+def test_missing_requests_fail_by_default_and_warn():
+    rep = make_report([(entry(STEADY), entry(STEADY)), (None, entry(STEADY))])
+    s = rep.summary
+    assert s["missing"] == 1 and s["not_in_baseline"] == ["r1"]
+    assert rep.requests[1]["response"]["verdict"] == "missing"
+    assert rep.exit_code() == 1 and s["failing"] == ["r1"]
+    assert any("1 of 2 requests are not in the baseline" in w for w in s["warnings"])
+    assert "warning: 1 of 2" in rep.to_terminal()
+    assert "Warning" in rep.to_markdown()
+    assert rep.with_fail_on(("slower", "changed", "broken")).exit_code() == 0
+    assert parse_fail_on("missing") == ("missing",)

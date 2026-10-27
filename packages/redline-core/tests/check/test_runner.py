@@ -440,8 +440,10 @@ def test_compare_suite_changes(app, wsgi):
     s2 = make_suite(requests=[{"name": "list", "path": "/orders"}, {"name": "new", "path": "/new"}])
     report = run_suite(s2, base_url=BASE, kind="compare", baseline=b, transport=wsgi, git=GIT)
     new = report.requests[1]
-    assert new["perf"]["verdict"] == "n/a" and new["response"]["verdict"] == "n/a"
+    assert new["perf"]["verdict"] == "n/a" and new["response"]["verdict"] == "missing"
     assert report.summary["not_in_baseline"] == ["new"]
+    assert report.summary["missing"] == 1 and report.summary["warnings"]
+    assert report.exit_code() == 1  # missing fails by default
     assert report.summary["not_in_suite"] == ["one"]
 
 
@@ -450,3 +452,17 @@ def test_bad_arguments():
         run_suite(make_suite(), base_url=BASE, kind="compare")
     with pytest.raises(ValueError, match="kind"):
         run_suite(make_suite(), base_url=BASE, kind="nope")  # type: ignore[arg-type]
+
+
+def test_compare_with_none_of_the_suites_requests_is_an_error(app, wsgi):
+    from redline_core.check import BaselineError
+
+    app.json("/orders", {})
+    app.json("/orders/1", {})
+    app.json("/other", {})
+    b = run_suite(
+        make_suite(), base_url=BASE, kind="baseline", transport=wsgi, git=GIT, label="old"
+    )
+    other = make_suite(requests=[{"name": "elsewhere", "path": "/other"}])
+    with pytest.raises(BaselineError, match="baseline old has none of this suite's requests"):
+        run_suite(other, base_url=BASE, kind="compare", baseline=b, transport=wsgi, git=GIT)

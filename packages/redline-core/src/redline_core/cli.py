@@ -982,6 +982,7 @@ def _run_check(
     store: _CheckStore,
 ) -> Any:
     """``run_suite`` with progress and SIGTERM → Ctrl-C; the result, or an exit code."""
+    from .check.baseline import BaselineError
     from .check.runner import CheckUnreachable, run_suite
     from .check.suite import SuiteError
 
@@ -1006,7 +1007,7 @@ def _run_check(
             on_progress=progress,
             redactor=_project_redactor(),
         )
-    except SuiteError as exc:
+    except (SuiteError, BaselineError) as exc:
         progress.clear()
         err.write(f"redline check: {exc}\n")
         return EXIT_USAGE
@@ -1228,6 +1229,14 @@ def _cmd_check_init(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
         err.write(f"redline check init: {exc}\n")
         return EXIT_USAGE
     text = suite.to_json() if args.out.endswith(".json") else suite.to_toml()
+    if suite.base_url is None and not args.out.endswith(".json"):
+        # never guess the address: leave a commented example to fill in
+        lines = text.split("\n")
+        for i, line in enumerate(lines):
+            if line.startswith("name = "):
+                lines.insert(i + 1, '# base_url = "http://127.0.0.1:8000"')
+                break
+        text = "\n".join(lines)
     if args.out == "-":
         out.write(text)
         return EXIT_OK
@@ -1237,8 +1246,13 @@ def _cmd_check_init(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
     with open(args.out, "w", encoding="utf-8") as fh:
         fh.write(text)
     env = suite.env_names()
+    where = (
+        f"base_url {suite.base_url}"
+        if suite.base_url
+        else "no base_url (set it in the suite or pass --base-url when running)"
+    )
     out.write(
-        f"wrote {args.out}: {len(suite.requests)} read-only requests, base_url {suite.base_url}\n"
+        f"wrote {args.out}: {len(suite.requests)} read-only requests, {where}\n"
         + (f"set {', '.join(env)} in the environment before running it\n" if env else "")
     )
     return EXIT_OK

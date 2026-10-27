@@ -251,3 +251,72 @@ def test_init_from_traces_cli(tmp_path, capsys):
     assert cli.main(["check", "init", "--from-traces", "--store", str(db), "-o", "-"]) == 0
     assert "[[requests]]" in capsys.readouterr().out
     assert cli.main(["check", "init", "--from-traces", "--store", "missing.db"]) == 2
+
+
+def test_compare_against_another_suites_baseline_exits_2(app, served, tmp_path, capsys):
+    setup_app(app)
+    suite = write_suite(tmp_path, served)
+    assert cli.main(["check", "record", str(suite), "--no-store", "--label", "old", "-q"]) == 0
+    other = write_suite(tmp_path, served, requests=[{"name": "elsewhere", "path": "/health"}])
+    capsys.readouterr()
+    code = cli.main(
+        ["check", "compare", str(other), "--baseline", "shop.baseline.json", "--no-store"]
+    )
+    assert code == 2
+    assert (
+        "baseline old has none of this suite's requests — was it recorded from a different suite?"
+        in capsys.readouterr().err
+    )
+
+
+def test_compare_with_some_requests_missing_fails_by_default(app, served, tmp_path, capsys):
+    setup_app(app)
+    suite = write_suite(tmp_path, served)
+    assert cli.main(["check", "record", str(suite), "--no-store", "-q"]) == 0
+    bigger = write_suite(
+        tmp_path,
+        served,
+        requests=[
+            {"name": "list", "path": "/orders", "ignore": ["now"]},
+            {"name": "new", "path": "/health"},
+        ],
+    )
+    capsys.readouterr()
+    assert cli.main(["check", "compare", str(bigger), "--no-store", "-q"]) == 1
+    out = capsys.readouterr().out
+    assert "warning: 1 of 2 requests are not in the baseline (new)" in out and "FAIL" in out
+    args = [
+        "check",
+        "compare",
+        str(bigger),
+        "--no-store",
+        "-q",
+        "--fail-on",
+        "slower,changed,broken",
+    ]
+    assert cli.main(args) == 0
+
+
+def test_init_writes_base_url_only_when_known(tmp_path, capsys):
+    from redline_core.storage import SQLiteStore
+
+    from ..conftest import make_trace
+
+    db = tmp_path / "r.db"
+    store = SQLiteStore(str(db), background=False)
+    store.save(make_trace(path="/orders/7/", route="/orders/<int:pk>/"))
+    store.close()
+    init = ["check", "init", "--from-traces", "--store", str(db), "-o"]
+    assert cli.main([*init, "c.toml"]) == 0
+    text = (tmp_path / "c.toml").read_text()
+    assert '# base_url = "http://127.0.0.1:8000"' in text
+    assert not any(line.startswith("base_url") for line in text.splitlines())
+    assert "no base_url" in capsys.readouterr().out
+    assert cli.main([*init, "d.toml", "--base-url", "http://shop:9"]) == 0
+    assert 'base_url = "http://shop:9"' in (tmp_path / "d.toml").read_text()
+    assert "base_url" not in json.loads(_json_init(init, tmp_path, capsys))
+
+
+def _json_init(init, tmp_path, capsys):
+    assert cli.main([*init, "e.json"]) == 0
+    return (tmp_path / "e.json").read_text()

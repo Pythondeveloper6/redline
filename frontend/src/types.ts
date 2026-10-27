@@ -204,7 +204,9 @@ export type CheckRunStatus = 'running' | 'done' | 'failed' | 'stopped'
 /** Per-verdict counts of a finished compare (flat or under `counts`; the UI accepts both). */
 export interface CheckSummary {
   counts?: Partial<Record<PerfVerdict | ResponseVerdict | 'passed', number>>
-  faster?: number; slower?: number; same?: number; noisy?: number; changed?: number; broken?: number; passed?: number
+  faster?: number; slower?: number; same?: number; noisy?: number; changed?: number; broken?: number; missing?: number; passed?: number
+  /** Report-level warnings (e.g. requests missing from the baseline). */
+  warnings?: string[]
   speed_change_pct?: number | null; queries_change?: number | null
 }
 /** Baseline summary: the fields of a baseline run needed to pick or describe it. */
@@ -224,7 +226,7 @@ export interface CheckSuiteItem {
 export interface CheckSuiteDoc { id: string; name: string; suite: CheckSuite; created_at?: number; updated_at?: number }
 
 export type PerfVerdict = 'faster' | 'slower' | 'same' | 'noisy' | 'n/a'
-export type ResponseVerdict = 'same' | 'changed' | 'broken' | 'n/a'
+export type ResponseVerdict = 'same' | 'changed' | 'broken' | 'missing' | 'n/a'
 export interface PerfStats { samples_ms: number[]; median: number; p95: number; mean: number; stdev: number; failed: number }
 export interface ServerStats {
   duration_ms_median?: number | null; queries_median: number; queries_max?: number | null; query_ms_median?: number | null
@@ -237,8 +239,10 @@ export interface ReportIssue { kind: IssueKind; title?: string; fingerprint?: st
 export interface ReportSql { fingerprint: string; sql: string; count?: number; sample_trace_id?: string | null }
 export interface ReportRequest {
   name: string; method: string; path: string
-  perf: { verdict: PerfVerdict; before: PerfStats | null; after: PerfStats | null; change_ms: number | null; change_pct: number | null; p_value: number | null; reason: string | null }
-  server: { before: ServerStats | null; after: ServerStats | null; queries_change: number | null; new_issues: ReportIssue[]; fixed_issues: ReportIssue[]; new_sql: ReportSql[]; gone_sql: ReportSql[] } | null
+  perf: { verdict: PerfVerdict; before: PerfStats | null; after: PerfStats | null; change_ms: number | null; change_pct: number | null; p_value: number | null; reason: string | null; note?: string | null }
+  server: { before: ServerStats | null; after: ServerStats | null; queries_change: number | null; new_issues: ReportIssue[]; fixed_issues: ReportIssue[]; new_sql: ReportSql[]; gone_sql: ReportSql[]
+    /** Wins that are not counted because the response is broken (fixed issues, gone SQL, query decrease). */
+    not_judged?: { fixed_issues: ReportIssue[]; gone_sql: ReportSql[]; queries_change: number | null }; note?: string | null } | null
   response: { verdict: ResponseVerdict; status: [number | null, number | null]; diff: JsonDiffEntry[]; diff_total?: number; text_diff: string | null; ignored: string[] }
 }
 export interface CheckReport {
