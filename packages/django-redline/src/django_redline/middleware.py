@@ -166,6 +166,10 @@ class RedlineMiddleware:
             end_request(token)
         try:
             route, view = _route(request)
+            match = getattr(request, "resolver_match", None)
+            if match is not None and match.kwargs:
+                # ``/reset/<uidb64>/<token>/``: secret-looking values are masked in the path
+                builder.set_route(None, None, match.kwargs)
             if builder.req_body is None and builder.recorder.settings.capture_request_body:
                 builder.req_body = getattr(request, "_body", None)
             error = exc or getattr(request, "_redline_error", None)

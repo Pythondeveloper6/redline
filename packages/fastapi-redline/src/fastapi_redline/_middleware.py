@@ -194,6 +194,7 @@ class RedlineMiddleware:
                     route=route_path,
                     view=_endpoint_name(scope.get("endpoint")),
                     error=error,
+                    path_params=scope.get("path_params") or None,
                 )
             except Exception:  # pragma: no cover - recording must never break a request
                 import logging

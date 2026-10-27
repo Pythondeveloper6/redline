@@ -14,21 +14,21 @@ For every kept request, on local disk, in `.redline/redline.db`:
 
 | Data | Stored as | Redacted? |
 |---|---|---|
-| Request and response **headers** | name and value | values of `redact_headers` are masked |
+| Request and response **headers** | name and value | values of `redact_headers`, and of any header whose name matches `redact_keys` (`X-Auth-Token`, `X-CSRFToken`, `X-Session-Id`…), are masked |
 | **Query string** | key and value | values whose key matches `redact_keys` are masked |
-| **Request body** | text, capped at `max_body_bytes` | JSON and form keys matching `redact_keys` are masked; other content is not |
-| **Response body** | text, capped | same rules, and only if `capture_response_body` is on |
-| **SQL text** and **parameters** | verbatim SQL; parameters as JSON | parameters bound to a column matching `redact_keys` are masked |
+| **Request body** | text, capped at `max_body_bytes` | JSON, form and multipart keys matching `redact_keys` are masked; multipart files become `[file: name, N bytes]`; any other text (plain, XML, GraphQL, JSON that does not parse) goes through the free-text rule |
+| **Response body** | text, capped | JSON, form and multipart keys are masked; HTML and other text are **not** scanned (cost); only if `capture_response_body` is on |
+| **SQL text** and **parameters** | verbatim SQL; parameters as JSON | parameters bound to a column, or a table, matching `redact_keys` are masked (`authtoken_token.key`, `django_session.session_key`) |
 | **Callsites** | file, line, function and the **source line** | no |
-| **Tracebacks** and exception messages | text | no |
+| **Tracebacks** and exception messages | text | the free-text rule (URL passwords, secret query values, `key=value` secrets, JWTs, card numbers), chained exceptions included |
 | **Exception locals** (project frames: names and `repr` of variables) | text, at most 30 per frame, 300 characters each | variables whose **name** matches `redact_keys` are masked; containers have secret keys masked to a depth of 4, and the whole `repr` goes through the free-text rule (`key=value` pairs, URLs). Values under innocent names are **not** |
 | **Log records** emitted during the request | level, logger, message (2,000 characters), callsite | the free-text rule: `key=value`, `key: value` and `"key": "value"` pairs whose key matches `redact_keys` are masked, and so are URL passwords and secret query values. Bare secrets in a sentence are not |
 | **Normalised SQL summaries** (`trace_sql`) | statements with literals replaced by `?` | contains no parameter values |
-| **Outbound URL and cache key patterns** | digit runs, UUIDs and long hex strings replaced by `*` | by pattern only; keys and URLs that embed other secrets are stored as seen |
+| **Outbound URL and cache key patterns** | digit runs, UUIDs and long hex strings replaced by `*` | cache keys: the part after a session prefix (`django.contrib.sessions.cache`, `session:`, `sess:`) or a secret-looking word (`api_key:`) is masked; URLs as below |
 | **Release name** | text | no |
 | **Load-run definitions** | the scenario | secret-looking header values, body keys and URL secrets are masked |
 | Outbound **URLs** (`http_out`) | URL | the password of `scheme://user:password@host` and query-string values whose key matches `redact_keys` are masked |
-| The request **path** | text | no |
+| The request **path** | text | values of route parameters named like a secret (`token`, `uidb64`, `key`, `signature`, `code`, or matching `redact_keys`); for unmatched routes (404), long token-like segments |
 | Client address | `REMOTE_ADDR` / ASGI client | no |
 
 Everything is JSON in a SQLite file readable by anyone who can read the file.
@@ -37,19 +37,24 @@ Everything is JSON in a SQLite file readable by anyone who can read the file.
 
 Redaction is **on by default** and cannot be turned off by accident: there is no
 "disable redaction" switch. It runs on the trace before it is handed to the store, so a
-secret never reaches disk. It is **key-based**: it looks at the *name* of a field, never at
-its value.
+secret never reaches disk. It is mostly **key-based**: it looks at the *name* of a field
+(header, query key, JSON key, column, table, route parameter). Free text (log messages,
+exception messages, tracebacks, text bodies) additionally has JWTs and Luhn-valid card
+numbers masked by shape.
 
 ### Defaults
 
 | Where | What is masked | Replaced with |
 |---|---|---|
-| Log messages | `key=value`, `key: value` and `"key": "value"` pairs whose key matches `redact_keys`; URL passwords and secret query values inside the text | `[redacted]` |
+| Log messages, exception messages and tracebacks, non-JSON request bodies | `key=value`, `key: value`, `"key": "value"` pairs and `<key>value</key>` elements whose key matches `redact_keys`; URL passwords and secret query values inside the text; JWTs; Luhn-valid card numbers (13–19 digits, optionally grouped) | `[redacted]` |
 | Exception locals | the value of a variable whose name matches `redact_keys`; secret keys of containers (4 levels deep); and the free-text rule over the whole `repr` | `[redacted]` |
-| Headers | `authorization`, `cookie`, `set-cookie`, `x-api-key`, `proxy-authorization` (case-insensitive) | `[redacted]` |
-| Query strings, form bodies, JSON bodies (any depth) | any key matching `(?i)pass(word)?\|secret\|token\|api[_-]?key\|(?<![a-z])auth(orization)?(?![a-z])\|session\|csrf\|card\|cvv\|ssn\|private[_-]?key` | `[redacted]` |
+| Headers | `authorization`, `cookie`, `set-cookie`, `x-api-key`, `proxy-authorization` (case-insensitive), and any header whose name matches `redact_keys` | `[redacted]` |
+| Query strings, form bodies, multipart fields, JSON bodies (any depth, GraphQL `variables` included) | any key matching `(?i)pass(word)?\|secret\|token\|api[_-]?key\|(?<![a-z])auth(orization)?(?![a-z])\|session\|csrf\|card\|cvv\|ssn\|private[_-]?key` | `[redacted]` |
 | Outbound URLs | the same key rule on the query string, and the password in `user:password@host` | `[redacted]`, or `%5Bredacted%5D` in the userinfo so the URL still parses |
-| SQL parameters | values bound to a column whose name matches the same pattern (`SET "password" = %s`, `INSERT ... ("token") VALUES (%s)`) | `[redacted]` |
+| SQL parameters | values bound to a column whose name matches the same pattern (`SET "password" = %s`, `INSERT ... ("token") VALUES (%s)`, `password = crypt(%s, ...)`, `ON CONFLICT ... DO UPDATE SET api_key = %s`), or to a table whose name matches it (`"authtoken_token"."key" = %s`, `"django_session"."session_key" = %s`; an unqualified column in a statement on such a table is masked too). Django's `auth_` app prefix is ignored, so `auth_user` stays visible | `[redacted]` |
+| Cache keys (Django cache, redis) | the rest of the key after `django.contrib.sessions.cache`, `django.contrib.sessions.cached_db`, `session:`, `sess:`, or after a word matching the key pattern | `django.contrib.sessions.cache[redacted]` (the prefix is kept, so hit rates still group) |
+| URL path | the value of a route parameter named `token`, `uidb64`, `key`, `signature`, `code` or matching the key pattern (`/reset/<uidb64>/<token>/` → `/reset/[redacted]/[redacted]/`); on unmatched routes, segments of 20+ token characters that mix letters and digits | `[redacted]` |
+| Multipart file parts | the content | `[file: name, N bytes]` |
 | Bodies | cut at `max_body_bytes`, **after** masking, so a cut never exposes half a secret | |
 | Binary bodies | replaced by `<N bytes binary>` | |
 
@@ -83,15 +88,15 @@ Be clear-eyed about this. Anything not matched by **key name** is stored in clea
 
 | Not masked | Why | What to do |
 |---|---|---|
-| A secret in the **URL path** (`/reset/<token>/`, `/users/<email>/`) | The path is not a key/value pair | Put the path in `ignore_paths`, or avoid secrets in paths |
+| A secret in the **URL path** under an innocent parameter name (`/users/<email>/`, `/invite/<slug>/`) | Only parameters named like a secret are masked | Put the path in `ignore_paths`, or avoid secrets in paths |
 | **Personal data** under ordinary keys (`email`, `name`, `address`, `phone`, `dob`) | They do not match the default pattern | Add patterns to `redact_keys`, or turn bodies off |
-| **Secrets in plain-text, HTML or other non-JSON/form bodies** | Only JSON and URL-encoded forms are parsed | Turn off `capture_request_body` / `capture_response_body`, or `ignore_paths` |
+| **Bare secrets in text request bodies**, and anything in **HTML or other non-JSON response bodies** | Text request bodies only get the free-text rule (`key=value`, `<key>`, JWTs, cards); response text is not scanned | Turn off `capture_request_body` / `capture_response_body`, or `ignore_paths` |
 | **Literal values inlined in SQL text** (raw SQL built with f-strings) | Masking covers bound parameters, not the statement text | Use bound parameters |
-| **SQL parameters** bound to columns whose names look innocent (`value`, `data`, `blob`) | Matching is on the column name | Add patterns, or accept it |
-| **Exception messages and tracebacks** (`ValueError: bad token abc123`) | Free text | Do not put secrets in exception messages |
+| **SQL parameters** bound to columns *and* tables whose names look innocent (`settings.value`, `kv.data`) | Matching is on the column and table name | Add patterns, or accept it |
+| **Bare secrets in exception messages** (`ValueError: bad abc123`) | Only the free-text rule applies (`token=abc123` and `token: abc123` *are* masked) | Do not put secrets in exception messages |
 | **Source lines** in callsites | They are your code | n/a, but note they land on disk |
-| **Other headers** that carry secrets (`Referer` with a token in the URL, custom `X-...` auth headers) | Only the listed header names are masked | Extend `redact_headers` |
-| **Multipart uploads** | The Django adapter does not read them; FastAPI stores up to `max_body_bytes` of the raw multipart text | Turn off request body capture for upload routes with `ignore_paths` |
+| **Other headers** that carry secrets under innocent names (`Referer` with a token in the URL, `X-Signature`) | Only the listed names and names matching `redact_keys` are masked | Extend `redact_headers` |
+| **Multipart field values** under innocent names, and **file names** | Fields are parsed and masked by name; Django and Flask do not read multipart bodies at all, FastAPI and Litestar store the parsed fields (files as `[file: name, N bytes]`) | Turn off request body capture for upload routes with `ignore_paths` |
 
 !!! tip "Verify with your own traffic"
 
@@ -120,7 +125,8 @@ is a safety net, not a licence.
 ### The SQL EXPLAIN consequence
 
 Because masked parameter values are what is stored, EXPLAIN of a query filtered on a
-secret column runs with `[redacted]` as the value. The plan may differ from the real one.
+secret column or table (every query on `django_session`, `authtoken_token`…) runs with `[redacted]`
+as the value. The plan may differ from the real one.
 See [EXPLAIN](explain.md#safety).
 
 ## Who can open the UI

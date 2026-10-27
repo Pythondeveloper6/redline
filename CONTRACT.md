@@ -119,15 +119,16 @@ class FixSuggester(Protocol):
   - `profile_requested` is True when the adapter sees `?_redline=<flag>` or `X-Redline-Profile: <flag>`, where `<flag>` is one of `profile`, `1`, `true`, `yes`, `on` (case-insensitive). Both adapters call `redline_core.sampling.profile_requested(query, header)`, so they accept the same values. The core starts and stops pyinstrument itself.
   - The `X-Redline-Run: <id>;step=<n>` header becomes the tags `run_id` and `step`.
   - For an ignored path the builder is inert: nothing is recorded or stored.
-- `builder.set_route(route, view=None)` and `builder.tag(key, value)` can be called once routing is known.
-- `finish_trace(builder, *, status, headers=None, body=None, size=None, route=None, view=None, error=None) -> Trace`.
-  - `headers` and `body` are the raw response values. `error` is the unhandled exception or a dict.
+- `builder.set_route(route, view=None, params=None)` and `builder.tag(key, value)` can be called once routing is known. `params` are the route's path parameters (Django `resolver_match.kwargs`, Starlette/Litestar `scope["path_params"]`, Flask `request.view_args`).
+- `finish_trace(builder, *, status, headers=None, body=None, size=None, route=None, view=None, error=None, path_params=None) -> Trace`.
+  - `headers` and `body` are the raw response values. `error` is the unhandled exception or a dict; its `message` and `traceback` (and every other string value of a dict) go through `Redactor.text`.
+  - `path_params` (or `set_route(params=…)`): the stored `Trace.path` has the values of secret path parameters replaced by `[redacted]` (`Redactor.path`, §6). With no route (`route` None, e.g. a 404) long token-like segments are masked instead. All four adapters pass their framework's parameters.
   - It always returns the trace. When sampling keeps it, `tags["sampled_by"]` is set (`all`/`rate`/`slow`/`error`/`profile`), detectors have run, and it was enqueued to the store.
 - `current() -> TraceBuilder | None` (contextvar). Must be correct across `asyncio` tasks, `sync_to_async`, `copy_context()` threads.
 - `record_span(kind, name, start, duration, data=None, capture_callsite=True, *, callsite=None) -> Span | None` – adapters' DB/cache hooks call this. It is a cheap no-op when no trace is active. **Units:** `start` is the `time.perf_counter()` reading at the start of the operation, and `duration` is in **seconds** (`perf_counter() - start`).
 - `record_query(sql, params=None, *, start, duration, db_alias="default", vendor="other", rows=None, many=False, capture_callsite=True) -> Span | None` is the preferred SQL hook.
   - It fills `fingerprint` and `explainable`, which is always False for `many=True`.
-  - It redacts params by column name, makes them JSON-safe, and keeps the first 10 rows for `executemany`.
+  - It redacts params by column and table name (§6 `sql_params`), makes them JSON-safe, and keeps the first 10 rows for `executemany`.
   - Pass params in the driver's paramstyle as captured. EXPLAIN reuses them.
 - `span(name, kind="custom", **data)` – public context manager AND decorator (sync + async) for user code. Exported as `redline_core.span`.
 - Span cap: a trace stores at most `max_spans_per_trace` spans (`middleware` and `view` spans are always kept). Further spans are counted, not stored: `query_count`/`query_ms` stay exact, SQL spans are folded into per-(fingerprint, callsite) counters (`OverflowGroup`) that the N+1 and slow-query detectors add to the stored spans, and the trace gets `truncated`. Duplicate detection only sees stored spans.
@@ -243,13 +244,44 @@ Adapter-only settings: Django `REDLINE["PERMISSION"]` (callable or dotted path) 
 
 - `url(u)`: secret query keys masked; `scheme://user:password@host` → `user:%5Bredacted%5D@host` (the mask is
   percent-encoded so the URL still parses); a URL with nothing to mask is returned unchanged.
-- `text(t)` (log messages, exception locals): URL-looking tokens (`scheme://…`) go through `url()` first; then every
+- `text(t)` (log messages, exception messages and tracebacks – chained exceptions included –, exception locals and
+  their frame's source line, non-JSON request bodies): URL-looking tokens (`scheme://…`) go through `url()` first; then every
   `key<sep>value` pair (`=` or `:`, key optionally quoted) whose key matches `redact_keys` has its value masked. A
   quoted value is masked inside its quotes; an unquoted one (optionally `Bearer|Basic|Token|Digest ` + token) is
   masked up to the next whitespace, `,` `;` `&` `)` `}` `]` or quote. A non-secret key's unquoted value stops at
   `= ? & :` as well and the scan resumes *at* that value, so `url=https://h/?api_key=x`, `Cookie: sessionid=x`,
   `redirect: /cb?token=x` and `user=bob:password=x` all mask `x`. The whole-word `auth` rule applies
-  (`author=bob`, `authenticated=true` stay visible).
+  (`author=bob`, `authenticated=true` stay visible). Then `<key>value</key>` elements with a secret (local) tag
+  name, JWTs (`eyJ….eyJ….sig`) and card numbers – 13–19 digits, optionally grouped by single spaces or dashes,
+  **Luhn-valid** (other digit runs such as ids and timestamps that fail the check stay) – are masked.
+- `headers(h)`: a header is masked when its lower-cased name is in `redact_headers` **or** the name matches
+  `redact_keys` (`X-Auth-Token`, `X-CSRFToken`, `X-Amz-Security-Token`, `X-Session-Id`…).
+- `body(b, content_type, *, free_text=True)`: masking happens before the `max_body_bytes` cut.
+  `application/x-www-form-urlencoded` → secret keys masked; `multipart/*` → never stored raw: a JSON object
+  `{field: value}` with secret fields masked, other fields through `text()`, and file parts replaced by
+  `"[file: <filename>, <N> bytes]"` (no boundary → `"<multipart body, N bytes>"`); JSON (any `*json` type, or any
+  body starting with `{`/`[`) → keys masked at any depth, plus `text()` on a GraphQL `query` string (variables
+  are masked by key); anything else, and JSON that does not parse, → `text()` when `free_text` (request bodies).
+  Response bodies are passed with `free_text=False` (mostly HTML; the scan would cost ~2 ms per 20 kB page) so
+  only their JSON/form/multipart keys are masked.
+- `sql_params(sql, params)`: a positional placeholder is masked when its **column** matches `redact_keys`, or its
+  **table** does: the qualifier (`"authtoken_token"."key" = %s`, an alias resolved through `FROM/JOIN t [AS] a`),
+  or, for an unqualified column or one that cannot be attributed, any table named after `FROM`/`JOIN`/`UPDATE`/`INTO`
+  (conservative). The leading `auth_` of a table name is ignored, so Django's `auth_user`/`auth_group` are not
+  secret tables. Placeholders passed to a function are attributed to the column before the call
+  (`password = crypt(%s, password)`, `lower(col) = lower(%s)`); every item of `col IN (%s, %s…)` belongs to `col`;
+  `INSERT … (cols) VALUES (…), (…)` maps positionally to the column list (and the insert table), and an
+  `ON CONFLICT … DO UPDATE SET c = %s` / `ON DUPLICATE KEY UPDATE c = %s` / `RETURNING` tail is matched like
+  `UPDATE … SET c = %s`. Named params (dicts) are masked by key. The per-statement decision is memoised by SQL text.
+- `cache_key(k)` (Django cache spans, `contrib.redis`): after a session-store prefix – `django.contrib.sessions.cache`,
+  `django.contrib.sessions.cached_db`, `session:`, `sess:` (whole word) – the rest of the key is `[redacted]`
+  (`django.contrib.sessions.cache[redacted]`); otherwise, after the earliest `redact_keys` match and any following
+  separators (`user:1:api_key:[redacted]`). The kept prefix makes all such keys share one cache-efficiency pattern.
+- `path(p, params, *, resolved)`: the value of a path parameter whose name matches `redact_keys` or is one of
+  `token`, `uidb64`, `key`, `signature`, `code` is replaced by `[redacted]` in the stored `Trace.path`
+  (`/reset/<uidb64>/<token>/` → `/reset/[redacted]/[redacted]/`). For an unresolved route (404), every segment of
+  at least 20 characters of `[A-Za-z0-9_\-.~+=%]` that switches between letters and digits at least 4 times is
+  masked; ordinary slugs are kept. History rollups key unresolved requests as `(unmatched)` as before.
 
 `Settings.from_mapping(dict)` matches keys case-insensitively (`SAMPLE_RATE` works). Unknown keys raise `SettingsError` with a "did you mean" hint. `ignore_paths` entries that start with `^` are regular expressions; all other entries are path prefixes. Adapters append their own mount prefix.
 
@@ -301,7 +333,13 @@ Redaction of locals: a local whose *name* matches `redact_keys` is `"[redacted]"
 dicts/lists/tuples are walked (depth 4, 50 items per container, the rest shown as `…`) and values under secret
 keys masked; `str`/`bytes` values that parse as JSON are masked like a JSON body, all other text goes through
 `Redactor.text`; finally the whole `repr` goes through `Redactor.text` (e.g. an `HttpRequest` repr with
-`?token=…`).
+`?token=…`). Each frame's `code` (its source line) goes through `Redactor.text` too.
+
+`Trace.error["message"]` (capped at 2,000 chars) and `Trace.error["traceback"]` (the formatted traceback with
+chained exceptions, last 20,000 chars) always go through `Redactor.text` (§6): URL passwords, secret query values,
+`key=value` secrets, JWTs and Luhn-valid card numbers are masked, whether or not `capture_locals` is on. An error
+passed as a dict has every string value except `type` masked the same way. Log messages (`LogRecord.message`) go
+through the same rule.
 
 Span `data` for the new kinds and new keys:
 
@@ -590,7 +628,7 @@ adding `X-Redline-Replay-Of: <trace id>`; the recorder turns that header into th
 ## 14. Integrations (`redline_core.contrib.*`, lazy: never imported by `redline_core/__init__`)
 
 - `contrib.sqlalchemy`: `instrument_engine(engine)` (moved from fastapi-redline, which re-exports it), `SQLAlchemyFixSuggester`, `explain_executor_factory`, plus `transaction` spans (begin/commit/rollback events) and `pool_wait` spans (checkout time ≥ 1 ms).
-- `contrib.httpx` (moved), `contrib.requests`, `contrib.redis` (redis-py sync + asyncio → `cache` spans with `op` = command, `key`, `hit` for GET-like commands; credential-carrying commands – `AUTH`, `HELLO`, `CONFIG [SET]`, `MIGRATE`, `ACL [SETUSER]` – get `key` None and name = the command, e.g. `auth`), `contrib.asyncpg`, `contrib.psycopg` (psycopg 3 without an ORM → `sql` spans).
+- `contrib.httpx` (moved), `contrib.requests`, `contrib.redis` (redis-py sync + asyncio → `cache` spans with `op` = command, `key` (masked by `Redactor.cache_key`, §6), `hit` for GET-like commands; credential-carrying commands – `AUTH`, `HELLO`, `CONFIG [SET]`, `MIGRATE`, `ACL [SETUSER]` – get `key` None and name = the command, e.g. `auth`), `contrib.asyncpg`, `contrib.psycopg` (psycopg 3 without an ORM → `sql` spans).
 - `contrib.strawberry` (`RedlineExtension`) and `contrib.graphene` (`RedlineMiddleware`) → `resolver` spans.
 - `contrib.asgi`: async helpers shared by ASGI adapters (event-loop lag monitor, Server-Timing/badge body injection).
   The lag monitor itself is zero-dependency core: `redline_core.blocking.track_request(builder)` (sync + async context manager, re-exported by `contrib.asgi`) watches the running loop while the request is in flight (no-op without a running loop, for an inert builder or with `detect_blocking` off); stalls still in progress are flushed through `TraceBuilder.on_finish` callbacks, which `finish_trace` runs first. SQL hooks of *sync* drivers call `redline_core.blocking.note_sync_call(span, call)` after recording. `redline_core.transactions.begin_transaction(builder, callsite)` / `end_transaction(state, db_alias=, outcome=)` build `transaction` spans (empty transactions and control statements such as `SAVEPOINT` are not counted/recorded).
