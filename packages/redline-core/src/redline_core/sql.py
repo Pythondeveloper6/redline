@@ -32,8 +32,10 @@ __all__ = [
     "filter_columns",
     "fingerprint",
     "fingerprint_hash",
+    "has_limit",
     "is_explainable",
     "primary_table",
+    "select_columns",
     "statement_kind",
     "table_aliases",
     "tables",
@@ -276,3 +278,72 @@ def filter_columns(sql: str) -> dict[str, list[str]]:
             if column not in cols:
                 cols.append(column)
     return result
+
+
+# ── result-size inspection ──────────────────────────────────────────────────────────
+
+_LIMIT = re.compile(
+    r"\bLIMIT\b|\bFETCH\s+(?:FIRST|NEXT)\b|\bSELECT\s+(?:DISTINCT\s+)?TOP\b|\bROWNUM\b"
+)
+
+
+def _depth_at(text: str, pos: int) -> int:
+    return text.count("(", 0, pos) - text.count(")", 0, pos)
+
+
+def has_limit(sql: str) -> bool:
+    """Whether the statement itself caps its row count (``LIMIT``, ``FETCH FIRST|NEXT``,
+    ``SELECT TOP n``, ``ROWNUM``).
+
+    Heuristic on the fingerprint: only a keyword outside every parenthesis counts, so the
+    ``LIMIT`` of a subquery (``WHERE id IN (SELECT … LIMIT 5)``) does not make the outer
+    query "bounded". A ``UNION`` whose last branch has a ``LIMIT`` counts as bounded.
+    """
+    fp = fingerprint(sql)
+    return any(_depth_at(fp, m.start()) == 0 for m in _LIMIT.finditer(fp))
+
+
+_SELECT_ITEM = re.compile(rf"^(?P<ref>{_IDENT}(?:\s*\.\s*{_IDENT})*(?:\s*\.\s*\*)?|\*)$")
+_ALIAS = re.compile(r"\s+AS\s+\S+$", re.IGNORECASE)
+
+
+def select_columns(sql: str) -> list[tuple[str | None, str]]:
+    """``[(qualifier, column)]`` of the plain columns in a ``SELECT`` list.
+
+    ``SELECT "t"."id", t.body AS t_body, count(*) FROM …`` → ``[("t", "id"), ("t", "body")]``.
+    Expressions and function calls are skipped; ``*`` comes back as ``(qualifier, "*")``.
+    Statements that do not start with ``SELECT`` (``WITH …``) give ``[]``. Best-effort.
+    """
+    fp = fingerprint(sql).lstrip("( ")
+    if not fp.startswith("SELECT"):
+        return []
+    depth, start, end = 0, 6, len(fp)
+    items: list[str] = []
+    for i in range(6, len(fp)):
+        ch = fp[i]
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        elif depth == 0:
+            if ch == ",":
+                items.append(fp[start:i])
+                start = i + 1
+            elif fp.startswith(" FROM ", i) or fp.startswith(" FROM(", i):
+                end = i
+                break
+    items.append(fp[start:end])
+    out: list[tuple[str | None, str]] = []
+    for n, item in enumerate(items):
+        item = item.strip()
+        if n == 0:
+            item = re.sub(r"^(?:DISTINCT|ALL)\s+", "", item)
+            item = re.sub(r"^TOP\s+\?\s+", "", item)
+        item = _ALIAS.sub("", item).strip()
+        m = _SELECT_ITEM.match(item)
+        if not m:
+            continue
+        ref = m.group("ref")
+        parts = _split_qualified(ref) + (["*"] if ref.endswith("*") else [])
+        out.append((parts[-2] if len(parts) > 1 else None, parts[-1]))
+    return out

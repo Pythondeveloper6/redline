@@ -38,6 +38,8 @@ from redline_core.callsite import MAX_STACK
 from redline_core.model import Callsite, Frame
 from redline_core.recorder import SpanContext, current, record_query, record_span
 
+from ._drf import install_drf
+
 __all__ = [
     "ViewFrame",
     "install",
@@ -96,6 +98,7 @@ def install() -> None:
     install_cache_handler()
     _install_templates()
     _install_view_hook()
+    install_drf()
 
 
 # ── SQL ─────────────────────────────────────────────────────────────────────────────
@@ -141,6 +144,56 @@ def _record(sql: Any, params: Any, many: bool, context: dict, start: float, dura
     )
     if span is not None:
         attribute_to_view(span)
+        if rows is None and not many and cursor is not None and span.data.get("explainable"):
+            _count_fetched_rows(cursor, span)
+
+
+class _RowCounter:
+    """Counts the rows Django fetches from ``cursor`` into ``span.data["rows"]``.
+
+    Used where ``cursor.rowcount`` is unusable (sqlite, server-side cursors): the
+    ``CursorWrapper`` gets instance-level ``fetchone``/``fetchmany``/``fetchall`` that
+    forward to the real ones and add what they return. ``rows`` therefore means "rows read
+    so far"; a partly consumed iterator reports the rows it actually read.
+    """
+
+    __slots__ = ("_all", "_many", "_one", "data", "n")
+
+    def __init__(self, cursor: Any, span: Any) -> None:
+        self.data = span.data
+        self.n = 0
+        self._one, self._many, self._all = cursor.fetchone, cursor.fetchmany, cursor.fetchall
+
+    def fetchone(self) -> Any:
+        row = self._one()
+        if row is not None:
+            self.n += 1
+        self.data["rows"] = self.n
+        return row
+
+    def fetchmany(self, *args: Any, **kwargs: Any) -> Any:
+        rows = self._many(*args, **kwargs)
+        self.n += len(rows)
+        self.data["rows"] = self.n
+        return rows
+
+    def fetchall(self) -> Any:
+        rows = self._all()
+        self.n += len(rows)
+        self.data["rows"] = self.n
+        return rows
+
+
+def _count_fetched_rows(cursor: Any, span: Any) -> None:
+    try:
+        counter = _RowCounter(cursor, span)
+        cursor.fetchone, cursor.fetchmany, cursor.fetchall = (
+            counter.fetchone,
+            counter.fetchmany,
+            counter.fetchall,
+        )
+    except Exception:  # a cursor we cannot decorate just leaves rows unknown
+        pass
 
 
 _wrapper = QueryRecorder()

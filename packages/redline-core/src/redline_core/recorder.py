@@ -759,6 +759,7 @@ def record_query(
         "rows": rows,
         "many": many,
         "explainable": (not many) and sqlmod.is_explainable(sql),
+        "has_limit": sqlmod.has_limit(sql),
     }
     callsite = builder.recorder.capturer.capture(skip=2) if capture_callsite else None
     return record_span(

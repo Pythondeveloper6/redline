@@ -52,6 +52,7 @@ from django.apps import apps
 from django.db import models
 
 from redline_core import sql as sqlmod
+from redline_core.linefix import line_diff
 from redline_core.model import Callsite, Frame, Issue, Span, Suggestion
 
 __all__ = ["DjangoFixSuggester", "Relation"]
@@ -87,6 +88,17 @@ _STOP = frozenset(
     }
 )
 _NO_PREFETCH = frozenset({"values", "values_list"})
+#: Chains that already end in a result, or whose prefetching ``iterator()`` would drop.
+_NO_APPEND = frozenset(
+    {"first", "last", "get", "count", "exists", "aggregate", "in_bulk", "latest", "earliest"}
+    | {"iterator", "prefetch_related", "values", "values_list", "update", "delete"}
+)
+_WIDE_FIELDS = (models.TextField, models.BinaryField, models.JSONField)
+DOCS_ITERATOR = DOCS + "#iterator"
+DOCS_DEFER = DOCS + "#defer"
+DOCS_EXISTS = DOCS + "#exists"
+DOCS_COUNT = DOCS + "#count"
+DOCS_PAGINATOR = "https://docs.djangoproject.com/en/stable/topics/pagination/"
 _MAX_DEPTH = 2  # relation hops above the parent model searched for a root queryset
 
 
@@ -564,10 +576,21 @@ class _Edit:
     already: bool = False  # the lookup is already there
 
 
-def _plan_edit(target: _Target, method: str, lookup: str) -> _Edit | None:
+def _plan_edit(
+    target: _Target,
+    method: str,
+    lookup: str = "",
+    *,
+    names: Sequence[str] | None = None,
+    at_end: bool = False,
+) -> _Edit | None:
+    """Plan inserting ``.method("lookup")`` (or ``.method("a", "b")`` for ``names``; no
+    arguments for ``names=()``) into the queryset. ``at_end`` appends to the chain instead of
+    placing it before ordering/slicing (``.iterator()``)."""
     src = target.src
     quote = _quote_style(src.segment(target.stmt))
-    arg = f"{quote}{lookup}{quote}"
+    args = list(names) if names is not None else [lookup]
+    arg = ", ".join(f"{quote}{a}{quote}" for a in args)
     if target.class_attr_after is not None:
         node = target.class_attr_after
         indent = " " * node.col_offset  # type: ignore[attr-defined]
@@ -590,13 +613,19 @@ def _plan_edit(target: _Target, method: str, lookup: str) -> _Edit | None:
                 for a in seg.args
                 if isinstance(a, ast.Constant) and isinstance(a.value, str)
             ]
-            if lookup in existing:
+            if all(a in existing for a in args):
                 return _Edit(0, 0, "", already=True)
             if seg.args:
                 pos = src.end(seg.args[-1])
                 return _Edit(pos, pos, f", {arg}")
             pos = src.end(seg) - 1
             return _Edit(pos, pos, arg)
+    if at_end:
+        if any(_method_name(seg) in _NO_APPEND for seg in after):
+            return None
+        last = after[-1] if after else segs[index]
+        pos = src.end(last)
+        return _Edit(pos, pos, f".{method}({arg})")
     # insert before the first ordering / slicing / terminal segment
     insert_at: int | None = None
     for seg in after:
@@ -696,9 +725,13 @@ class DjangoFixSuggester:
 
     # protocol ----------------------------------------------------------------
     def suggest(self, issue: Issue, spans: list[Span]) -> Suggestion | None:
-        if issue.kind not in ("n_plus_one", "duplicate_query") or not spans:
-            return None
         if not apps.ready:
+            return None
+        if issue.kind in ("large_result", "unbounded_query") and spans:
+            return self._result_size(issue, spans)
+        if issue.kind == "inefficient_count":
+            return self._count(issue)
+        if issue.kind not in ("n_plus_one", "duplicate_query") or not spans:
             return None
         sql = str(spans[0].data.get("sql", ""))
         candidates = relations_for(sql, self.registry)
@@ -722,6 +755,128 @@ class DjangoFixSuggester:
             return self._generic(relation, frames, matched_var)
         plan = self._plan(relation, frames, matched_var)
         return self._suggestion(plan, ambiguous=len(candidates) > 1 and not matched_var)
+
+    # result size ---------------------------------------------------------------
+    def wide_columns(self, sql: str) -> tuple[type[models.Model] | None, list[str]]:
+        """``(model, [field names])`` of the text/blob/JSON fields ``sql`` selects.
+
+        The model is the one behind the statement's first table; only its own columns are
+        considered (``.defer()`` takes names relative to it). Computed here, off the hot
+        path, from the SQL column list and the app registry.
+        """
+        model = self.registry.model(sqlmod.primary_table(sql))
+        if model is None:
+            return None, []
+        aliases = sqlmod.table_aliases(sql)
+        table = model._meta.db_table.lower()
+        wide: list[str] = []
+        by_column = {f.column: f for f in model._meta.concrete_fields}
+        for qualifier, column in sqlmod.select_columns(sql):
+            if qualifier is not None and aliases.get(qualifier, qualifier).lower() != table:
+                continue
+            field = by_column.get(column)
+            if field is not None and isinstance(field, _WIDE_FIELDS) and field.name not in wide:
+                wide.append(field.name)
+        return model, wide
+
+    def _find_queryset(self, issue: Issue, model: type[models.Model]) -> _Target | None:
+        for src, frame in self._frames(issue.callsite):
+            loc = _Locator(src)
+            for scope in src.scopes(frame.line):
+                target = loc.any_qs(scope, model, frame.line)
+                if target is not None:
+                    return target
+        return None
+
+    def _result_size(self, issue: Issue, spans: list[Span]) -> Suggestion | None:
+        sql = str(spans[0].data.get("sql", ""))
+        model, wide = self.wide_columns(sql)
+        if model is None:
+            return None
+        if wide:
+            issue.extra["wide_columns"] = wide
+            for s in spans:
+                s.data.setdefault("wide_columns", wide)
+        name = model.__name__
+        target = self._find_queryset(issue, model)
+        rows = issue.extra.get("rows")
+        sized = f"{rows:,} {name} rows" if isinstance(rows, int) else f"{name} rows"
+        paginate = (
+            "Paginate it (django.core.paginator.Paginator or limit/offset in the API), or "
+            "process it in chunks with .iterator()."
+        )
+        if wide:
+            names = ", ".join(repr(c) for c in wide)
+            edit = _plan_edit(target, "defer", names=wide) if target is not None else None
+            summary = (
+                f"The query loads {sized} including the large column(s) {', '.join(wide)}. "
+                f"Defer them with .defer({names}) (or list only the fields you need in "
+                f".only()) so they are fetched only when used. {paginate}"
+            )
+            if edit is not None and not edit.already:
+                diff, code = _render(target, edit)  # type: ignore[arg-type]
+                return Suggestion(
+                    summary=summary,
+                    code=code,
+                    diff=diff,
+                    confidence="high" if target.class_attr_after is None else "medium",  # type: ignore[union-attr]
+                    docs_url=DOCS_DEFER,
+                )
+            return Suggestion(
+                summary=summary,
+                code=f"{name}.objects.defer({names})",
+                confidence="medium",
+                docs_url=DOCS_DEFER,
+            )
+        if issue.kind == "unbounded_query":
+            summary = (
+                f"This queryset has no limit and returned {sized}. Slice it "
+                f"({name}.objects.filter(...)[:100]) or page through it. {paginate}"
+            )
+            code = f"{name}.objects.all()[:100]"
+        else:
+            summary = f"The query returned {sized}. {paginate}"
+            code = f"for obj in {name}.objects.filter(...).iterator(chunk_size=2000):"
+        edit = _plan_edit(target, "iterator", names=(), at_end=True) if target is not None else None
+        if edit is not None and not edit.already:
+            diff, code = _render(target, edit)  # type: ignore[arg-type]
+            return Suggestion(
+                summary=summary + " The diff streams the rows with .iterator().",
+                code=code,
+                diff=diff,
+                confidence="medium",
+                docs_url=DOCS_ITERATOR,
+            )
+        return Suggestion(summary=summary, code=code, confidence="low", docs_url=DOCS_PAGINATOR)
+
+    # inefficient count ---------------------------------------------------------
+    def _count(self, issue: Issue) -> Suggestion | None:
+        extra = issue.extra
+        old, new, fix = extra.get("old"), extra.get("new"), extra.get("fix_line")
+        if not (old and new and fix):
+            return None
+        diff = line_diff(self.project_root, issue.callsite, str(old), str(new))
+        if extra.get("pattern") == "len":
+            summary = f"Let the database count: replace `{old}` with `{new}` (a COUNT(*) query)."
+            docs = DOCS_COUNT
+        elif extra.get("pattern") == "count_cmp":
+            summary = (
+                f"Replace `{old}` with `{new}`: EXISTS stops at the first matching row, "
+                "COUNT(*) visits all of them."
+            )
+            docs = DOCS_EXISTS
+        else:
+            summary = (
+                f"`{old}` loads every row just to test for any. Use `{new}` (a LIMIT 1 query)."
+            )
+            docs = DOCS_EXISTS
+        return Suggestion(
+            summary=summary,
+            code=str(fix),
+            diff=diff,
+            confidence="high" if diff else "medium",
+            docs_url=docs,
+        )
 
     # relation choice -----------------------------------------------------------
     @staticmethod

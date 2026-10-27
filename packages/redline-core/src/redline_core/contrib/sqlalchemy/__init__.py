@@ -104,6 +104,51 @@ def _callsite(recorder: Any) -> Any:
     return None
 
 
+class _CountingCursor:
+    """DBAPI cursor proxy that counts fetched rows into a span's ``data["rows"]``.
+
+    Installed on the execution context from ``after_cursor_execute`` – SQLAlchemy builds
+    its result from ``context.cursor`` right after that event – for read statements whose
+    ``cursor.rowcount`` is unusable (sqlite, most async drivers). Everything but the three
+    fetch methods is forwarded untouched. ``rows`` means "rows read so far".
+    """
+
+    __slots__ = ("_cursor", "_data", "_n")
+
+    def __init__(self, cursor: Any, data: dict[str, Any]) -> None:
+        self._cursor = cursor
+        self._data = data
+        self._n = 0
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._cursor, name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name in _CountingCursor.__slots__:
+            object.__setattr__(self, name, value)
+        else:
+            setattr(self._cursor, name, value)
+
+    def fetchone(self) -> Any:
+        row = self._cursor.fetchone()
+        if row is not None:
+            self._n += 1
+        self._data["rows"] = self._n
+        return row
+
+    def fetchmany(self, *args: Any) -> Any:
+        rows = self._cursor.fetchmany(*args)
+        self._n += len(rows)
+        self._data["rows"] = self._n
+        return rows
+
+    def fetchall(self) -> Any:
+        rows = self._cursor.fetchall()
+        self._n += len(rows)
+        self._data["rows"] = self._n
+        return rows
+
+
 def instrument_engine(engine: EngineLike, alias: str = "default") -> None:
     """Record every statement executed on ``engine`` as a ``sql`` span (idempotent)."""
     sync_engine = _sync(engine)
@@ -141,6 +186,8 @@ def instrument_engine(engine: EngineLike, alias: str = "default") -> None:
         )
         if span is not None:
             span.callsite = _callsite(builder.recorder)
+            if span.data["rows"] is None and span.data["explainable"] and context is not None:
+                context.cursor = _CountingCursor(cursor, span.data)
 
     def failed(exc_context: Any):
         context = exc_context.execution_context
