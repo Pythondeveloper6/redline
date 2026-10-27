@@ -177,6 +177,9 @@ jobs:
         with:
           # PEP 740 attestations, signed by the same OIDC identity. Free provenance.
           attestations: true
+          # "Re-run failed jobs" after registering a missing publisher must not trip
+          # over the packages that already uploaded.
+          skip-existing: true
 
   github-release:
     name: Create the GitHub release
