@@ -4,6 +4,7 @@ import { copyText } from '../lib/format'
 import { tokenizeSql, formatSql } from '../lib/sql'
 import type { IssueKind, Severity } from '../types'
 import { ISSUE_LABEL } from '../lib/format'
+import CallsiteLink from './CallsiteLink'
 
 export function Icon({ d, size = 14, className = '' }: { d: string; size?: number; className?: string }) {
   return (
@@ -179,8 +180,7 @@ export function Tabs<T extends string>({ tabs, value, onChange }: { tabs: { id: 
 }
 
 export function Callsite({ cs }: { cs: { file: string; line: number; function: string } | null }) {
-  if (!cs) return null
-  return <span className="mono text-muted">{cs.file}<span className="text-faint">:</span>{cs.line}</span>
+  return <CallsiteLink callsite={cs} />
 }
 
 /** Small data-fetching hook. */
