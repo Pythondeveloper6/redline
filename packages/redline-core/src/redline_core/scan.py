@@ -201,7 +201,7 @@ def scan_source(
         if key in seen:
             continue
         seen.add(key)
-        finding = _finding(hit, filename, resolver)
+        finding = _finding(hit, filename, resolver, dialect)
         if finding is not None:
             out.append(finding)
     out.sort(key=lambda f: (f.line, f.chain))
@@ -405,7 +405,9 @@ def _severity(hops: tuple[str, ...]) -> str:
     return "medium"
 
 
-def _finding(hit: _Hit, filename: str, resolver: RelationResolver | None) -> ScanFinding | None:
+def _finding(
+    hit: _Hit, filename: str, resolver: RelationResolver | None, dialect: str = "django"
+) -> ScanFinding | None:
     loop, hops = hit.loop, hit.hops
     first = hops[0]
     info: RelationInfo | None = None
@@ -419,6 +421,11 @@ def _finding(hit: _Hit, filename: str, resolver: RelationResolver | None) -> Sca
         method = "prefetch_related" if loop.origin else info.method
         suggestion = f'{method}("{path}")'
         why = f"{info.kind.replace('_', '-')} to {info.model}"
+    elif dialect == "jinja":
+        # Jinja templates usually render SQLAlchemy models (Flask), so name its loaders.
+        rel = ".".join((*loop.origin, first))
+        suggestion = f"selectinload(<Model>.{rel}) or joinedload(<Model>.{rel})"
+        why = "a relationship, if it is one"
     else:
         suggestion = f'select_related("{path}") or prefetch_related("{path}")'
         why = "a relation, if it is one"
