@@ -145,7 +145,7 @@ class FixSuggester(Protocol):
 - `list(filters: Filters | None, limit=50, cursor=None) -> Page`
 - `endpoints(window_seconds) -> list[EndpointStats]`
 - `issues(window_seconds, kind=None) -> list[IssueGroup]`
-- `delete(trace_id) -> int`, `clear() -> int` and `prune(max_age_s=None, max_rows=None) -> int`, each returning the number of rows deleted. For `prune`, `None` means "use the store's rule" and `0` disables that rule for the call (it never deletes everything; that is `clear()`); negative values raise `ValueError`
+- `delete(trace_id) -> int`, `clear() -> int` (SQLiteStore: `clear(history=False)`, see §11) and `prune(max_age_s=None, max_rows=None) -> int`, each returning the number of rows deleted. For `prune`, `None` means "use the store's rule" and `0` disables that rule for the call (it never deletes everything; that is `clear()`); negative values raise `ValueError`
 - `count() -> int`
 - `flush(timeout) -> bool`
 - `close()`
@@ -367,6 +367,61 @@ New `Store` methods (SQLiteStore implements all; a custom store may raise `NotIm
 `save_run(run)`, `save_run_step(run_id, step)`, `finish_run(run_id, status, summary)`, `get_run(id)`, `list_runs(limit)`, `delete_run(id)`, `run_bottlenecks(run_id)`,
 `traces_since(started_at, trace_id, limit)` (for live tail).
 
+Concrete decisions (v0.2 implementation):
+
+- **Protocols.** `Store` is unchanged (the v0.1 surface; Django's `isinstance(store, Store)` check keeps accepting
+  v0.1 custom stores). The new methods live on `redline_core.storage.ExtendedStore(Store, Protocol)`; a store
+  lacking one (or raising `NotImplementedError`) makes the matching endpoint answer 501 `not_supported`.
+  `window` arguments are seconds back from now. Value types (all with `to_dict()`, in `storage.base`):
+  `SqlStats`, `CacheStats`, `ExternalStats`, `History`, `ReleaseInfo`, `PeriodStats`, `PeriodComparison`,
+  `IssueIndexEntry`, `Bottlenecks`; `Period = ("release", name) | ("range", start, end)` and
+  `parse_period("release:<name>" | "range:<start>-<end>")` (raises `FilterError`).
+- **Schema.** `meta.schema_version` = 2. A v0.1 file (no version row) is migrated in place on connect inside one
+  `BEGIN IMMEDIATE` (re-checked inside, so concurrent workers migrate once): the new tables are created and
+  **backfilled from the stored traces**. Additive columns beyond the list above: `trace_sql.rows_n` (executions
+  with a known row count), `trace_sql.vendor`, `trace_sql.db_alias`, `releases.requests`; one extra history
+  table `issue_rollups(bucket, release, issue_id, occurrences)` (per-period issue sets for `compare_periods`).
+- **trace_sql.** `fingerprint` is the 16-hex `sql.fingerprint_hash` (sha1 of the normalised statement); `sql` is
+  the normalised statement (literals → `?`), which is also what `sql=` / `search_sql` match (case-insensitive
+  substring). `rows` = sum of known row counts (NULL when none known). Spans folded by the span cap
+  (`OverflowGroup`, not part of the stored trace) are not included. `route` = `route or path`.
+- **Patterns.** `url_pattern` = `scheme://host[:port]` + path, no query; `key_pattern` = the key. Both replace UUIDs,
+  hex runs of ≥ 8 chars and digit runs **not glued to a preceding letter or digit** with `*` (`/v2/users/42` →
+  `/v2/users/*`, `user:42` → `user:*`). Cache ops: reads = `get, get_many, get_or_set, has_key, mget, hget, hmget,
+  hgetall, exists, getex, getdel` (+ Django async `a…` variants), sets = `set, add, set_many, setex, psetex, setnx,
+  mset, hset, hmset, incr, decr, incrby, decrby`, deletes = `delete, delete_many, del, unlink, hdel, clear`; spans
+  without a key (redis pipelines) are skipped. An outbound call is an error when it has no status, a 5xx or a 429.
+- **Write path.** The writer derives all rows from the batch outside its lock and writes them in the batch's
+  transaction with `executemany`; rollups are read-modify-write (merged `Histogram` bytes). A re-saved trace id
+  replaces its trace-scoped rows and is **not** counted again in rollups/releases/issue index. History reflects
+  *kept* traces (sampling applies). `errors` in rollups uses `sampling.is_error`.
+- **Retention.** Trace-scoped tables (`profiles`, `trace_tags`, `issues`, `trace_sql`, `trace_ext`, `trace_cache`)
+  go with their trace (`delete`, `prune`, `clear`). `SQLiteStore(history_retention_s=90 days)` (`from_settings` maps
+  `history_retention_days`; `0`/`None` = keep forever): `prune()` also calls `prune_history()`, which deletes
+  rollup / issue-rollup hours that ended before the cutoff, releases and issue-index entries last seen before it, and
+  non-running runs (with steps) created before it. `clear()` keeps the history; `clear(history=True)` wipes it too.
+- **Reads.** `search_sql`/`sql_workload` → `SqlStats {fingerprint, sql, count (executions), traces, total_ms, max_ms,
+  mean_ms, mean_rows, routes ["METHOD route"], sample_trace_id (latest), vendor}` sorted by total time.
+  `cache_stats` → `hit_rate = hits/(hits+misses)` (null when unknown); `unread_sets` = the pattern's sets when it had
+  no reads in the window; `stampedes` = bursts of ≥ 3 requests missing the same pattern within 1 s (request start
+  times; each burst counted once). `external_stats` → `p95_ms` from a histogram where every call is taken at its
+  request's mean for that pattern (exact when called once per request); `duplicates` = requests with ≥ 2 calls to the
+  pattern, `retries` = requests with ≥ 3 calls and ≥ 1 error. `history` merges hourly rows into UTC-aligned 1 h / 1 d
+  buckets (only non-empty ones); its `releases` are those first seen within the range. `compare_periods` has hourly
+  resolution for ranges.
+- **Runs** (`redline_core.runs`): `Run(id, name, status: "running"|"finished"|"stopped"|"failed", config, created_at,
+  finished_at, steps, summary)` and `RunStep(step, target_rps, started_at, ended_at, achieved_rps, sent, ok, errors,
+  dropped, hist: Histogram, error_breakdown)`; `RunStep.error_rate = errors / (ok + errors)`. Run writes are
+  synchronous (not queued); `save_run_step` upserts by `(run_id, step)`, so a step can be re-saved as it progresses.
+  `delete_run` keeps the run's tagged traces. `run_bottlenecks` joins the `run_id`/`step` tags with `trace_sql`
+  (kind `sql`, key `sql:<fingerprint>`, label = normalised SQL, callsite from the latest sample's span) and with
+  `traces` (kind `route`, key/label `"METHOD route"`): per step `mean_ms` per execution (per request for routes),
+  `p95_ms` over each request's mean, `count`; `growth = last mean / max(first mean, 0.01)` (1.0 with a single step);
+  top 50 by growth. Steps come from `run_steps`, else from the tags (`target_rps: null`). `None` (→ 404) when there is
+  neither the run nor a tagged trace.
+- `traces_since(started_at, trace_id="", limit=100)` → TraceSummaries strictly after `(started_at, trace_id)`,
+  oldest first.
+
 ## 12. API additions (§5 rules apply)
 
 | Method & path | Returns |
@@ -387,7 +442,48 @@ New `Store` methods (SQLiteStore implements all; a custom store may raise `NotIm
 | `GET api/runs/{id}/bottlenecks` | `{steps: [{step, target_rps}], items: [{key, kind, label, callsite, per_step: [{step, mean_ms, p95_ms, count}], growth: float}]}` sorted by growth – the "query X went 3 ms → 410 ms" view |
 | `POST api/runs` / `POST api/runs/{id}/stop` / `DELETE api/runs/{id}` | start (403 `load_disabled` unless `load_from_ui`; the target is always the app's own base URL, given by the adapter) / stop / delete |
 
-New error codes: 403 `load_disabled`, 404 `run_not_found`, 409 `run_active`, 501 `not_supported`.
+New error codes: 400 `invalid_period`, 403 `load_disabled`, 404 `run_not_found`, 409 `run_active`, 501 `not_supported`.
+
+Concrete decisions (v0.2 implementation):
+
+- `RedlineAPI(store, settings, *, framework, explain_executor, run_launcher=None, run_stopper=None)` and
+  `dispatch(method, path, params=None, body=None, *, base_url=None)`; `base_url` is the app's own root URL, which
+  adapters pass for `POST api/runs`.
+- `run_launcher(config: dict, base_url: str | None) -> run_id` starts a run in the background (`ValueError` → 400
+  `invalid_body`); `run_stopper(run_id) -> bool`. Without them `POST api/runs` / `POST api/runs/{id}/stop` answer
+  501 `not_supported`. `POST api/runs` checks `load_from_ui` first (403), then validates the body (400
+  `invalid_body`): `{name, requests: [{method, path, weight}], profile: {mode, rps | start_rps/end_rps[/step_rps],
+  duration_s, step_duration_s}}`; every `path` must start with a single `/` (no scheme/host: the target is always the
+  app). Answers 202 `{id, name, status: "running"}`. Stop answers `{stopped: bool}` (404 for an unknown run).
+  `DELETE api/runs/{id}` → `{deleted: int}`, 409 `run_active` while running.
+- `GET api/runs` → `{items: [Run]}` (same shape as the detail, steps included), `?limit=` (default 50).
+- `RawResponse(status, content_type, body: bytes, headers: dict)` (`redline_core.api`) is returned **instead of a
+  tuple** for the snapshot; it also unpacks as `status, payload = …` with `payload` being the RawResponse itself, so
+  check `isinstance(payload, RawResponse)` (or the result). Snapshot: `text/html; charset=utf-8`,
+  `Content-Disposition: attachment; filename="redline-<id>.html"`. `redline_core.api.snapshot_html(data)` builds it:
+  CSS inlined as `<style>`, every JS chunk reachable from the entry (lazy ones included) rewritten to import
+  `@redline/<chunk>` and mapped by an import map to `data:` URLs; `window.__REDLINE_SNAPSHOT__ = {trace (with
+  has_profile), profile}` is set by a classic script **before** the import map and the entry module. JSON is escaped
+  for `<script>` (`<`, `>`, `&`, U+2028/9).
+- `api.poll(since, last_id=None, limit=100) -> [TraceSummary]` oldest first (falls back to `list(since=…)` when the
+  store has no `traces_since`).
+- `GET api/traces`: `sql` matches the normalised SQL (case-insensitive substring), `since` is exclusive, invalid →
+  400 `invalid_filter`.
+- `GET api/compare`: `sql` rows keyed by the 16-hex fingerprint, `sql` = normalised statement, sorted by the
+  largest time difference; `delta` and `*_ms` are `b − a`; issue lists hold `{id, kind, severity, title}`; missing
+  `a`/`b` → 400 `invalid_filter`, unknown id → 404 `trace_not_found`.
+- `GET api/sql?q=&window=24h&limit=100` → `SqlStats` items (extra keys `mean_ms`, `mean_rows`, `vendor`).
+  `GET api/cache` items add `deletes`; `hit_rate` may be `null`. `GET api/external` items add `total_ms`.
+- `GET api/history`: `window` default `30d`; `bucket` default `1h` for windows ≤ 2 d, else `1d` (other values → 400
+  `invalid_filter`); `method` is case-insensitive.
+- `GET api/history/compare`: `a` is the baseline, `b` the period under test. `a`/`b` echo the period:
+  `{kind: "release", release, requests}` / `{kind: "range", start, end, requests}`. Endpoint `a`/`b` stats are
+  `{count, error_rate, p50_ms, p95_ms, p99_ms, avg_ms, avg_queries}` or `null` (new/gone); `delta_p95_pct` is null
+  when not computable. Verdicts: regressed = p95 ≥ +20 % **and** ≥ +5 ms, or avg queries ≥ +1; improved = the mirror
+  image; sorted regressed, new, improved, gone, same. Issue items are `IssueIndexEntry` dicts (`id, kind, severity,
+  title, route, first_seen, last_seen, first_release, last_release`) with `occurrences` counted within the period
+  (`b`'s count for persisting).
+- `GET api/indexes` answers 501 `not_supported` until the index advisor lands (it reads `store.sql_workload`).
 
 Replay is browser-side: the UI re-sends the request with `fetch` (same origin, the viewer's own cookies),
 adding `X-Redline-Replay-Of: <trace id>`; the recorder turns that header into the tag `replay_of`
