@@ -11,21 +11,23 @@ By participating you agree to the [Code of Conduct](https://github.com/Pythondev
 ## The layout
 
 One repository, one [uv workspace](https://docs.astral.sh/uv/concepts/projects/workspaces/),
-three distributions released in lockstep:
+five distributions released in lockstep:
 
 | Directory | Distribution | Module | Depends on |
 | --- | --- | --- | --- |
 | `packages/redline-core` | `redline-core` | `redline_core` | nothing (ships the bundled UI) |
 | `packages/django-redline` | `django-redline` | `django_redline` | core (exact pin), Django |
 | `packages/fastapi-redline` | `fastapi-redline` | `fastapi_redline` | core (exact pin), FastAPI, SQLAlchemy |
+| `packages/flask-redline` | `flask-redline` | `flask_redline` | core (exact pin), Flask, SQLAlchemy |
+| `packages/litestar-redline` | `litestar-redline` | `litestar_redline` | core (exact pin), Litestar, SQLAlchemy |
 
 Plus the React frontend (`frontend/`), the shared documentation site (`mkdocs.yml`,
-`docs/`), runnable examples (`examples/django`, `examples/fastapi`), benchmarks
+`docs/`), runnable examples (`examples/django`, `examples/fastapi`, `examples/flask`), benchmarks
 (`benchmarks/`) and helper scripts (`scripts/`).
 
 **Where does a change go?** If it is about *what the profiler records or reports* (trace
 model, recorder, SQL fingerprinting, detectors, EXPLAIN analysis, storage, redaction,
-the JSON API), it belongs in the core, and both adapters pick it up. If it is about
+the JSON API, the load tester), it belongs in the core, and every adapter picks it up. If it is about
 *how a framework talks to the core* (middleware, SQL hooks, URL routing, management
 commands, fix suggesters for an ORM), it belongs in that adapter. The core imports no
 framework, ever.
@@ -33,7 +35,7 @@ framework, ever.
 ## Set up
 
 ```bash
-git clone <repository-url> redline
+git clone https://github.com/Pythondeveloper6/redline redline
 cd redline
 uv sync --all-packages
 ```
@@ -85,6 +87,9 @@ uv run --with mkdocs-material mkdocs serve
 uv run --with mkdocs-material mkdocs build --strict   # what CI runs
 ```
 
+The site is published to <https://pythondeveloper6.github.io/redline/> by
+`.github/workflows/docs.yml` when changes land on `main`.
+
 ## Conventions this codebase enforces
 
 1. **The request path never raises into the application.** Capture failures are logged
@@ -98,7 +103,7 @@ uv run --with mkdocs-material mkdocs build --strict   # what CI runs
    redaction tests.
 4. **Storage is separate from the application database.** Redline never writes to the
    app's own database. New stores must pass the store contract tests in `redline_core`.
-5. **Lockstep versions.** All three packages carry the same version and the adapters pin
+5. **Lockstep versions.** All five packages carry the same version and the adapters pin
    `redline-core==` that version. `scripts/check_versions.py` enforces it.
 
 ## Commit messages
@@ -107,5 +112,6 @@ Say what changed and why in the body. The history is the design record.
 
 ## Releasing
 
-Releases are cut by the maintainer. This repository intentionally contains no release
-or publish automation.
+Releases are cut by the maintainer. The packages are not on PyPI yet, so users install from
+GitHub; this repository contains no PyPI publish automation. Only the documentation is
+deployed automatically (to GitHub Pages).

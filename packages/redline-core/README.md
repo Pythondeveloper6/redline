@@ -1,17 +1,25 @@
 # redline-core
 
 The framework-agnostic engine behind **Redline**, a self-hosted request profiler and
-backend analyzer for Django and FastAPI.
+backend analyzer and load tester for Django, FastAPI, Flask and Litestar.
 
 `redline-core` holds everything that does not depend on a web framework:
 
 - the trace/span data model and a `contextvars` recorder that is correct across threads
   and `asyncio` tasks and costs next to nothing when no request is being recorded;
 - SQL fingerprinting, project-only callsite capture and secret redaction;
-- detectors for N+1 queries, duplicate queries, slow queries and query budgets;
+- detectors for N+1 queries, duplicate queries, slow queries and query budgets, plus
+  event-loop blocking, long transactions, huge and unbounded results, `len(qs)` vs `.exists()`,
+  slow serializers and slow, duplicated or retried external calls;
 - an on-demand `EXPLAIN` runner with plan analysis for PostgreSQL, MySQL and SQLite;
 - an optional `pyinstrument` flamegraph profiler (`redline-core[profile]`);
-- a separate SQLite store with a background writer, retention and aggregates;
+- a separate SQLite store with a background writer, retention, hourly rollups and release
+  history;
+- a load tester (`redline load`, extra `load`) with an open-model scheduler, knee detection
+  and per-step bottlenecks;
+- optional integrations in `redline_core.contrib` (SQLAlchemy, httpx, requests, redis,
+  asyncpg, psycopg, Marshmallow, Strawberry, Graphene);
+- the access policy and layered configuration shared by every adapter;
 - the framework-neutral JSON API and the prebuilt web UI.
 
 It has **no runtime dependencies**.
@@ -20,12 +28,19 @@ It has **no runtime dependencies**.
 
 Install the package for your framework; it pulls in `redline-core` for you:
 
+Redline is not on PyPI yet: install from GitHub, naming the adapter **and** `redline-core` in
+one command (the adapter pins the core exactly). Adapters: `django-redline`,
+`fastapi-redline`, `flask-redline`, `litestar-redline`.
+
 ```console
-pip install django-redline     # Django
-pip install fastapi-redline    # FastAPI / Starlette + SQLAlchemy
+pip install \
+  "django-redline @ git+https://github.com/Pythondeveloper6/redline#subdirectory=packages/django-redline" \
+  "redline-core @ git+https://github.com/Pythondeveloper6/redline#subdirectory=packages/redline-core"
 ```
 
-For flamegraphs add the profiler extra: `pip install "redline-core[profile]"`.
+Extras on the core requirement: `profile` (flamegraphs), `load` (the load tester), and
+`httpx`, `requests`, `redis`, `asyncpg`, `psycopg`, `strawberry`, `graphene`. Documentation:
+<https://pythondeveloper6.github.io/redline/>.
 
 ## Timing your own code
 

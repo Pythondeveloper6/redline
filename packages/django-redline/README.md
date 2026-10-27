@@ -8,13 +8,21 @@ traces live in their own SQLite file.
 It replaces django-silk. Redline stores redacted data rather than plaintext secrets, never writes to
 your app DB or records itself, supports async, groups N+1s, and adds EXPLAIN and flamegraphs.
 
-> Status: `0.1.0a1`, alpha. Built on [`redline-core`](../redline-core).
+> Status: `0.2.0a1`, alpha. Built on [`redline-core`](../redline-core).
 
 ## Install
 
 ```bash
-pip install django-redline            # or: pip install "django-redline[profile]" for flamegraphs
+pip install \
+  "django-redline @ git+https://github.com/Pythondeveloper6/redline#subdirectory=packages/django-redline" \
+  "redline-core @ git+https://github.com/Pythondeveloper6/redline#subdirectory=packages/redline-core"
 ```
+
+Not on PyPI yet: install from GitHub, naming `redline-core` in the same command (the adapter
+pins it exactly). Docs: <https://pythondeveloper6.github.io/redline/>.
+
+Add the extra to the core requirement for flamegraphs:
+`"redline-core[profile] @ git+https://github.com/Pythondeveloper6/redline#subdirectory=packages/redline-core"`.
 
 ```python
 # settings.py

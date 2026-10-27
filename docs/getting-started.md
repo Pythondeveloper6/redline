@@ -2,27 +2,30 @@
 
 [← Index](index.md)
 
-This page takes a Django or a FastAPI project from nothing to a populated Redline UI in
-a few minutes, then shows you how to confirm everything is wired up and what to do next.
+This page takes a Django, FastAPI, Flask or Litestar project from nothing to a populated
+Redline UI in a few minutes, then shows you how to confirm everything is wired up and what
+to do next.
 
 ## Install
 
-Redline is three distributions released in lockstep:
+Redline is a core and one adapter per framework, released in lockstep:
 
 | Distribution | Import name | Install it when |
 |---|---|---|
-| `redline-core` | `redline_core` | always (the engine, the JSON API and the bundled UI) |
-| `django-redline` | `django_redline` | you run Django |
-| `fastapi-redline` | `fastapi_redline` | you run FastAPI or plain Starlette with SQLAlchemy |
+| `redline-core` | `redline_core` | always (the engine, the JSON API, the bundled UI and the `redline` command) |
+| `django-redline` | `django_redline` | you run Django (including Django Ninja) |
+| `fastapi-redline` | `fastapi_redline` | you run FastAPI with SQLAlchemy |
+| `flask-redline` | `flask_redline` | you run Flask, with or without Flask-SQLAlchemy |
+| `litestar-redline` | `litestar_redline` | you run Litestar with SQLAlchemy |
 
-!!! warning "Redline is not on PyPI"
+!!! warning "Install from GitHub: Redline is not on PyPI yet"
 
-    The repository is private and nothing is published. Each adapter pins the exact core
-    it was tested with (`redline-core==0.1.0a1`). If you install an adapter from Git
-    **alone**, pip looks for `redline-core` on PyPI, finds nothing and fails:
+    Each adapter pins the exact core it was tested with (`redline-core==0.2.0a1`). If you
+    install an adapter from Git **alone**, pip looks for `redline-core` on PyPI, finds
+    nothing and fails:
 
     ```text
-    ERROR: Could not find a version that satisfies the requirement redline-core==0.1.0a1
+    ERROR: Could not find a version that satisfies the requirement redline-core==0.2.0a1
     ```
 
     Name the core in the **same command** and pip uses your URL to satisfy the pin.
@@ -48,33 +51,55 @@ Redline is three distributions released in lockstep:
       "redline-core @ git+https://github.com/Pythondeveloper6/redline#subdirectory=packages/redline-core"
     ```
 
-For flamegraphs add the profiler extra to the core requirement (it installs
-`pyinstrument`):
+=== "Flask"
+
+    ```bash
+    pip install \
+      "flask-redline @ git+https://github.com/Pythondeveloper6/redline#subdirectory=packages/flask-redline" \
+      "redline-core @ git+https://github.com/Pythondeveloper6/redline#subdirectory=packages/redline-core"
+    ```
+
+=== "Litestar"
+
+    ```bash
+    pip install \
+      "litestar-redline @ git+https://github.com/Pythondeveloper6/redline#subdirectory=packages/litestar-redline" \
+      "redline-core @ git+https://github.com/Pythondeveloper6/redline#subdirectory=packages/redline-core"
+    ```
+
+Add extras to the **core** requirement:
+
+| Extra | Brings | For |
+|---|---|---|
+| `profile` | pyinstrument | [flamegraphs](flamegraphs.md) |
+| `load` | httpx | the [load tester](load-testing.md) |
+| `httpx`, `requests`, `redis`, `asyncpg`, `psycopg`, `strawberry`, `graphene` | the library at a compatible version | the matching [integration](integrations.md) |
 
 ```bash
-pip install "redline-core[profile] @ git+https://github.com/Pythondeveloper6/redline#subdirectory=packages/redline-core"
+pip install "redline-core[profile,load] @ git+https://github.com/Pythondeveloper6/redline#subdirectory=packages/redline-core"
 ```
 
-`uv pip install` accepts the same requirement strings. A private repository needs
-whatever Git credentials your machine already uses (an SSH agent, a credential helper or
-a token in the URL); Redline does nothing special here.
+`uv pip install` accepts the same requirement strings. In a lock file, pin a tag or a
+commit (`...redline@<sha>#subdirectory=...`) rather than a moving branch.
 
 To work on Redline itself, or to try the demos, clone the repository instead:
 
 ```bash
 git clone https://github.com/Pythondeveloper6/redline
 cd redline
-uv sync --all-packages        # all three packages, editable, plus the dev tools
+uv sync --all-packages        # every package, editable, plus the dev tools
 ```
 
 ### Supported versions
 
 | | Supported |
 |---|---|
-| Python for `redline-core` and `fastapi-redline` | 3.10, 3.11, 3.12, 3.13, 3.14 |
+| Python for `redline-core`, `fastapi-redline`, `flask-redline`, `litestar-redline` | 3.10, 3.11, 3.12, 3.13, 3.14 |
 | Python for `django-redline` | 3.12, 3.13, 3.14 |
 | Django | 5.2 LTS, 6.0, 6.1 (`>=5.2,<6.2`) |
 | FastAPI | 0.110 and later, below 1.0 |
+| Flask | 3.0 and later, below 4 |
+| Litestar | 2.12 and later, below 3 |
 | SQLAlchemy | 2.x |
 | Databases for EXPLAIN | PostgreSQL, MySQL (and MariaDB), SQLite |
 
@@ -147,6 +172,46 @@ uv sync --all-packages        # all three packages, editable, plus the dev tools
     address it as `localhost`, `127.0.0.1` or `[::1]`** and logs a warning at startup. That is right for `uvicorn` on your laptop; read
     [FastAPI: access control](fastapi.md#access-control) before you deploy.
 
+=== "Flask"
+
+    One line, after the app is created (or `init_app` in a factory).
+
+    ```python
+    from flask import Flask
+    from sqlalchemy import create_engine
+    from flask_redline import Redline
+
+    app = Flask(__name__)
+    engine = create_engine("sqlite:///app.db")
+
+    # ... your blueprints ...
+
+    Redline(app, engine=engine)      # UI at /_redline/
+    ```
+
+    With **Flask-SQLAlchemy** omit the engine: `db = SQLAlchemy(app); Redline(app)` finds
+    its engines, binds included. With no `permission` argument the UI answers only to
+    loopback clients. See [Flask](flask.md).
+
+=== "Litestar"
+
+    One plugin.
+
+    ```python
+    from litestar import Litestar
+    from sqlalchemy.ext.asyncio import create_async_engine
+    from litestar_redline import RedlinePlugin
+
+    engine = create_async_engine("sqlite+aiosqlite:///app.db")
+
+    app = Litestar(
+        route_handlers=[...],
+        plugins=[RedlinePlugin(engine=engine)],   # UI at /_redline/
+    )
+    ```
+
+    With no `guards` the UI answers only to loopback clients. See [Litestar](litestar.md).
+
 ## Look at it
 
 Start your server, make a few requests, then open the UI.
@@ -169,9 +234,26 @@ Start your server, make a few requests, then open the UI.
 
     Open `http://127.0.0.1:8000/_redline/` from the same machine.
 
-You will see the **Requests** page filling up. Open one. The tabs are **Timeline**,
-**SQL**, **Issues**, **Profile** and **Request / Response**; the [UI tour](the-ui.md)
-explains each.
+=== "Flask"
+
+    ```bash
+    flask run
+    ```
+
+    Open `http://127.0.0.1:5000/_redline/` from the same machine.
+
+=== "Litestar"
+
+    ```bash
+    litestar run --reload
+    ```
+
+    Open `http://127.0.0.1:8000/_redline/` from the same machine.
+
+You will see the **Requests** page filling up, live. Open one. The tabs are **Timeline**,
+**SQL**, **Issues**, **Profile**, **Logs**, **Exception** (when it raised) and
+**Request / Response**; the [UI tour](the-ui.md) explains each. Press `Ctrl-K` (`Cmd-K` on a
+Mac) for the command palette.
 
 !!! tip "Nothing in the list?"
 
@@ -183,6 +265,9 @@ explains each.
       (`django_redline.W001`). Is `REDLINE["ENABLED"]` true?
     - **FastAPI:** was `install()` called on the app that uvicorn serves, before
       startup? Redline wraps the app it was installed on.
+    - **Flask:** was `Redline(app)` (or `init_app`) called on the app you run? With
+      Flask-SQLAlchemy, SQL appears after the first request.
+    - **Litestar:** is `RedlinePlugin` in the `plugins` of the app you serve?
     - **Is the sample rate below 1?** In Django, `DEBUG = False` defaults it to 0.1, so
       9 in 10 fast requests are not stored. See [Sampling](how-it-works.md#sampling).
     - **Writer lag.** Traces are written by a background thread. Reload the page after
@@ -216,9 +301,14 @@ and run one.
     Visit `http://127.0.0.1:8000/orders`, then open `http://127.0.0.1:8000/_redline/`.
     The request shows an N+1 on order items with a `selectinload(Order.items)` diff.
 
+=== "Flask"
+
+    See `examples/flask/README.md` for the commands. The demo has deliberately bad views and
+    shows the same N+1 with a `selectinload` diff.
+
 Open the request, go to **Issues**, and copy the diff. The full tour of the demos' broken
 endpoints is in each example's README (`examples/django/README.md`,
-`examples/fastapi/README.md`).
+`examples/fastapi/README.md`, `examples/flask/README.md`).
 
 ## Your own spans
 
@@ -259,13 +349,46 @@ Everything is optional. Settings are a dict:
     })
     ```
 
+=== "Flask"
+
+    ```python
+    app.config["REDLINE"] = {
+        "sample_rate": 1.0,
+        "slow_query_ms": 50,
+        "ignore_paths": ["/static/", "/favicon.ico", "^/health"],
+    }
+    Redline(app, engine=engine)
+    ```
+
+=== "Litestar"
+
+    ```python
+    RedlinePlugin(engine=engine, settings={
+        "sample_rate": 1.0,
+        "slow_query_ms": 50,
+        "ignore_paths": ["/static/", "/favicon.ico", "^/health"],
+    })
+    ```
+
+=== "redline.toml"
+
+    The same settings, framework-independent, in a file at your project root:
+
+    ```toml
+    sample_rate = 1.0
+    slow_query_ms = 50
+    ignore_paths = ["/static/", "/favicon.ico", "^/health"]
+    ```
+
 Keys are case-insensitive (`SAMPLE_RATE` and `sample_rate` are the same) and an unknown
 key is an error with a "did you mean" hint, so a typo never silently falls back to a
-default. The complete table is the [Settings reference](settings.md).
+default. The complete table is the [Settings reference](settings.md). Presets,
+`redline.toml` and `REDLINE_*` environment variables are covered in
+[Configuration](configuration.md).
 
 ## Where things are stored
 
-Traces go to `.redline/redline.db` (Django: under `BASE_DIR`; FastAPI: relative to the
+Traces go to `.redline/redline.db` (Django: under `BASE_DIR`; the others: relative to the
 working directory), a SQLite file of Redline's own. Add `.redline/` to your
 `.gitignore`. It holds redacted request data: see [Storage](storage.md) and
 [Security](security.md).
@@ -275,4 +398,7 @@ working directory), a SQLite file of Redline's own. Add `.redline/` to your
 - Understand what is recorded and what it costs: [How it works](how-it-works.md).
 - Learn the UI: [The UI](the-ui.md).
 - Fix something: [N+1 detection](n-plus-one.md), [EXPLAIN](explain.md).
-- Before real traffic: [Production](production.md) and [Security](security.md).
+- See what else it finds: [Detectors overview](detectors.md).
+- Find out how much load you can take: [Load testing](load-testing.md).
+- Before real traffic: [Production](production.md), [Access control](access-control.md)
+  and [Security](security.md).

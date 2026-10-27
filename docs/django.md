@@ -141,7 +141,32 @@ REDLINE = {"STORE": "myproject.redline.MirroringStore"}
 An import error, or a value that does not produce a `Store`, raises
 `ImproperlyConfigured` (and the system check `django_redline.E001`).
 
+## What 0.2 adds for Django
+
+| Feature | Where to read |
+|---|---|
+| `transaction.atomic` recorded as `transaction` spans (with `ATOMIC_REQUESTS`), long-transaction and external-call-in-transaction detection | [Transactions and locks](transactions.md) |
+| DRF serializers timed as `serializer` spans | [Slow serializers](serializers.md) |
+| Row counts on queries, large and unbounded results, `len(qs)` vs `.count()` / `.exists()` | [Large and unbounded results](result-size.md) |
+| A sync ORM call inside an `async def` view reported as blocking the event loop | [Blocking in async](async-blocking.md) |
+| Django's cache framework analysed per key pattern | [Cache efficiency](cache-efficiency.md) |
+| Strawberry and Graphene resolvers (and `strawberry-django`) | [GraphQL](graphql.md) |
+| Django Ninja | [Django Ninja](django-ninja.md) |
+| `manage.py redline_scan` (templates and DRF) | [Static N+1 scan](static-scan.md) |
+| `manage.py redline_scenario`, then `redline load` | [Load testing](load-testing.md) |
+| `Server-Timing`, the floating badge (when `DEBUG`), live mode, snapshots | [Server-Timing and the badge](server-timing-badge.md) |
+| `REDLINE["PRESET"]`, `redline.toml`, `REDLINE_*` | [Configuration](configuration.md) |
+
+The badge is `"auto"` by default, which in Django means **on when `DEBUG` is true**. Nothing
+changes in `MIDDLEWARE` or `urls.py`.
+
 ## Access control
+
+<!-- verify: access control -->
+Django's default access policy is `framework`: the permission check below. The other policies
+(`token`, `basic`, IP allow-lists, `read_only`, ...) are available through the same `REDLINE`
+dict and are described on [Access control](access-control.md). When `ACCESS` is not
+`"framework"`, `PERMISSION` is not consulted.
 
 Every view, page, assets and API, first checks `REDLINE["PERMISSION"]`. Before that, it
 calls `request.get_host()`, so `ALLOWED_HOSTS` is enforced on Redline's views even without
@@ -314,8 +339,11 @@ Redline is enabled; the others always run.
 |---|---|
 | `manage.py redline_clear [--noinput]` | Deletes every recorded trace. Asks for confirmation (`Delete all N Redline traces? [y/N]`) unless `--noinput` or `--no-input` |
 | `manage.py redline_prune [--max-age-days N] [--max-rows N]` | Applies [retention](storage.md#retention) now. Defaults to the `MAX_AGE_DAYS` and `MAX_ROWS` settings. `0` disables that rule for this run (it never deletes everything: that is `redline_clear`). Negative values are an error |
+| `manage.py redline_scan [PATHS] [--json] [--fail] [--dialect django\|jinja] [--no-drf]` | [Static N+1 scan](static-scan.md): templates that read a relation in a loop, and DRF serializers whose queryset lacks the matching `select_related` / `prefetch_related`. `--fail` exits 1 on findings |
+| `manage.py redline_scenario` | Writes a [load-test scenario](load-testing.md#generating-scenarios) from your URLconf <!-- verify: redline_scenario --> |
 
-Both build the runtime, flush pending writes, and print how many traces they removed. Run
+`redline_clear` and `redline_prune` build the runtime, flush pending writes, and print how
+many traces they removed. `redline_clear` keeps [history](history.md). Run
 `redline_prune` from cron if your app is idle for long stretches (the writer prunes as
 it writes, so an idle app does not prune on its own).
 
