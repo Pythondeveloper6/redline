@@ -1,5 +1,6 @@
 import { KIND_COLOR, ms } from '../lib/format'
 import type { Span } from '../types'
+import CallsiteLink from './CallsiteLink'
 import { CopyButton, Drawer, Sql } from './ui'
 
 export function KV({ k, children }: { k: string; children: React.ReactNode }) {
@@ -13,13 +14,13 @@ export function StackList({ span }: { span: Span }) {
     <div>
       <div className="text-[12px] font-semibold mb-1.5">Call site</div>
       <div className="card p-3 space-y-1.5">
-        <div className="mono"><span className="font-semibold">{cs.file}:{cs.line}</span> <span className="text-muted">in {cs.function}</span></div>
+        <div className="mono"><CallsiteLink callsite={cs} className="!text-ink font-semibold" /> <span className="text-muted">in {cs.function}</span></div>
         {cs.code && <pre className="m-0 rounded bg-raised px-2 py-1 overflow-x-auto">{cs.code}</pre>}
         {cs.stack.length > 0 && (
           <div className="pt-1.5 mt-1.5 border-t border-line">
             <div className="text-[11px] text-muted mb-1">Stack (outermost first)</div>
             {cs.stack.map((f, i) => (
-              <div key={i} className={`mono text-[11.5px] ${i === cs.stack.length - 1 ? 'text-ink font-semibold' : 'text-muted'}`}>{f.file}:{f.line} <span className="text-faint">{f.function}</span></div>
+              <div key={i} className={`mono text-[11.5px] ${i === cs.stack.length - 1 ? 'text-ink font-semibold' : 'text-muted'}`}><CallsiteLink callsite={f} className="!text-inherit" /> <span className="text-faint">{f.function}</span></div>
             ))}
           </div>
         )}

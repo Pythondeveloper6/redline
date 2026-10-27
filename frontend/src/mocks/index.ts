@@ -15,6 +15,8 @@ function filtered(sp: URLSearchParams): Trace[] {
     if (f.status && !statusOk(t.status, f.status)) return false
     if (f.min_ms && t.duration_ms < Number(f.min_ms)) return false
     if (f.min_queries && t.query_count < Number(f.min_queries)) return false
+    if (f.route && t.route !== f.route) return false
+    if (f.replay_of && t.tags.replay_of !== f.replay_of) return false
     if (f.has_issues === '1' && t.issues.length === 0) return false
     return true
   })
@@ -32,6 +34,8 @@ export async function mockFetch(method: string, url: string, body: unknown): Pro
       version: '0.1.0a1', framework: 'django',
       settings: { thresholds: { n_plus_one: 5, slow_query_ms: 100, too_many_queries: 50 }, sampling: { sample_rate: 1 }, profiling_enabled: true, explain_analyze_enabled: false },
       storage: { rows: traces.length, path: '.redline/redline.db' },
+      project_root: '/Users/dev/shop', editor: 'vscode', editor_url_template: 'vscode://file/{file}:{line}', release: 'mock-1',
+      features: { load_from_ui: false, sse: false, snapshot: false },
     })
   }
   if (path === 'api/traces' && method === 'GET') {
@@ -58,6 +62,30 @@ export async function mockFetch(method: string, url: string, body: unknown): Pro
     if (!t) return err(404, 'not_found', 'Trace not found.')
     if (method === 'DELETE') { traces = traces.filter(x => x !== t); return ok({ deleted: 1 }) }
     return ok(t)
+  }
+  if (path === 'api/compare') {
+    const a = traces.find(x => x.id === u.searchParams.get('a')); const b = traces.find(x => x.id === u.searchParams.get('b'))
+    if (!a || !b) return err(404, 'trace_not_found', 'Trace not found.')
+    const kinds: Record<string, { a_ms: number; b_ms: number; a_count: number; b_count: number }> = {}
+    const sql = new Map<string, { fingerprint: string; sql: string; a_count: number; b_count: number; a_ms: number; b_ms: number }>()
+    for (const [side, t] of [['a', a], ['b', b]] as const) {
+      for (const s of t.spans) {
+        const k = (kinds[s.kind] ??= { a_ms: 0, b_ms: 0, a_count: 0, b_count: 0 })
+        k[`${side}_ms`] += s.duration_ms; k[`${side}_count`] += 1
+        if (s.kind === 'sql') {
+          const fp = String(s.data.fingerprint ?? s.name)
+          const q = sql.get(fp) ?? { fingerprint: fp, sql: String(s.data.sql ?? s.name), a_count: 0, b_count: 0, a_ms: 0, b_ms: 0 }
+          q[`${side}_count`] += 1; q[`${side}_ms`] += s.duration_ms; sql.set(fp, q)
+        }
+      }
+    }
+    const ka = new Set(a.issues.map(i => i.kind)); const kb = new Set(b.issues.map(i => i.kind))
+    return ok({
+      a: summarize(a), b: summarize(b),
+      delta: { duration_ms: b.duration_ms - a.duration_ms, query_count: b.query_count - a.query_count, query_ms: b.query_ms - a.query_ms },
+      by_kind: kinds, sql: [...sql.values()],
+      issues: { only_a: [...ka].filter(k => !kb.has(k)), only_b: [...kb].filter(k => !ka.has(k)), both: [...ka].filter(k => kb.has(k)) },
+    })
   }
   if (path === 'api/endpoints') return ok({ items: buildEndpoints() })
   if (path === 'api/issues') {

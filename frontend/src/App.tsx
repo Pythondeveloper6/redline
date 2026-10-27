@@ -4,6 +4,7 @@ import Requests from './pages/Requests'
 import RequestDetail from './pages/RequestDetail'
 import Endpoints from './pages/Endpoints'
 import Issues from './pages/Issues'
+import Compare from './pages/Compare'
 
 export default function App() {
   return (
@@ -12,6 +13,7 @@ export default function App() {
         <Route index element={<Navigate to="/requests" replace />} />
         <Route path="/requests" element={<Requests />} />
         <Route path="/requests/:id" element={<RequestDetail />} />
+        <Route path="/compare/:a/:b" element={<Compare />} />
         <Route path="/endpoints" element={<Endpoints />} />
         <Route path="/issues" element={<Issues />} />
         <Route path="*" element={<Navigate to="/requests" replace />} />

@@ -7,6 +7,7 @@ import { Callsite, CopyButton, Empty, ErrorBox, I, Icon, IssueBadge, Pill, Redac
 import Waterfall from '../components/Waterfall'
 import SpanDrawer, { KV } from '../components/SpanDrawer'
 import { ExplainDrawer } from '../components/Plan'
+import RequestActions from '../components/RequestActions'
 import { SuggestionBlock } from '../components/IssueCard'
 
 const Flamegraph = lazy(() => import('../components/Flamegraph'))
@@ -171,6 +172,7 @@ export default function RequestDetail() {
         <Status code={trace.status} />
         <span className="text-muted text-[12px] w-full sm:w-auto">{clock(trace.started_at)} · {trace.framework}{trace.route && trace.route !== trace.path ? <> · <span className="mono">{trace.route}</span></> : null}{trace.view ? <> · <span className="mono">{trace.view}</span></> : null}</span>
       </div>
+      <RequestActions trace={trace} />
       {trace.error && (
         <div className="rounded-lg border border-bad/30 bg-bad/5 p-3">
           <div className="flex items-center gap-2 text-bad font-semibold"><Icon d={I.alert} size={15} />{trace.error.type}</div>

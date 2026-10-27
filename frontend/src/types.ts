@@ -57,7 +57,10 @@ export interface ExplainResult {
 export interface Meta {
   version: string; framework: string
   settings: Record<string, any>
-  storage: { rows: number; path: string }
+  storage: { rows: number; path: string; dropped?: number }
+  // v0.2 (CONTRACT §12); absent on older backends
+  project_root?: string | null; editor?: string | null; editor_url_template?: string | null; release?: string | null
+  features?: { load_from_ui?: boolean; sse?: boolean; snapshot?: boolean }
 }
 export interface Speedscope {
   shared: { frames: { name: string; file?: string; line?: number }[] }
@@ -70,4 +73,13 @@ export interface Speedscope {
 }
 export interface TraceFilters {
   q?: string; method?: string; status?: string; min_ms?: string; min_queries?: string; has_issues?: string
+  replay_of?: string; route?: string
+}
+
+export interface CompareResult {
+  a: TraceSummary; b: TraceSummary
+  delta: { duration_ms: number; query_count: number; query_ms: number }
+  by_kind: Record<string, { a_ms: number; b_ms: number; a_count: number; b_count: number }>
+  sql: { fingerprint: string; sql: string; a_count: number; b_count: number; a_ms: number; b_ms: number }[]
+  issues: { only_a: unknown[]; only_b: unknown[]; both: unknown[] }
 }
