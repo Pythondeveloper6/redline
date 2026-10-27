@@ -15,6 +15,7 @@ from fastapi.params import Depends as DependsParam
 from redline_core import Recorder, Settings, configure
 from redline_core.api import RedlineAPI
 from redline_core.explain import ExplainExecutor
+from redline_core.load.control import run_hooks
 from redline_core.storage import SQLiteStore, Store
 
 from ._middleware import RedlineMiddleware
@@ -57,8 +58,14 @@ class Redline:
         self.suggester = suggester
         self.engines: dict[str, EngineLike] = {}
         self.loop: asyncio.AbstractEventLoop | None = None
+        launcher, stopper = run_hooks(store, settings)
         self.api = RedlineAPI(
-            store, settings, framework="fastapi", explain_executor=self._executor_for
+            store,
+            settings,
+            framework="fastapi",
+            explain_executor=self._executor_for,
+            run_launcher=launcher,
+            run_stopper=stopper,
         )
 
     def add_engine(self, engine: EngineLike, alias: str | None = None) -> str:
@@ -152,7 +159,9 @@ def install(
     app.router.routes[0:0] = added  # win over catch-all routes declared earlier
 
     if cfg.enabled:  # disabled: no middleware and no SQLAlchemy listeners at all
-        app.add_middleware(RedlineMiddleware, recorder=recorder)
+        app.add_middleware(
+            RedlineMiddleware, recorder=recorder, prefix=prefix, debug=lambda: bool(app.debug)
+        )
         instrument_serialization()
 
     original = app.router.lifespan_context
