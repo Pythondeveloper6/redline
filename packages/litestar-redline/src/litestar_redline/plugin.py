@@ -17,6 +17,7 @@ from litestar.plugins import InitPluginProtocol
 from redline_core import Recorder, Settings, configure
 from redline_core.api import RedlineAPI
 from redline_core.explain import ExplainExecutor
+from redline_core.load.control import run_hooks
 from redline_core.storage import SQLiteStore, Store
 
 from ._middleware import EXCEPTION_KEY, RedlineMiddleware
@@ -110,8 +111,15 @@ class RedlinePlugin(InitPluginProtocol):
         self.store: Store = store if store is not None else SQLiteStore.from_settings(cfg)
         self.suggester = SQLAlchemyFixSuggester(project_root=cfg.project_root)
         self.recorder: Recorder = configure(cfg, self.store, [self.suggester])
+        # POST api/runs: only with load_from_ui and a file-backed SQLiteStore (else 501)
+        launcher, stopper = run_hooks(self.store, cfg)
         self.api = RedlineAPI(
-            self.store, cfg, framework="litestar", explain_executor=self._executor_for
+            self.store,
+            cfg,
+            framework="litestar",
+            explain_executor=self._executor_for,
+            run_launcher=launcher,
+            run_stopper=stopper,
         )
         self._installed = False
 
@@ -169,7 +177,7 @@ class RedlinePlugin(InitPluginProtocol):
 
         if self.settings.enabled:  # disabled: no middleware and no SQLAlchemy listeners
             app_config.middleware.insert(
-                0, DefineMiddleware(RedlineMiddleware, recorder=self.recorder)
+                0, DefineMiddleware(RedlineMiddleware, recorder=self.recorder, mount=self.path)
             )
             app_config.after_exception.append(self._after_exception)
         app_config.on_shutdown.append(self._on_shutdown)

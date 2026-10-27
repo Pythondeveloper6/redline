@@ -16,6 +16,12 @@ response status, headers and body (never for streaming or file responses, which 
 untouched), unhandled exceptions (re-raised, never swallowed), the ``X-Redline-Run``
 load-test tag, and a pyinstrument flamegraph when asked with ``?_redline=profile`` or
 ``X-Redline-Profile: 1``. Requests under Redline's own mount prefix are never recorded.
+
+On every recorded response it adds a ``Server-Timing`` header (``server_timing`` setting;
+appended to one the view set) and, when the ``badge`` setting is on (``"auto"`` = ``DEBUG``),
+injects the floating badge ``<script>`` before ``</body>`` of a kept 2xx ``text/html``
+``HttpResponse`` – never a streaming or file response, a compressed body, one larger than
+2 MB or one whose ``Content-Security-Policy`` does not allow ``'self'`` scripts.
 """
 
 from __future__ import annotations
@@ -26,9 +32,10 @@ from typing import Any
 
 from asgiref.sync import iscoroutinefunction, markcoroutinefunction
 from django.conf import settings
-from django.http import HttpRequest, HttpResponseBase
+from django.http import HttpRequest, HttpResponse, HttpResponseBase
 from django.urls import NoReverseMatch, reverse
 
+from redline_core import ui
 from redline_core.blocking import track_request
 from redline_core.recorder import SpanContext, TraceBuilder
 from redline_core.sampling import profile_requested
@@ -170,6 +177,9 @@ class RedlineMiddleware:
                 )
                 return
             headers, body, size = _response_parts(response)
+            rs = builder.recorder.settings
+            timing = builder.server_timing() if rs.server_timing else ""
+            snippet = _badge_snippet(builder, response)
             trace = builder.recorder.finish_trace(
                 builder,
                 status=response.status_code,
@@ -182,8 +192,44 @@ class RedlineMiddleware:
             )
             if trace.tags.get("sampled_by") and settings.DEBUG:
                 response.headers["X-Redline-Trace"] = trace.id
+            if timing:
+                existing = response.get("Server-Timing")
+                response.headers["Server-Timing"] = f"{existing}, {timing}" if existing else timing
+            if snippet and trace.tags.get("sampled_by"):
+                _inject(response, snippet)
         except Exception:
             logger.exception("Redline failed to finish a trace")
+
+
+def _badge_snippet(builder: TraceBuilder, response: HttpResponseBase) -> str | None:
+    """The badge ``<script>`` for ``response``, or ``None`` when it does not get one."""
+    if not builder.active or not ui.badge_enabled(builder.recorder.settings, settings.DEBUG):
+        return None
+    # FileResponse / StreamingHttpResponse are not HttpResponse subclasses.
+    if not isinstance(response, HttpResponse) or response.streaming:
+        return None
+    if not ui.badge_allowed(
+        response.status_code,
+        response.get("Content-Type"),
+        content_encoding=response.get("Content-Encoding"),
+        csp=response.get("Content-Security-Policy"),
+    ):
+        return None
+    if len(response.content) > ui.BADGE_MAX_BYTES:
+        return None
+    mount = mount_prefix()
+    if not mount:
+        return None
+    return ui.badge_snippet(builder.id, mount, ui.badge_summary(builder, response.status_code))
+
+
+def _inject(response: HttpResponseBase, snippet: str) -> None:
+    new = ui.inject_badge(response.content, snippet)  # type: ignore[attr-defined]
+    if new is None:
+        return
+    response.content = new  # type: ignore[attr-defined]
+    if response.has_header("Content-Length"):
+        response.headers["Content-Length"] = str(len(new))
 
 
 def _small_body(request: HttpRequest, limit: int) -> bytes | None:

@@ -10,6 +10,10 @@ into the trace the WSGI middleware started, found through the contextvar:
   ``before_request`` / ``after_request`` hooks), also for ``async def`` views;
 * ``before_render_template`` / ``template_rendered`` – a ``template`` span per top-level
   render; queries a template triggers (lazy loading) nest under it;
+* ``app.async_to_sync`` – every ``async def`` view/hook runs inside
+  :func:`redline_core.blocking.track_request` on the event loop asgiref creates for it, so
+  a blocking call in a coroutine (``time.sleep``, a sync driver) becomes a ``blocking``
+  span;
 * ``got_request_exception`` – the unhandled exception for the trace's ``error``. Flask
   turns ``HTTPException`` (``abort(404)``) into a response without this signal, so a 4xx is
   never an error.
@@ -18,11 +22,13 @@ into the trace the WSGI middleware started, found through the contextvar:
 from __future__ import annotations
 
 import contextvars
+import functools
 from typing import Any
 
 from flask import Flask, got_request_exception, request, request_started
 from flask.signals import before_render_template, template_rendered
 
+from redline_core.blocking import track_request
 from redline_core.recorder import SpanContext, current
 
 from ._middleware import ERROR_KEY, PASSTHROUGH_KEY
@@ -110,3 +116,18 @@ def install_hooks(app: Flask, on_first_request: Any = None) -> None:
             return original()
 
     app.dispatch_request = dispatch_request  # type: ignore[method-assign]
+
+    to_sync = app.async_to_sync
+
+    def async_to_sync(func: Any) -> Any:
+        @functools.wraps(func)
+        async def tracked(*args: Any, **kwargs: Any) -> Any:
+            builder = current()  # asgiref copies the context into its loop thread
+            if builder is None:
+                return await func(*args, **kwargs)
+            async with track_request(builder):  # binds the loop this coroutine runs on
+                return await func(*args, **kwargs)
+
+        return to_sync(tracked)
+
+    app.async_to_sync = async_to_sync  # type: ignore[method-assign]

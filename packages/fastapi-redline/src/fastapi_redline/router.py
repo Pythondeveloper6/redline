@@ -8,10 +8,12 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.routing import APIRoute
 
-from redline_core import ui
+from redline_core import stream, ui
+from redline_core.api import RawResponse
+from redline_core.storage import FilterError
 
 from ._security import RedlineHTTPError, csrf_guard
 
@@ -86,12 +88,25 @@ def build_router(redline: Any, dependencies: Sequence[Any]) -> APIRouter:
             file, media_type=ui.content_type(file), headers={**_IMMUTABLE, **_SECURITY}
         )
 
+    @router.get("/api/stream")
+    async def live(request: Request) -> Response:
+        """Server-sent events: one ``trace`` event per new trace (``CONTRACT.md`` §12)."""
+        try:
+            since = stream.parse_since(request.query_params)
+        except FilterError as exc:
+            return error_response(400, "invalid_filter", str(exc))
+        return StreamingResponse(
+            stream.async_events(redline.api, since, request.is_disconnected),
+            media_type=stream.CONTENT_TYPE,
+            headers=stream.SSE_HEADERS,
+        )
+
     @router.api_route(
         "/api/{path:path}",
         methods=["GET", "POST", "DELETE", "PUT", "PATCH"],  # the core answers 405 for the last two
         dependencies=[Depends(csrf_guard)],
     )
-    async def api(request: Request, path: str) -> JSONResponse:
+    async def api(request: Request, path: str) -> Response:
         redline.loop = asyncio.get_running_loop()
         params: dict[str, Any] = {}
         for key, value in request.query_params.multi_items():
@@ -101,14 +116,22 @@ def build_router(redline: Any, dependencies: Sequence[Any]) -> APIRouter:
             else:
                 params[key] = value
         body = await request.body() if request.method == "POST" else None
+        base_url = str(request.base_url).rstrip("/")  # scheme://host[:port] + root_path
         status, payload = await run_in_threadpool(
-            redline.api.dispatch, request.method, f"api/{path}", params, body
+            redline.api.dispatch, request.method, f"api/{path}", params, body, base_url=base_url
         )
+        if isinstance(payload, RawResponse):  # the snapshot page
+            return Response(
+                payload.body,
+                status_code=payload.status,
+                media_type=payload.content_type,
+                headers={**payload.headers, **_NO_STORE, **_SECURITY},
+            )
         return JSONResponse(payload, status_code=status, headers={**_NO_STORE, **_SECURITY})
 
     @router.get("/{name}")
     async def top_level(name: str) -> Response:
-        file = ui.asset_path(name)  # favicon.svg etc.
+        file = ui.asset_path(name)  # badge.js, favicon.svg etc.
         if file is None:
             return error_response(404, "not_found", "Not found.")
         return FileResponse(

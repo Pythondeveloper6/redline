@@ -26,7 +26,7 @@ from typing import Any
 
 from .scenario import load_scenario, validate_base_url
 
-__all__ = ["StopFile", "launch_background", "runs_dir", "stop_run"]
+__all__ = ["StopFile", "launch_background", "run_hooks", "runs_dir", "stop_run"]
 
 DEFAULT_STORE = ".redline/redline.db"
 
@@ -174,3 +174,44 @@ def cleanup(run_id: str, store_path: str | os.PathLike[str] | None) -> None:
             (rdir / f"{_safe_id(run_id)}{suffix}").unlink()
         except FileNotFoundError:
             pass
+
+
+def run_hooks(store: Any, settings: Any) -> tuple[Any, Any]:
+    """``(run_launcher, run_stopper)`` for :class:`~redline_core.api.RedlineAPI`, or
+    ``(None, None)`` (→ 501) unless ``settings.load_from_ui`` is on and ``store`` is a
+    :class:`~redline_core.storage.SQLiteStore` backed by a real file (the background
+    ``redline load`` process writes the run into that same file).
+
+    The launcher pre-inserts a ``running`` :class:`~redline_core.runs.Run` row (the child
+    upserts it a moment later), so ``GET api/runs/{id}`` never answers a transient 404.
+    The target is always the ``base_url`` the adapter derived from the request.
+    """
+    from ..storage import SQLiteStore
+
+    if not getattr(settings, "load_from_ui", False) or not isinstance(store, SQLiteStore):
+        return None, None
+    path = os.fspath(store.path)
+    if not path or path == ":memory:" or path.startswith("file:"):
+        return None, None
+
+    def launcher(config: dict[str, Any], base_url: str | None) -> str:
+        from ..runs import Run
+
+        if not base_url:
+            raise ValueError("cannot tell the application's own URL for this request")
+        run_id = launch_background(config, base_url, path)
+        try:
+            store.save_run(
+                Run(id=run_id, name=str(config.get("name") or "UI run"), config=dict(config))
+            )
+        except Exception:  # pragma: no cover - the child writes it anyway
+            pass
+        return run_id
+
+    def stopper(run_id: str) -> bool:
+        try:
+            return stop_run(run_id, path)
+        except ValueError:
+            return False
+
+    return launcher, stopper
