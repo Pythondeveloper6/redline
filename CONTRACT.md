@@ -432,7 +432,7 @@ Concrete decisions (v0.2 implementation):
 | `GET api/traces/{id}/snapshot` | `text/html` standalone page (bundle inlined, `window.__REDLINE_SNAPSHOT__ = {trace, profile}`). `dispatch` returns a `RawResponse(status, content_type, body: bytes, headers)` for it; adapters send it as-is |
 | `GET api/compare?a=<id>&b=<id>` | `{a: TraceSummary, b: TraceSummary, delta: {duration_ms, query_count, query_ms}, by_kind: {kind: {a_ms, b_ms, a_count, b_count}}, sql: [{fingerprint, sql, a_count, b_count, a_ms, b_ms}], issues: {only_a, only_b, both}}` |
 | `GET api/sql?q=&window=` | `{items: [{fingerprint, sql, count, traces, total_ms, max_ms, routes, sample_trace_id}]}` |
-| `GET api/indexes?window=` | `{candidates: [{table, columns, create_sql, covers: [fingerprint], queries, total_ms, est_saving_ms, vendor}], unused: [{table, index, scans, size_bytes}] , unused_supported: bool}` |
+| `GET api/indexes?window=&db=` | `{candidates: [{table, columns, create_sql, covers: [fingerprint], queries, total_ms, est_saving_ms, vendor, kind, confidence, verified}], unused: [{table, index, scans, size_bytes}], unused_supported: bool}` (full shape below) |
 | `GET api/cache?window=` | `{items: [{backend, key_pattern, gets, hits, misses, hit_rate, sets, unread_sets, stampedes}]}` |
 | `GET api/external?window=` | `{items: [{method, host, url_pattern, count, p95_ms, max_ms, errors, error_rate, duplicates, retries}]}` |
 | `GET api/history?route=&method=&window=30d&bucket=1h\|1d` | `{series: [{t, count, p50_ms, p95_ms, p99_ms, error_rate, avg_queries}], releases: [{release, first_seen}]}` (no route = whole app) |
@@ -483,7 +483,47 @@ Concrete decisions (v0.2 implementation):
   image; sorted regressed, new, improved, gone, same. Issue items are `IssueIndexEntry` dicts (`id, kind, severity,
   title, route, first_seen, last_seen, first_release, last_release`) with `occurrences` counted within the period
   (`b`'s count for persisting).
-- `GET api/indexes` answers 501 `not_supported` until the index advisor lands (it reads `store.sql_workload`).
+- `GET api/indexes?window=24h&db=default&refresh=` (`redline_core.index_advisor.advise`) reads
+  `store.sql_workload(window)` (no method → 501 `not_supported`). Answer:
+  `{db, vendor, window, candidates: [Candidate], unused: [Unused], unused_supported: bool, unused_error:
+  {code, message}|null, verified: bool, queries_analyzed, already_indexed, explained, elapsed_ms, cached: bool}`
+  with `Candidate = {table, columns: [str], create_sql, covers: [fingerprint], queries (executions of the covered
+  fingerprints), total_ms (their total time), est_saving_ms, vendor, kind: "btree"|"trigram"|"fts"|"fulltext",
+  confidence: "high"|"medium"|"low", verified: bool, explained: bool, note: str|null}` (at most 10, best first) and
+  `Unused = {schema, table, index, scans, size_bytes, drop_sql}`.
+  - **Input.** The top 100 explainable `SELECT` fingerprints by total time whose sample trace's span ran on `db`
+    (a missing sample counts as `default`). The sample span's raw SQL/params are parsed when available (so `LIKE`
+    patterns are known), else the normalised SQL.
+  - **Requirements** per table and per `OR`-branch cluster: equality columns (`=`, `IN`, `IS NULL`; any order),
+    then one range column (`<`…, `BETWEEN`, known prefix `LIKE 'x%'`) or, without one, the single-table,
+    single-direction `ORDER BY` columns (sort-only needs a `LIMIT`); ≤ 4 columns. `a.x = b.y` adds `(x)` on `a` and
+    `(y)` on `b`. A bare `(id)` is skipped (primary key). No B-tree requirement for functions of the column,
+    negations (`!=`, `NOT IN`, `NOT LIKE`, `NOT BETWEEN`), `IS NOT NULL` or a `LIKE` with unknown pattern; a
+    leading-wildcard `LIKE` or an `ILIKE` gives a non-B-tree candidate instead: `trigram` (PostgreSQL `pg_trgm`
+    GIN), `fts` (SQLite FTS5 trigram table), `fulltext` (MySQL `FULLTEXT`). A query's time is split evenly over
+    its requirements.
+  - **Merge.** Candidate columns = equality columns ordered by the workload time using them, then the tail. An
+    index covers a requirement when its first columns are exactly the requirement's equality set followed by its
+    tail (so `(a, b)` covers `(a)` and `(a, b)`). Greedy weighted set cover: repeatedly take the candidate
+    covering the most still-uncovered time; `covers` lists only the fingerprints credited to it.
+  - **Verification** (only with `factory(db, vendor)`, all through the always-rolled-back executor, read-only
+    `SELECT`s and plain `EXPLAIN`s, never `ANALYZE`, sharing a 3 s budget): the catalog (`pg_tables`/`pg_indexes`
+    in `current_schemas(false)`; `sqlite_master` + `pragma_index_list`/`pragma_index_info`/`pragma_table_info`,
+    FTS5 tables by their `content=`; `information_schema.TABLES`/`STATISTICS` of `DATABASE()`) drops requirements
+    an existing non-partial index prefix already serves (expression columns end the prefix; `already_indexed`
+    counts them) and requirements on names that are not tables (CTEs, views). Then the top 20 remaining
+    fingerprints are explained with the sample span's SQL; a `seq_scan`/`full_scan` node on the table marks it
+    scanned. Without an executor the list is static analysis only (`verified: false`).
+  - **est_saving_ms** = Σ over credited requirements of (time share × 0.8 when that query's EXPLAIN showed a scan
+    of the table, else × 0.4). **confidence**: `high` = a scan was seen; `medium` = B-tree not explained; `low` =
+    non-B-tree (not a drop-in, see `note`) or every covered query is already planned without a scan.
+  - **Unused** (PostgreSQL only): `pg_stat_user_indexes` with `idx_scan = 0`, excluding primary keys, unique
+    indexes and constraint-backing indexes, by `pg_relation_size` desc, ≤ 100 (counts since the last stats reset).
+    Other vendors: `unused_supported: false`, `unused_error: null`. PostgreSQL without an executor:
+    `unused_error.code = "explain_unavailable"` (the would-be 501), a failed query: `explain_failed`; the response
+    itself stays 200.
+  - **Cache.** Answers are cached per `(window, db)` for 30 s in the `RedlineAPI` instance (`cached: true`);
+    `refresh=1` bypasses it. Errors: 400 `invalid_window`.
 
 Replay is browser-side: the UI re-sends the request with `fetch` (same origin, the viewer's own cookies),
 adding `X-Redline-Replay-Of: <trace id>`; the recorder turns that header into the tag `replay_of`
