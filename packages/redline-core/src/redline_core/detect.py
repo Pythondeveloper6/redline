@@ -35,6 +35,7 @@ import logging
 from collections.abc import Iterable, Sequence
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
+from . import detectors
 from . import sql as sqlmod
 from .conf import Settings
 from .model import Callsite, Issue, IssueKind, Severity, Span, Suggestion, Trace
@@ -168,7 +169,8 @@ class Detector:
         too_many = self._too_many(trace, sql_spans)
         if too_many:
             issues.append(too_many)
-        by_id = {s.id: s for s in sql_spans}
+        issues.extend(self._run_registry(trace))
+        by_id = {s.id: s for s in trace.spans}
         for issue in issues:
             spans = [by_id[i] for i in issue.span_ids if i in by_id]
             if not spans and issue.id in samples:
@@ -177,6 +179,15 @@ class Detector:
         order = {"critical": 0, "warning": 1, "info": 2}
         issues.sort(key=lambda i: (order[i.severity], -i.total_ms))
         return issues
+
+    def _run_registry(self, trace: Trace) -> list[Issue]:
+        found: list[Issue] = []
+        for fn in list(detectors.REGISTRY):
+            try:
+                found.extend(fn(trace, self.settings))
+            except Exception:  # one broken detector must not hide the others
+                logger.exception("Redline detector %r failed", fn)
+        return found
 
     def _suggest(self, issue: Issue, spans: list[Span]) -> Suggestion | None:
         for suggester in self.suggesters:

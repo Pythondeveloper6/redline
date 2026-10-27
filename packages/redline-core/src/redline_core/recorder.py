@@ -33,7 +33,9 @@ from __future__ import annotations
 
 import functools
 import inspect
+import linecache
 import logging
+import re
 import threading
 import time
 import traceback
@@ -44,10 +46,10 @@ from typing import TYPE_CHECKING, Any, TypeVar, overload
 
 from . import sql as sqlmod
 from .callsite import CallsiteCapturer
-from .conf import Settings
+from .conf import Settings, resolve_release
 from .detect import Detector, FixSuggester
-from .model import Callsite, Framework, Span, SpanKind, Trace, new_id
-from .redact import Redactor, json_safe
+from .model import Callsite, Frame, Framework, LogRecord, Span, SpanKind, Trace, new_id
+from .redact import MASK, Redactor, json_safe
 from .sampling import Sampler
 
 if TYPE_CHECKING:
@@ -82,6 +84,10 @@ _MAX_MANY_ROWS = 10  # executemany: keep the first N parameter rows
 _ALWAYS_KEPT = frozenset(("middleware", "view"))
 #: Distinct (fingerprint, callsite) groups tracked for spans beyond the cap.
 _MAX_OVERFLOW_GROUPS = 1_000
+_MAX_ERROR_FRAMES = 20  # project frames kept in ``Trace.error["frames"]``
+_MAX_LOCALS = 30  # locals kept per frame
+_MAX_REPR = 300  # chars kept per local
+_MAX_LOG_CHARS = 2_000  # chars kept per captured log message
 
 
 class OverflowGroup:
@@ -131,6 +137,8 @@ class TraceBuilder:
         "finished",
         "framework",
         "id",
+        "logs",
+        "logs_dropped",
         "max_spans",
         "method",
         "overflow",
@@ -188,6 +196,8 @@ class TraceBuilder:
         self.query_ms = 0.0
         self.max_spans = recorder.settings.max_spans_per_trace or 0
         self.dropped_spans = 0
+        self.logs: list[LogRecord] = []
+        self.logs_dropped = 0
         self.overflow: dict[tuple[str, str | None], OverflowGroup] = {}
         self.started_at = time.time()
         self.t0 = _perf()
@@ -212,6 +222,38 @@ class TraceBuilder:
 
     def elapsed_ms(self) -> float:
         return (_perf() - self.t0) * 1000.0
+
+    def server_timing(self) -> str:
+        """The ``Server-Timing`` header value for the request so far (``CONTRACT.md`` §14).
+
+        ``total;dur=…, db;dur=…;desc="12 queries", cache;dur=…, http;dur=…, tpl;dur=…,
+        redline;desc="<trace id>"`` with durations in ms (one decimal); groups with no
+        spans are left out. Empty for an inert builder; never raises.
+        """
+        if not self.active:
+            return ""
+        try:
+            with self._lock:
+                spans = list(self.spans)
+                queries = self.query_count
+                query_ms = self.query_ms
+            sums = {"cache": 0.0, "http_out": 0.0, "template": 0.0}
+            seen: set[str] = set()
+            for s in spans:
+                if s.kind in sums:
+                    sums[s.kind] += s.duration_ms
+                    seen.add(s.kind)
+            parts = [f"total;dur={self.elapsed_ms():.1f}"]
+            if queries:
+                noun = "query" if queries == 1 else "queries"
+                parts.append(f'db;dur={query_ms:.1f};desc="{queries} {noun}"')
+            for kind, label in (("cache", "cache"), ("http_out", "http"), ("template", "tpl")):
+                if kind in seen:
+                    parts.append(f"{label};dur={sums[kind]:.1f}")
+            parts.append(f'redline;desc="{self.id}"')
+            return ", ".join(parts)
+        except Exception:  # pragma: no cover - a header must never break a response
+            return ""
 
     @property
     def full(self) -> bool:
@@ -263,6 +305,11 @@ class Recorder:
         self.redactor = Redactor(self.settings)
         self.detector = Detector(self.settings, suggesters)
         self.capturer = capturer or CallsiteCapturer(self.settings.project_root)
+        #: ``Settings.release`` or the automatic value, resolved once.
+        self.release = resolve_release(self.settings)
+        self._log_level = getattr(logging, self.settings.log_level, logging.INFO)
+        if self.settings.enabled and self.settings.capture_logs:
+            _install_log_handler()
         #: The trace most recently finished by :meth:`recording` (handy in tests).
         self.last_trace: Trace | None = None
 
@@ -369,10 +416,13 @@ class Recorder:
             tags=dict(builder.tags),
             profile=profile,
             error=_error_dict(error),
+            release=self.release,
         )
         if not builder.active:
             return trace
         with builder._lock:
+            trace.logs = list(builder.logs)
+            trace.logs_dropped = builder.logs_dropped
             spans = sorted(builder.spans, key=lambda s: s.start_ms)
             trace.query_count = builder.query_count
             trace.query_ms = round(builder.query_ms, 3)
@@ -393,6 +443,11 @@ class Recorder:
         if reason is None:
             return trace
         trace.tags["sampled_by"] = reason
+        if isinstance(error, BaseException) and self.settings.capture_locals and trace.error:
+            try:
+                trace.error["frames"] = self._error_frames(error)
+            except Exception:  # never let analysis break the response
+                logger.exception("Redline failed to capture exception locals")
         try:
             trace.request = self._request_dict(builder)
             trace.response = self._response_dict(headers, body, size)
@@ -419,6 +474,48 @@ class Recorder:
         else:
             self.last_trace = self.finish_trace(builder, status=200)
 
+    # exception locals ------------------------------------------------------
+    def _error_frames(self, error: BaseException) -> list[dict[str, Any]]:
+        """Project frames of ``error``'s traceback with their redacted locals."""
+        frames: list[tuple[Any, int, str]] = []
+        tb = error.__traceback__
+        while tb is not None:
+            display = self.capturer.classify(tb.tb_frame.f_code.co_filename)
+            if display is not None:
+                frames.append((tb.tb_frame, tb.tb_lineno, display))
+            tb = tb.tb_next
+        redactor = self.redactor
+        out: list[dict[str, Any]] = []
+        for frame, line, display in frames[-_MAX_ERROR_FRAMES:]:
+            filename = frame.f_code.co_filename
+            local_vars: dict[str, str] = {}
+            for name, value in list(frame.f_locals.items()):
+                if len(local_vars) >= _MAX_LOCALS:
+                    break
+                name = str(name)
+                if name.startswith("__"):
+                    continue
+                if redactor.is_secret_key(name):
+                    local_vars[name] = MASK
+                    continue
+                try:
+                    if isinstance(value, Mapping):
+                        value = redactor.mapping(value)
+                    text = repr(value)
+                except Exception:
+                    text = "<unrepresentable>"
+                local_vars[name] = text if len(text) <= _MAX_REPR else text[:_MAX_REPR] + "…"
+            out.append(
+                {
+                    "file": display,
+                    "line": line,
+                    "function": frame.f_code.co_name,
+                    "code": linecache.getline(filename, line).strip() or None,
+                    "locals": local_vars,
+                }
+            )
+        return out
+
     # redaction helpers -----------------------------------------------------
     def _request_dict(self, b: TraceBuilder) -> dict[str, Any]:
         r = self.redactor
@@ -444,6 +541,106 @@ class Recorder:
         return {"headers": hdrs, "body": text, "body_truncated": truncated, "size": size}
 
 
+# ── log capture ──────────────────────────────────────────────────────────────────────
+
+
+class _LogCapture(logging.Handler):
+    """Root-logger handler that files log records under the request being recorded.
+
+    One instance serves the whole process; which settings apply (level, cap, redaction)
+    comes from the active trace's recorder. When no trace is active a record costs one
+    ``ContextVar.get()``. Records from the ``redline`` loggers are ignored, so Redline's
+    own logging can never recurse into it.
+    """
+
+    def handle(self, record: logging.LogRecord) -> bool:  # skip filters and the handler lock
+        builder = _trace.get()
+        if builder is None or builder.finished or not builder.active:
+            return False
+        try:
+            self._capture(builder, record)
+        except Exception:  # logging must never break the app
+            pass
+        return True
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.handle(record)
+
+    @staticmethod
+    def _capture(builder: TraceBuilder, record: logging.LogRecord) -> None:
+        recorder = builder.recorder
+        if record.levelno < recorder._log_level or not recorder.settings.capture_logs:
+            return
+        name = record.name
+        if name == "redline" or name.startswith("redline."):
+            return
+        if len(builder.logs) >= recorder.settings.max_logs_per_trace:
+            with builder._lock:
+                builder.logs_dropped += 1
+            return
+        try:
+            message = record.getMessage()
+        except Exception:
+            message = str(record.msg)
+        message = recorder.redactor.text(message[:20_000])[:_MAX_LOG_CHARS]
+        entry = LogRecord(
+            t_ms=round(builder.elapsed_ms(), 3),
+            level=record.levelname if record.levelname in _LEVELS else _level_name(record.levelno),
+            logger=name,
+            message=message,
+            callsite=_log_callsite(recorder, record),
+        )
+        with builder._lock:
+            if len(builder.logs) >= recorder.settings.max_logs_per_trace:
+                builder.logs_dropped += 1
+            else:
+                builder.logs.append(entry)
+
+
+_LEVELS = frozenset(("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"))
+
+
+def _level_name(levelno: int) -> str:
+    for limit, name in ((50, "CRITICAL"), (40, "ERROR"), (30, "WARNING"), (20, "INFO")):
+        if levelno >= limit:
+            return name
+    return "DEBUG"
+
+
+def _log_callsite(recorder: Recorder, record: logging.LogRecord) -> Callsite | None:
+    path, line = record.pathname, record.lineno
+    if not path:
+        return None
+    display = recorder.capturer.classify(path)
+    if display is None:  # library code: keep the path as logged
+        return Callsite(file=path, line=line, function=record.funcName or "")
+    function = record.funcName or ""
+    return Callsite(
+        file=display,
+        line=line,
+        function=function,
+        code=linecache.getline(path, line).strip() or None,
+        stack=(Frame(file=display, line=line, function=function),),
+    )
+
+
+_log_handler = _LogCapture(level=logging.NOTSET)
+_log_lock = threading.Lock()
+
+
+def _install_log_handler() -> None:
+    """Attach the capture handler to the root logger (idempotent)."""
+    root = logging.getLogger()
+    with _log_lock:
+        if _log_handler not in root.handlers:
+            root.addHandler(_log_handler)
+
+
+def _uninstall_log_handler() -> None:
+    with _log_lock:
+        logging.getLogger().removeHandler(_log_handler)
+
+
 # ── module-level API (the default recorder) ──────────────────────────────────────────
 
 _default: Recorder | None = None
@@ -458,6 +655,7 @@ def configure(
     """Install the process-wide default :class:`Recorder` and return it."""
     global _default
     with _default_lock:
+        _uninstall_log_handler()  # the new recorder re-installs it if it wants logs
         _default = Recorder(settings, store, suggesters)
     return _default
 
@@ -708,14 +906,28 @@ def _header(headers: Mapping[str, str], name: str) -> str | None:
     return None
 
 
+_TRACE_ID = re.compile(r"[0-9a-fA-F]{32}")
+
+
 def _apply_run_header(builder: TraceBuilder, headers: Any) -> None:
-    """Parse ``X-Redline-Run: <run_id>;step=<n>`` (sent by the load tester) into tags."""
+    """Turn Redline's request headers into tags.
+
+    ``X-Redline-Run: <run_id>;step=<n>`` (the load tester) becomes ``run_id`` / ``step``;
+    ``X-Redline-Replay-Of: <trace id>`` (the UI's Replay) becomes ``replay_of`` when it is
+    a 32-character hex id.
+    """
     if not headers:
         return
     items = headers.items() if isinstance(headers, Mapping) else headers
     for key, value in items:
         k = key.decode("latin-1") if isinstance(key, bytes) else str(key)
-        if k.lower() != "x-redline-run":
+        k = k.lower()
+        if k == "x-redline-replay-of":
+            v = value.decode("latin-1") if isinstance(value, bytes) else str(value)
+            if _TRACE_ID.fullmatch(v.strip()):
+                builder.tags["replay_of"] = v.strip().lower()
+            continue
+        if k != "x-redline-run":
             continue
         v = value.decode("latin-1") if isinstance(value, bytes) else str(value)
         run_id, _, rest = v.partition(";")
@@ -725,7 +937,6 @@ def _apply_run_header(builder: TraceBuilder, headers: Any) -> None:
             k2, _, v2 = part.partition("=")
             if k2.strip() == "step" and v2.strip():
                 builder.tags["step"] = v2.strip()[:16]
-        return
 
 
 def _error_dict(error: BaseException | Mapping[str, Any] | None) -> dict[str, Any] | None:

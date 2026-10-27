@@ -32,6 +32,7 @@ __all__ = [
     "Framework",
     "Issue",
     "IssueKind",
+    "LogRecord",
     "Severity",
     "Span",
     "SpanKind",
@@ -40,8 +41,36 @@ __all__ = [
     "new_id",
 ]
 
-SpanKind = Literal["sql", "cache", "http_out", "template", "middleware", "view", "custom"]
-IssueKind = Literal["n_plus_one", "duplicate_query", "slow_query", "too_many_queries"]
+SpanKind = Literal[
+    "sql",
+    "cache",
+    "http_out",
+    "template",
+    "middleware",
+    "view",
+    "custom",
+    "serializer",
+    "resolver",
+    "transaction",
+    "blocking",
+    "pool_wait",
+]
+IssueKind = Literal[
+    "n_plus_one",
+    "duplicate_query",
+    "slow_query",
+    "too_many_queries",
+    "blocking_in_async",
+    "large_result",
+    "unbounded_query",
+    "inefficient_count",
+    "slow_serializer",
+    "long_transaction",
+    "external_in_transaction",
+    "slow_external",
+    "duplicate_external",
+    "retry_storm",
+]
 Severity = Literal["info", "warning", "critical"]
 Framework = Literal["django", "fastapi", "other"]
 Confidence = Literal["high", "medium", "low"]
@@ -54,8 +83,28 @@ SPAN_KINDS: tuple[str, ...] = (
     "middleware",
     "view",
     "custom",
+    "serializer",
+    "resolver",
+    "transaction",
+    "blocking",
+    "pool_wait",
 )
-ISSUE_KINDS: tuple[str, ...] = ("n_plus_one", "duplicate_query", "slow_query", "too_many_queries")
+ISSUE_KINDS: tuple[str, ...] = (
+    "n_plus_one",
+    "duplicate_query",
+    "slow_query",
+    "too_many_queries",
+    "blocking_in_async",
+    "large_result",
+    "unbounded_query",
+    "inefficient_count",
+    "slow_serializer",
+    "long_transaction",
+    "external_in_transaction",
+    "slow_external",
+    "duplicate_external",
+    "retry_storm",
+)
 SEVERITIES: tuple[str, ...] = ("info", "warning", "critical")
 FRAMEWORKS: tuple[str, ...] = ("django", "fastapi", "other")
 
@@ -217,6 +266,8 @@ class Issue:
     count: int = 0
     total_ms: float = 0.0
     suggestion: Suggestion | None = None
+    #: Kind-specific facts (rows, resolver path, host, ...); JSON-safe.
+    extra: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -231,6 +282,7 @@ class Issue:
             "count": self.count,
             "total_ms": self.total_ms,
             "suggestion": self.suggestion.to_dict() if self.suggestion else None,
+            "extra": dict(self.extra),
         }
 
     @classmethod
@@ -247,6 +299,37 @@ class Issue:
             count=int(data.get("count", 0)),
             total_ms=float(data.get("total_ms", 0.0)),
             suggestion=Suggestion.from_dict(data.get("suggestion")),
+            extra=dict(data.get("extra") or {}),
+        )
+
+
+@dataclass
+class LogRecord:
+    """One log line emitted while a request was being served."""
+
+    t_ms: float
+    level: str
+    logger: str
+    message: str
+    callsite: Callsite | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "t_ms": self.t_ms,
+            "level": self.level,
+            "logger": self.logger,
+            "message": self.message,
+            "callsite": self.callsite.to_dict() if self.callsite else None,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> LogRecord:
+        return cls(
+            t_ms=float(data.get("t_ms", 0.0)),
+            level=str(data.get("level", "INFO")),
+            logger=str(data.get("logger", "")),
+            message=str(data.get("message", "")),
+            callsite=Callsite.from_dict(data.get("callsite")),
         )
 
 
@@ -284,6 +367,12 @@ class Trace:
     #: ``{"dropped_spans": int, "max_spans": int}``. Counters (``query_count``,
     #: ``query_ms``) and the N+1 / slow-query issues still cover every span.
     truncated: dict[str, Any] | None = None
+    #: Log lines emitted during the request (``Settings.capture_logs``), at most
+    #: ``max_logs_per_trace``; the rest are counted in ``logs_dropped``.
+    logs: list[LogRecord] = field(default_factory=list)
+    logs_dropped: int = 0
+    #: The release (git sha, version...) the app was running; ``Settings.release``.
+    release: str | None = None
 
     # derived ---------------------------------------------------------------
     @property
@@ -331,6 +420,9 @@ class Trace:
             "tags": dict(self.tags),
             "error": self.error,
             "truncated": self.truncated,
+            "logs": [r.to_dict() for r in self.logs],
+            "logs_dropped": self.logs_dropped,
+            "release": self.release,
         }
         if include_profile:
             data["profile"] = self.profile
@@ -383,4 +475,7 @@ class Trace:
             profile=data.get("profile"),
             error=data.get("error"),
             truncated=data.get("truncated"),
+            logs=[LogRecord.from_dict(r) for r in data.get("logs") or ()],
+            logs_dropped=int(data.get("logs_dropped") or 0),
+            release=data.get("release"),
         )
