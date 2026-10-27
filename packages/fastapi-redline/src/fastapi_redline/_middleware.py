@@ -17,6 +17,7 @@ import re
 from typing import Any
 
 from redline_core import Recorder, get_recorder
+from redline_core.contrib.asgi import track_request
 from redline_core.sampling import profile_requested
 
 __all__ = ["RedlineMiddleware"]
@@ -174,7 +175,8 @@ class RedlineMiddleware:
                 finalize()
 
         try:
-            await self.app(scope, recv, send_wrapper)
+            async with track_request(builder):  # event-loop lag monitor (blocking spans)
+                await self.app(scope, recv, send_wrapper)
         except Exception as exc:
             finalize(error=exc)
             raise
