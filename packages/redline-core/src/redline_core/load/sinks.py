@@ -142,16 +142,11 @@ def store_supports_runs(store: Any) -> bool:
 class StoreSink:
     """Writes the run into a Redline store.
 
-    Calls, with plain dicts (the store maps them to its own row types):
-
-    * ``store.save_run({"id", "name", "created_at", "finished_at": None, "status": "running",
-      "config", "summary": None})``
-    * ``store.save_run_step(run_id, {"step", "started_at", "ended_at", "target_rps",
-      "achieved_rps", "sent", "ok", "errors", "dropped", "hist": bytes, "error_breakdown"})``
-      – exactly the ``run_steps`` columns (``hist`` is ``Histogram.to_bytes()``).
-    * ``store.finish_run(run_id, status, summary)`` with ``status`` one of ``done``,
-      ``stopped``, ``failed`` and the summary of :func:`~redline_core.load.analysis.analyze`
-      (``knee_step``, ``max_ok_rps``, ``verdict``, … plus ``message`` on failure).
+    It writes the store's own row types (:mod:`redline_core.runs`): a
+    :class:`~redline_core.runs.Run`
+    on start, one :class:`~redline_core.runs.RunStep` per finished step, then
+    ``store.finish_run(run_id, status, summary)`` with ``status`` one of ``done``, ``stopped``,
+    ``failed`` and the summary of :func:`~redline_core.load.analysis.analyze`.
     """
 
     def __init__(self, store: Any, *, close: bool = False) -> None:
@@ -163,7 +158,18 @@ class StoreSink:
         self._close = close
 
     def start(self, meta: RunMeta) -> None:
-        self.store.save_run(meta.to_dict())
+        from ..runs import Run
+
+        row = meta.to_dict()
+        self.store.save_run(
+            Run(
+                id=row["id"],
+                name=row.get("name") or "",
+                status="running",
+                config=row.get("config") or {},
+                created_at=row["created_at"],
+            )
+        )
 
     def step(self, run_id: str, step: StepResult) -> None:
         self.store.save_run_step(run_id, self.step_row(step))
@@ -176,20 +182,22 @@ class StoreSink:
                 self.store.close()
 
     @staticmethod
-    def step_row(step: StepResult) -> dict[str, Any]:
-        return {
-            "step": step.step,
-            "started_at": step.started_at,
-            "ended_at": step.ended_at,
-            "target_rps": step.target_rps,
-            "achieved_rps": round(step.achieved_rps, 3),
-            "sent": step.sent,
-            "ok": step.ok,
-            "errors": step.errors,
-            "dropped": step.dropped,
-            "hist": step.hist.to_bytes(),
-            "error_breakdown": dict(step.error_breakdown),
-        }
+    def step_row(step: StepResult) -> Any:
+        from ..runs import RunStep
+
+        return RunStep(
+            step=step.step,
+            target_rps=step.target_rps,
+            started_at=step.started_at,
+            ended_at=step.ended_at,
+            achieved_rps=round(step.achieved_rps, 3),
+            sent=step.sent,
+            ok=step.ok,
+            errors=step.errors,
+            dropped=step.dropped,
+            hist=step.hist.copy(),
+            error_breakdown=dict(step.error_breakdown),
+        )
 
 
 class MultiSink:

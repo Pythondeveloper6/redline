@@ -24,6 +24,7 @@ from redline_core.load import (
     arrival_offsets,
     check_thresholds,
 )
+from redline_core.runs import Run, RunStep
 
 
 def total_arrivals(rate, duration, workers, **kw):
@@ -176,7 +177,7 @@ class FakeStore:
         self.calls.append(("close",))
 
 
-def test_store_sink_passes_plain_dicts():
+def test_store_sink_writes_run_rows():
     store = FakeStore()
     sink = StoreSink(store, close=True)
     meta = RunMeta(id="r1", name="n", created_at=5.0, config={"a": 1})
@@ -185,21 +186,17 @@ def test_store_sink_passes_plain_dicts():
     sink.step("r1", st)
     sink.finish("r1", "done", {"knee_step": None})
     (_, run), (_, rid, row), finish, close = store.calls
-    assert run == {
-        "id": "r1",
-        "name": "n",
-        "created_at": 5.0,
-        "finished_at": None,
-        "status": "running",
-        "config": {"a": 1},
-        "summary": None,
-    }
-    assert rid == "r1"
-    assert set(row) == set(
-        "step started_at ended_at target_rps achieved_rps sent ok errors dropped hist "
-        "error_breakdown".split()
+    assert isinstance(run, Run)
+    assert (run.id, run.name, run.created_at, run.status, run.config) == (
+        "r1",
+        "n",
+        5.0,
+        "running",
+        {"a": 1},
     )
-    assert Histogram.from_bytes(row["hist"]) == st.hist
+    assert rid == "r1" and isinstance(row, RunStep)
+    assert (row.step, row.target_rps, row.sent) == (st.step, st.target_rps, st.sent)
+    assert row.hist == st.hist
     assert finish == ("finish_run", "r1", "done", {"knee_step": None})
     assert close == ("close",)
     with pytest.raises(TypeError):

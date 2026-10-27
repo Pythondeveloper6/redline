@@ -284,7 +284,7 @@ def test_cli_store_sink_and_ui_hint(tmp_path, capsys, http_server, monkeypatch):
     )
     assert code == 0
     assert [c[0] for c in fake.calls] == ["save_run", "save_run_step", "finish_run"]
-    assert fake.calls[0][1]["id"] == "abc123"
+    assert fake.calls[0][1].id == "abc123"
     assert f"{url}/_redline/#/load/abc123" in capsys.readouterr().out
     rdir = runs_dir(store)
     assert not (rdir / "abc123.pid").exists() and not (rdir / "abc123.stop").exists()

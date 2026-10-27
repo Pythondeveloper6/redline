@@ -1227,7 +1227,7 @@ class SQLiteStore:
         self._write_now([_step_statement(run_id, step)])
 
     def finish_run(self, run_id: str, status: str, summary: dict[str, Any] | None = None) -> None:
-        """Mark a run ``finished``/``stopped``/``failed`` and store its summary."""
+        """Mark a run ``done``/``stopped``/``failed`` and store its summary."""
         self._write_now(
             [
                 (
