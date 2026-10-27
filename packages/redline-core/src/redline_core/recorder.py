@@ -313,7 +313,8 @@ class Recorder:
         #: ``Settings.release`` or the automatic value, resolved once.
         self.release = resolve_release(self.settings)
         self._log_level = getattr(logging, self.settings.log_level, logging.INFO)
-        if self.settings.enabled and self.settings.capture_logs:
+        self._capture_logs = self.settings.capture_logs and self.settings.feature("logs")
+        if self.settings.enabled and self._capture_logs:
             _install_log_handler(self._log_level)
         #: The trace most recently finished by :meth:`recording` (handy in tests).
         self.last_trace: Trace | None = None
@@ -455,7 +456,12 @@ class Recorder:
         if reason is None:
             return trace
         trace.tags["sampled_by"] = reason
-        if isinstance(error, BaseException) and self.settings.capture_locals and trace.error:
+        if (
+            isinstance(error, BaseException)
+            and self.settings.capture_locals
+            and self.settings.feature("locals")
+            and trace.error
+        ):
             try:
                 trace.error["frames"] = self._error_frames(error)
             except Exception:  # never let analysis break the response
@@ -645,7 +651,7 @@ class _LogCapture(logging.Handler):
     @staticmethod
     def _capture(builder: TraceBuilder, record: logging.LogRecord) -> None:
         recorder = builder.recorder
-        if record.levelno < recorder._log_level or not recorder.settings.capture_logs:
+        if record.levelno < recorder._log_level or not recorder._capture_logs:
             return
         name = record.name
         if name == "redline" or name.startswith("redline."):

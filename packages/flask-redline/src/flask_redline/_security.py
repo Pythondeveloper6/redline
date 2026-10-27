@@ -1,9 +1,13 @@
 """Access control for the Redline UI and API.
 
-* :func:`local_only` – the default when ``Redline(permission=None)``: only loopback
-  clients, addressing the server by a loopback **name** (see :func:`is_local_host_header`),
-  get in. :func:`loopback_guard` builds a variant that also accepts other ``Host`` names.
-* :func:`check_csrf` – always on for the API's mutating methods (see the function).
+Every Redline request goes through the core access gate
+(:class:`redline_core.access.Access`, ``CONTRACT.md`` §18), from the blueprint's
+``before_request``: the ``access`` setting picks the policy (``local`` by default).
+``Redline(permission=...)`` implies ``access="framework"``: your callable decides.
+
+* :func:`local_only` / :func:`loopback_guard` – loopback clients addressing a loopback
+  ``Host`` (against DNS rebinding), usable as an explicit ``permission``.
+* :func:`check_csrf` – the Origin / ``Sec-Fetch-Site`` check (the gate applies it anyway).
 * :class:`RedlineHTTPError` – what the checks raise; the Redline blueprint renders it (and
   any ``HTTPException`` from your own ``permission`` callable) in the API's error shape,
   ``{"error": {"code": ..., "message": ...}}``.
@@ -13,10 +17,11 @@ A ``permission`` is any ``callable(request) -> bool``; the guards here are such 
 
 from __future__ import annotations
 
-import ipaddress
 from collections.abc import Iterable
 from typing import Any
 from urllib.parse import urlsplit
+
+from redline_core.access import LOCAL_HOST_NAMES, RequestInfo, is_local_host, is_loopback
 
 __all__ = [
     "LOCAL_HOST_NAMES",
@@ -25,12 +30,10 @@ __all__ = [
     "is_local_host_header",
     "local_only",
     "loopback_guard",
+    "request_info",
 ]
 
 _SAFE = {"GET", "HEAD", "OPTIONS"}
-#: ``Host`` names the loopback default accepts (besides loopback IP literals and
-#: ``*.localhost``, which RFC 6761 reserves for loopback).
-LOCAL_HOST_NAMES = frozenset({"localhost"})
 
 
 class RedlineHTTPError(Exception):
@@ -48,53 +51,28 @@ class RedlineHTTPError(Exception):
 
 def _is_loopback(host: str | None) -> bool:
     """Whether a *client address* is loopback (``None``/empty is a unix socket)."""
-    if not host:
-        return True
-    if host == "localhost":
-        return True
-    try:
-        addr = ipaddress.ip_address(host)
-    except ValueError:
-        return False
-    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
-        addr = addr.ipv4_mapped
-    return addr.is_loopback
-
-
-def _host_name(header: str) -> str:
-    """``Host`` header -> lower-cased host without port (``[::1]:8000`` -> ``::1``)."""
-    host = header.strip().lower()
-    if host.startswith("["):
-        end = host.find("]")
-        return host[1:end] if end != -1 else host
-    if host.count(":") == 1:
-        host = host.rsplit(":", 1)[0]
-    return host.rstrip(".")
+    return is_loopback(host)
 
 
 def is_local_host_header(header: str | None, extra: Iterable[str] = ()) -> bool:
-    """Whether a ``Host`` header names this machine's loopback interface.
+    """Whether a ``Host`` header names this machine's loopback interface (see
+    :func:`redline_core.access.is_local_host`)."""
+    return is_local_host(header, extra)
 
-    Accepted: ``localhost`` and ``*.localhost``, loopback IP literals (``127.0.0.1``,
-    ``[::1]``), with any port – plus the names in ``extra``. A missing ``Host`` (HTTP/1.0)
-    is accepted, since a browser always sends one.
-    """
-    if header is None:
-        return True
-    name = _host_name(header)
-    if not name:
-        return True
-    if name in LOCAL_HOST_NAMES or name.endswith(".localhost"):
-        return True
-    if name in {e.strip().lower() for e in extra}:
-        return True
-    try:
-        addr = ipaddress.ip_address(name)
-    except ValueError:
-        return False
-    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
-        addr = addr.ipv4_mapped
-    return addr.is_loopback
+
+def request_info(request: Any, mount: str) -> RequestInfo:
+    """The framework-neutral description of a Flask ``request`` under ``mount``."""
+    full = request.path  # without the script root
+    rel = full[len(mount) :] if full.startswith(mount) else full
+    return RequestInfo.build(
+        method=request.method,
+        path=rel.lstrip("/"),
+        client_ip=request.environ.get("REMOTE_ADDR"),
+        headers=list(request.headers.items()),
+        host=request.environ.get("HTTP_HOST"),
+        scheme=request.scheme,
+        mount=f"{request.script_root.rstrip('/')}{mount}",
+    )
 
 
 class _LoopbackGuard:
@@ -152,7 +130,7 @@ def check_csrf(request: Any) -> None:
     """
     if request.method in _SAFE:
         return
-    if request.headers.get("Sec-Fetch-Site") == "cross-site":
+    if request.headers.get("Sec-Fetch-Site") in ("cross-site", "same-site"):
         raise RedlineHTTPError(403, "csrf_failed", "Cross-site request blocked.")
     origin = request.headers.get("Origin")
     if origin is None:

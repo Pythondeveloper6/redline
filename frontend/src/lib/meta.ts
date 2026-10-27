@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api'
-import type { Callsite, Meta } from '../types'
+import type { Callsite, FeatureName, Meta } from '../types'
 
 let cached: Promise<Meta | null> | null = null
 /** Meta is fetched once per page load and shared; failures resolve to null (older backend / no access). */
@@ -32,4 +32,24 @@ export function editorUrl(meta: Pick<Meta, 'editor_url_template' | 'project_root
   if (!abs) return null
   const file = encodeURI(abs).replace(/#/g, '%23').replace(/\?/g, '%3F')
   return tpl.replace(/\{file\}/g, () => file).replace(/\{line\}/g, () => String(cs.line))
+}
+
+/** Feature switch from `meta.features`. A missing key means enabled (older backends), except `load_from_ui`. */
+export function feature(meta: Pick<Meta, 'features'> | null | undefined, name: FeatureName): boolean {
+  const v = meta?.features?.[name]
+  return v === undefined ? name !== 'load_from_ui' : !!v
+}
+/** True when the instance is read-only (`meta.access.read_only`): hide every mutating action. */
+export function isReadOnly(meta: Pick<Meta, 'access'> | null | undefined): boolean {
+  return !!meta?.access?.read_only
+}
+/** Shared meta plus the feature helpers. Before meta has loaded, features read as enabled and not read-only. */
+/** POSTs ./api/logout (clears the session cookie) and reloads. */
+export async function logout() {
+  try { await api.logout() } catch { /* already signed out */ }
+  location.reload()
+}
+export function useFeatures() {
+  const meta = useMeta()
+  return { meta, has: (n: FeatureName) => feature(meta, n), readOnly: isReadOnly(meta), loaded: meta !== null }
 }

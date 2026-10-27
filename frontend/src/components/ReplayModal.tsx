@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { ms } from '../lib/format'
+import { useFeatures } from '../lib/meta'
 import { buildReplay, hadRedactedCookie, missingFields, redactedFields } from '../lib/replay'
 import type { Trace } from '../types'
 import { Modal } from './Modal'
@@ -14,6 +15,7 @@ export default function ReplayModal({ trace, open, onClose }: { trace: Trace; op
   const [values, setValues] = useState<Record<string, string>>({})
   const [removed, setRemoved] = useState<Set<string>>(new Set())
   const [profile, setProfile] = useState(false)
+  const canProfile = useFeatures().has('profile')
   const [busy, setBusy] = useState(false)
   const [out, setOut] = useState<Outcome | null>(null)
   const [err, setErr] = useState<string | null>(null)
@@ -26,7 +28,7 @@ export default function ReplayModal({ trace, open, onClose }: { trace: Trace; op
   const send = async () => {
     if (missing.length) return
     setBusy(true); setErr(null); setOut(null)
-    const { url, init } = buildReplay(trace, values, removed, { profile, replayOf: trace.id })
+    const { url, init } = buildReplay(trace, values, removed, { profile: profile && canProfile, replayOf: trace.id })
     const t0 = performance.now()
     try {
       const res = await fetch(url, init)
@@ -80,10 +82,10 @@ export default function ReplayModal({ trace, open, onClose }: { trace: Trace; op
           <details className="text-[12px]"><summary className="cursor-pointer text-muted">Request body</summary><pre className="m-0 mt-1 rounded bg-raised p-2 overflow-auto max-h-40 whitespace-pre-wrap break-words">{body}</pre></details>
         )}
 
-        <label className="flex items-start gap-2 cursor-pointer select-none">
+        {canProfile && <label className="flex items-start gap-2 cursor-pointer select-none">
           <input type="checkbox" className="mt-0.5 accent-[rgb(var(--accent))]" checked={profile} onChange={e => setProfile(e.target.checked)} />
           <span>Profile this replay <span className="text-muted">(adds <code>X-Redline-Profile: 1</code>)</span></span>
-        </label>
+        </label>}
 
         {err && <div role="alert" className="rounded-md border border-bad/30 bg-bad/5 p-2 text-bad text-[12px] break-words">Request failed: {err}</div>}
         {out && (

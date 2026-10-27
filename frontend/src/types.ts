@@ -72,8 +72,26 @@ export interface Meta {
   storage: { rows: number; path: string; dropped?: number }
   // v0.2 (CONTRACT §12); absent on older backends
   project_root?: string | null; editor?: string | null; editor_url_template?: string | null; release?: string | null
-  features?: { load_from_ui?: boolean; sse?: boolean; snapshot?: boolean }
+  features?: Partial<Record<FeatureName, boolean>>
+  access?: Access
 }
+export type FeatureName = 'load_from_ui' | 'sse' | 'snapshot' | 'explain' | 'profile' | 'replay' | 'load' | 'logs' | 'locals'
+export interface Access {
+  policy: 'local' | 'token' | 'basic' | 'framework' | 'custom' | 'open'
+  login: 'token' | 'basic' | null
+  read_only: boolean
+  preset: 'dev' | 'staging' | 'production'
+}
+export type ConfigSource = 'default' | 'adapter' | 'preset' | 'file' | 'env' | 'framework'
+export interface ConfigResponse {
+  preset: string
+  file: string | null
+  settings: Record<string, unknown>
+  sources: Record<string, ConfigSource | string>
+  groups: Record<string, string[]>
+  warnings: string[]
+}
+export type LoginBody = { token: string } | { username: string; password: string }
 export interface Speedscope {
   shared: { frames: { name: string; file?: string; line?: number }[] }
   profiles: {
