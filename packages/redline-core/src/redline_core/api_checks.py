@@ -537,13 +537,21 @@ class CheckRoutes:
         value was redacted) and the lower-cased request header names that its last few
         successful requests carried."""
         try:
-            page = self.store.list(filters(route=route, method=method), limit=10)
+            # Successful responses only, so a route whose latest calls failed (a refactor
+            # that broke it) is still sampled from its older healthy traces.
+            items: list[Any] = []
+            for status in ("2xx", "3xx"):
+                items.extend(
+                    self.store.list(
+                        filters(route=route, method=method, status=status), limit=10
+                    ).items
+                )
         except Exception:
             return None
         path_out: str | None = None
         names: set[str] = set()
         looked = 0
-        for item in page.items:
+        for item in items:
             path = item.get("path")
             status = int(item.get("status") or 0)
             if not isinstance(path, str) or not 200 <= status < 400 or looked >= 3:

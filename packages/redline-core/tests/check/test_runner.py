@@ -235,6 +235,27 @@ def test_failures_and_broken():
     assert b.summary()["broken"] == 1
 
 
+def test_stale_keepalive_connection_is_retried_once():
+    # uvicorn resets the connection after a 500: the next call on it must not count as failed.
+    state = {"reset": False}
+
+    def handler(request):
+        if request.url.path == "/boom":
+            state["reset"] = True
+            return httpx.Response(500)
+        if state["reset"]:
+            state["reset"] = False
+            raise httpx.ReadError("Connection reset by peer", request=request)
+        return httpx.Response(200, json={"ok": True})
+
+    s = make_suite(requests=[{"path": "/boom"}, {"path": "/ok"}], repeat=3, warmup=1)
+    b = run_suite(
+        s, base_url=BASE, kind="baseline", transport=httpx.MockTransport(handler), git=GIT
+    )
+    ok = b.request("GET /ok")
+    assert ok["failed"] == 0 and len(ok["perf"]["samples_ms"]) == 3
+
+
 def test_unreachable_raises_and_finishes_failed():
     def handler(request):
         raise httpx.ConnectError("refused", request=request)

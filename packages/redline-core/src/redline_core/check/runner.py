@@ -194,6 +194,9 @@ def run_suite(
     from ..conf import resolve_release
     from ..redact import Redactor
 
+    # Errors of a keep-alive connection the server closed under us (not timeouts).
+    stale_connection = (httpx.ReadError, httpx.RemoteProtocolError, httpx.WriteError)
+
     r = redactor if redactor is not None else Redactor()
     # Expand placeholders first: a missing variable fails before anything is sent.
     headers = [suite.headers_for(req, environ) for req in suite.requests]
@@ -241,8 +244,15 @@ def run_suite(
                 ms: float | None = None
                 start = perf_counter()
                 try:
-                    resp = client.request(req.method, url, headers=h)
-                    content = resp.content
+                    try:
+                        resp = client.request(req.method, url, headers=h)
+                        content = resp.content
+                    except stale_connection:
+                        # A keep-alive connection the server dropped (uvicorn resets it after a
+                        # 500): the methods are read-only, so retry once on a fresh connection.
+                        start = perf_counter()
+                        resp = client.request(req.method, url, headers=h)
+                        content = resp.content
                     ms = (perf_counter() - start) * 1000.0
                     code = resp.status_code
                 except httpx.HTTPError as exc:  # connect errors, timeouts, protocol errors
