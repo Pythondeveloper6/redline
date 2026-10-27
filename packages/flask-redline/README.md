@@ -1,6 +1,15 @@
+<p align="center">
+  <a href="https://pythondeveloper6.github.io/redline/">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/assets/logo-dark.svg">
+      <img alt="Redline" src="https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/assets/logo-light.svg" height="56">
+    </picture>
+  </a>
+</p>
+
 # flask-redline
 
-The Flask + SQLAlchemy adapter for [Redline](../../README.md): a request profiler and
+The Flask + SQLAlchemy adapter for [Redline](https://github.com/Pythondeveloper6/redline#readme): a request profiler and
 backend analyzer. Every request becomes a trace with a span timeline, the SQL it ran, N+1
 and duplicate-query detection with **concrete fix diffs**, one-click `EXPLAIN`, optional
 flamegraphs, and a fast web UI served from your own app.
@@ -232,7 +241,7 @@ uv sync --all-packages
 cd packages/flask-redline && uv run pytest
 ```
 
-A runnable demo with deliberately bad views lives in [`examples/flask`](../../examples/flask).
+A runnable demo with deliberately bad views lives in [`examples/flask`](https://github.com/Pythondeveloper6/redline/blob/main/examples/flask).
 
 ## License
 

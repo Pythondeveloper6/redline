@@ -1,3 +1,12 @@
+<p align="center">
+  <a href="https://pythondeveloper6.github.io/redline/">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/assets/logo-dark.svg">
+      <img alt="Redline" src="https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/assets/logo-light.svg" height="56">
+    </picture>
+  </a>
+</p>
+
 # redline-core
 
 The framework-agnostic engine behind **Redline**, a self-hosted request profiler and
