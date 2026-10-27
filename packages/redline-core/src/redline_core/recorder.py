@@ -315,7 +315,7 @@ class Recorder:
         self._log_level = getattr(logging, self.settings.log_level, logging.INFO)
         self._capture_logs = self.settings.capture_logs and self.settings.feature("logs")
         if self.settings.enabled and self._capture_logs:
-            _install_log_handler(self._log_level)
+            _install_log_capture()
         #: The trace most recently finished by :meth:`recording` (handy in tests).
         self.last_trace: Trace | None = None
 
@@ -624,59 +624,70 @@ def _mask_local_text(redactor: Redactor, text: str) -> str:
 # ── log capture ──────────────────────────────────────────────────────────────────────
 
 
-class _LogCapture(logging.Handler):
-    """Root-logger handler that files log records under the request being recorded.
+class _CaptureFactory:
+    """``logging`` record factory that files records under the request being recorded.
 
-    One instance serves the whole process; which settings apply (level, cap, redaction)
-    comes from the active trace's recorder. When no trace is active a record costs one
-    ``ContextVar.get()``. Records from the ``redline`` loggers are ignored, so Redline's
-    own logging can never recurse into it.
+    Installed with :func:`logging.setLogRecordFactory` around whatever factory was current,
+    so Redline adds no handler and changes no logger level: the app's logging configuration
+    (``basicConfig``, ``dictConfig``, ``force=True``) neither sees Redline nor can remove it.
+    :mod:`logging` only creates records for enabled loggers, so capture follows the app's
+    levels. With no active trace a record costs one ``ContextVar.get()``. Records from the
+    ``redline`` loggers are ignored, so Redline's own logging can never recurse into it.
     """
 
-    def handle(self, record: logging.LogRecord) -> bool:  # skip filters and the handler lock
-        if record.levelno >= logging.WARNING:
-            _last_resort(record)
-        builder = _trace.get()
-        if builder is None or builder.finished or not builder.active:
-            return False
-        try:
-            self._capture(builder, record)
-        except Exception:  # logging must never break the app
-            pass
-        return True
+    __slots__ = ("enabled", "previous")
 
-    def emit(self, record: logging.LogRecord) -> None:
-        self.handle(record)
+    def __init__(self, previous: Callable[..., logging.LogRecord]) -> None:
+        self.previous = previous
+        #: ``False`` once uninstalled while another factory wraps this one: pass-through.
+        self.enabled = True
 
-    @staticmethod
-    def _capture(builder: TraceBuilder, record: logging.LogRecord) -> None:
-        recorder = builder.recorder
-        if record.levelno < recorder._log_level or not recorder._capture_logs:
-            return
-        name = record.name
-        if name == "redline" or name.startswith("redline."):
-            return
-        if len(builder.logs) >= recorder.settings.max_logs_per_trace:
-            with builder._lock:
-                builder.logs_dropped += 1
-            return
-        try:
-            message = record.getMessage()
-        except Exception:
-            message = str(record.msg)
-        message = recorder.redactor.text(message[:20_000])[:_MAX_LOG_CHARS]
-        entry = LogRecord(
-            t_ms=round(builder.elapsed_ms(), 3),
-            level=record.levelname if record.levelname in _LEVELS else _level_name(record.levelno),
-            logger=name,
-            message=message,
-            callsite=_log_callsite(recorder, record),
-        )
+    def __call__(self, *args: Any, **kwargs: Any) -> logging.LogRecord:
+        record = self.previous(*args, **kwargs)
+        if self.enabled:
+            builder = _trace.get()
+            if builder is not None:
+                _capture_log(builder, record)
+        return record
+
+
+def _capture_log(builder: TraceBuilder, record: logging.LogRecord) -> None:
+    if builder.finished or not builder.active:
+        return
+    try:
+        _capture(builder, record)
+    except Exception:  # logging must never break the app
+        pass
+
+
+def _capture(builder: TraceBuilder, record: logging.LogRecord) -> None:
+    recorder = builder.recorder
+    if not recorder._capture_logs or record.levelno < recorder._log_level:
+        return
+    name = record.name
+    if not isinstance(name, str) or name == "redline" or name.startswith("redline."):
+        return  # ``makeLogRecord`` builds a nameless record first; Redline's own logs
+    if len(builder.logs) >= recorder.settings.max_logs_per_trace:
         with builder._lock:
-            if len(builder.logs) >= recorder.settings.max_logs_per_trace:
-                builder.logs_dropped += 1
-            else:
-                builder.logs.append(entry)
+            builder.logs_dropped += 1
+        return
+    try:
+        message = record.getMessage()
+    except Exception:
+        message = str(record.msg)
+    message = recorder.redactor.text(message[:20_000])[:_MAX_LOG_CHARS]
+    entry = LogRecord(
+        t_ms=round(builder.elapsed_ms(), 3),
+        level=record.levelname if record.levelname in _LEVELS else _level_name(record.levelno),
+        logger=name,
+        message=message,
+        callsite=_log_callsite(recorder, record),
+    )
+    with builder._lock:
+        if len(builder.logs) >= recorder.settings.max_logs_per_trace:
+            builder.logs_dropped += 1
+        else:
+            builder.logs.append(entry)
 
 
 _LEVELS = frozenset(("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"))
@@ -706,65 +717,34 @@ def _log_callsite(recorder: Recorder, record: logging.LogRecord) -> Callsite | N
     )
 
 
-def _last_resort(record: logging.LogRecord) -> None:
-    """Print ``record`` the way an unconfigured app would.
-
-    When no handler at all sees a record, :mod:`logging` writes WARNING and above to stderr
-    through :data:`logging.lastResort`. Our root handler counts as one, so without this an
-    app that never configured logging would silently lose its warnings once Redline is on.
-    """
-    last = logging.lastResort
-    if last is None or record.levelno < last.level:
-        return
-    logger = logging.Logger.manager.loggerDict.get(record.name)
-    node: logging.Logger | None = logger if isinstance(logger, logging.Logger) else logging.root
-    while node is not None:
-        if any(h is not _log_handler for h in node.handlers):
-            return  # the app has a handler on the record's path: it is not "unconfigured"
-        if not node.propagate:
-            break
-        node = node.parent
-    last.handle(record)
-
-
-_log_handler = _LogCapture(level=logging.NOTSET)
 _log_lock = threading.Lock()
-#: ``(level before, level set)`` when Redline lowered the root level of an app that had not
-#: configured logging, so that ``log_level`` records reach the capture handler at all.
-_root_lowered: tuple[int, int] | None = None
+_log_factory: _CaptureFactory | None = None
 
 
-def _install_log_handler(level: int = logging.INFO) -> None:
-    """Attach the capture handler to the root logger (idempotent).
+def _install_log_capture() -> None:
+    """Wrap the current log record factory with the capture factory (idempotent)."""
+    global _log_factory
+    with _log_lock:
+        if _log_factory is not None:
+            return
+        _log_factory = _CaptureFactory(logging.getLogRecordFactory())
+        logging.setLogRecordFactory(_log_factory)
 
-    Capture follows the app's logger levels. Only when logging is unconfigured (the root
-    logger has no handler of the app's) and its level (Python's default WARNING) would hide
-    ``level`` records is the root level lowered to ``level``; console output does not
-    change, because records below WARNING have no handler to print them and WARNING and
-    above still reach stderr through :func:`_last_resort`.
+
+def _uninstall_log_capture() -> None:
+    """Undo :func:`_install_log_capture`.
+
+    The previous factory is restored when the capture factory is still the current one;
+    when the app has wrapped it since, it stays in that chain but only passes through.
     """
-    global _root_lowered
-    root = logging.getLogger()
+    global _log_factory
     with _log_lock:
-        if _log_handler not in root.handlers:
-            if not root.handlers and root.level > level and _root_lowered is None:
-                _root_lowered = (root.level, level)
-                root.setLevel(level)
-            root.addHandler(_log_handler)
-        elif _root_lowered is not None and root.level == _root_lowered[1] and level < root.level:
-            _root_lowered = (_root_lowered[0], level)
-            root.setLevel(level)
-
-
-def _uninstall_log_handler() -> None:
-    global _root_lowered
-    with _log_lock:
-        root = logging.getLogger()
-        root.removeHandler(_log_handler)
-        if _root_lowered is not None:
-            if root.level == _root_lowered[1]:  # not changed by the app since
-                root.setLevel(_root_lowered[0])
-            _root_lowered = None
+        factory, _log_factory = _log_factory, None
+        if factory is None:
+            return
+        factory.enabled = False
+        if logging.getLogRecordFactory() is factory:
+            logging.setLogRecordFactory(factory.previous)
 
 
 # ── module-level API (the default recorder) ──────────────────────────────────────────
@@ -781,7 +761,7 @@ def configure(
     """Install the process-wide default :class:`Recorder` and return it."""
     global _default
     with _default_lock:
-        _uninstall_log_handler()  # the new recorder re-installs it if it wants logs
+        _uninstall_log_capture()  # the new recorder re-installs it if it wants logs
         _default = Recorder(settings, store, suggesters)
     return _default
 

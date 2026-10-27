@@ -82,6 +82,12 @@ def _configure_load(p: argparse.ArgumentParser) -> None:
     p.add_argument("--poisson", action="store_true", help="Poisson arrivals (default fixed)")
     p.add_argument("--workers", type=int, metavar="N", help="worker processes (default ≤ 8)")
     p.add_argument("--base-url", metavar="URL", help="override the scenario's base_url")
+    p.add_argument(
+        "--ui-url",
+        metavar="PATH|URL",
+        help="where the Redline UI is mounted, for the printed link (default: the scenario's "
+        "ui_url, else mount_path from the project's Redline config, else /_redline)",
+    )
     p.add_argument("--name", help="run name (default: the scenario's)")
     p.add_argument(
         "--store",
@@ -242,11 +248,26 @@ def _fail_run(store_path: str, run_id: str, message: str) -> None:
         store.close()
 
 
-def _ui_hint(base_url: str, run_id: str) -> str:
+def _configured_mount() -> str | None:
+    """``mount_path`` from the Redline config of the project in the working directory."""
+    from .config import resolve_settings
+
+    try:
+        return resolve_settings(None, project_root=os.getcwd()).settings.mount_path
+    except Exception:  # an invalid or unreadable config must not break the run's summary
+        return None
+
+
+def _ui_hint(base_url: str, run_id: str, ui_url: str | None = None) -> str:
+    """Link to the run in the UI: ``ui_url`` (a path on ``base_url``'s origin or an
+    absolute URL; default ``/_redline``) + ``/#/load/<id>``."""
     from urllib.parse import urlsplit
 
-    parts = urlsplit(base_url)
-    return f"{parts.scheme}://{parts.netloc}/_redline/#/load/{run_id}"
+    ui = (ui_url or "/_redline").strip()
+    if not ui.startswith(("http://", "https://")):
+        parts = urlsplit(base_url)
+        ui = f"{parts.scheme}://{parts.netloc}/" + ui.lstrip("/")
+    return f"{ui.rstrip('/')}/#/load/{run_id}"
 
 
 def _cmd_load(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
@@ -256,7 +277,7 @@ def _cmd_load(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
     from .load.analysis import check_thresholds
     from .load.engine import run
     from .load.profile import ScenarioError
-    from .load.scenario import load_scenario, validate_base_url
+    from .load.scenario import load_scenario, validate_base_url, validate_ui_url
     from .load.sinks import JsonSink
 
     try:
@@ -265,6 +286,8 @@ def _cmd_load(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
             scenario = scenario.replace(base_url=validate_base_url(args.base_url, "--base-url"))
         if not scenario.base_url:
             raise ScenarioError("is required (in the scenario or via --base-url)", "base_url")
+        if args.ui_url:
+            scenario = scenario.replace(ui_url=validate_ui_url(args.ui_url, "--ui-url"))
         profile = _cli_profile(args, scenario)
     except ScenarioError as exc:
         err.write(f"redline load: {exc}\n")
@@ -327,7 +350,8 @@ def _cmd_load(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
 
     _print_final(printer, result)
     if store_path and sinks and not isinstance(sinks[0], JsonSink):
-        printer.line(f"See bottlenecks in the Redline UI at {_ui_hint(scenario.base_url, run_id)}")
+        ui_url = scenario.ui_url or _configured_mount()
+        printer.line(f"Open the run in Redline: {_ui_hint(scenario.base_url, run_id, ui_url)}")
     if result.status == "failed":
         err.write(f"redline load: run failed: {result.message}\n")
         return EXIT_FAIL

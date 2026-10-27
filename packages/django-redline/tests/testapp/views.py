@@ -172,6 +172,8 @@ def html_page(request):
         response["Content-Security-Policy"] = csp
     if request.GET.get("timing"):
         response["Server-Timing"] = "app;dur=1"
+    if request.GET.get("download"):
+        response["Content-Disposition"] = 'attachment; filename="page.html"'
     if request.GET.get("length"):
         response["Content-Length"] = str(len(response.content))
     return response

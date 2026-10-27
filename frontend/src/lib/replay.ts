@@ -1,6 +1,7 @@
 // Pure helpers for the Replay modal. A replay is a plain `fetch` from the browser (same origin,
 // the viewer's own cookies). Redacted values are never sent: the user must re-enter them or drop them.
-import { isMasked, tokenizeBody } from './curl'
+import { isMasked, tokenizeBody } from './curl.ts'
+import { sameOriginUrl } from './url.ts'
 
 export interface ReplayTrace {
   id: string; method: string; path: string
@@ -40,7 +41,13 @@ export function missingFields(fields: ReplayField[], values: Record<string, stri
   return fields.filter(f => !removed.has(f.key) && !(values[f.key] ?? '').length)
 }
 
-export interface ReplayOpts { profile: boolean; replayOf: string }
+/** `origin` is the page's own origin (`location.origin`): the replay never leaves it. */
+export interface ReplayOpts { profile: boolean; replayOf: string; origin: string }
+
+/** Thrown by {@link buildReplay} when the recorded path would resolve to another origin. */
+export class CrossOriginReplay extends Error {
+  constructor(path: string) { super(`Refusing to replay ${JSON.stringify(path)}: it does not resolve to this site.`) }
+}
 
 export function buildReplay(t: ReplayTrace, values: Record<string, string>, removed: ReadonlySet<string>, opts: ReplayOpts): { url: string; init: RequestInit } {
   const method = t.method.toUpperCase()
@@ -52,7 +59,9 @@ export function buildReplay(t: ReplayTrace, values: Record<string, string>, remo
     }
   }
   const qs = u.toString()
-  const url = t.path + (qs ? (t.path.includes('?') ? '&' : '?') + qs : '')
+  const target = sameOriginUrl(t.path + (qs ? (t.path.includes('?') ? '&' : '?') + qs : ''), opts.origin)
+  if (target === null) throw new CrossOriginReplay(t.path)
+  const url = target.href
 
   const headers: Record<string, string> = {}
   for (const [k, v] of Object.entries(t.request.headers)) {

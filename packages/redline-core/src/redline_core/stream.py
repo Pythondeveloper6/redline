@@ -10,9 +10,11 @@ The stream opens with a ``retry:`` hint and a ``: connected`` comment (so proxie
 browser see bytes at once), then polls :meth:`RedlineAPI.poll` every
 :data:`POLL_INTERVAL` seconds and sends one ``event: trace`` per new TraceSummary, a
 ``: ping`` comment every :data:`PING_INTERVAL` seconds and closes after
-:data:`MAX_DURATION` seconds (``EventSource`` reconnects by itself; the UI passes the
-newest ``started_at`` it has as ``since``). Each poll is one short read on the store; no
-database connection of the application and no lock is held between polls.
+:data:`MAX_DURATION` seconds (ASGI) or :data:`SYNC_MAX_DURATION` seconds (WSGI, where an
+open stream pins a worker thread). ``EventSource`` reconnects by itself, after the
+``retry:`` delay and with ``Last-Event-ID``, so closing early loses nothing. Each poll is
+one short read on the store; no database connection of the application and no lock is
+held between polls.
 
 The constants are read at call time, so tests can monkeypatch them.
 """
@@ -32,6 +34,7 @@ __all__ = [
     "PING_INTERVAL",
     "POLL_INTERVAL",
     "SSE_HEADERS",
+    "SYNC_MAX_DURATION",
     "async_events",
     "format_event",
     "parse_since",
@@ -44,8 +47,13 @@ POLL_INTERVAL = 1.0
 PING_INTERVAL = 15.0
 #: Seconds after which the server closes the stream (the browser reconnects).
 MAX_DURATION = 300.0
+#: The same for :func:`sync_events`: a WSGI stream holds a worker thread while open, so it
+#: is recycled much sooner (capped by :data:`MAX_DURATION` too).
+SYNC_MAX_DURATION = 25.0
 #: Reconnect delay suggested to ``EventSource`` (milliseconds).
 RETRY_MS = 3_000
+#: The same for :func:`sync_events`, which closes every :data:`SYNC_MAX_DURATION` seconds.
+SYNC_RETRY_MS = 500
 
 #: Response headers besides ``Content-Type: text/event-stream``.
 SSE_HEADERS: dict[str, str] = {
@@ -57,7 +65,10 @@ SSE_HEADERS: dict[str, str] = {
 CONTENT_TYPE = "text/event-stream; charset=utf-8"
 
 PING = b": ping\n\n"
-_OPEN = f"retry: {RETRY_MS}\n: connected\n\n".encode()
+
+
+def _open(retry_ms: int) -> bytes:
+    return f"retry: {retry_ms}\n: connected\n\n".encode()
 
 
 def parse_since(params: Mapping[str, Any]) -> float:
@@ -143,14 +154,17 @@ def sync_events(
     sleep: Callable[[float], None] = time.sleep,
     clock: Callable[[], float] = time.monotonic,
 ) -> Iterator[bytes]:
-    """The SSE byte stream for a WSGI/thread-per-request server."""
+    """The SSE byte stream for a WSGI/thread-per-request server. It closes after
+    :data:`SYNC_MAX_DURATION` seconds so that open tabs do not pin worker threads; the
+    browser reconnects after :data:`SYNC_RETRY_MS` and resumes from ``Last-Event-ID``."""
     cursor = _Cursor(api, since, after)
-    yield _OPEN
+    yield _open(SYNC_RETRY_MS)
+    limit = min(MAX_DURATION, SYNC_MAX_DURATION)
     start = last_ping = clock()
     while True:
         yield from cursor.poll()
         now = clock()
-        if now - start >= MAX_DURATION:
+        if now - start >= limit:
             return
         if now - last_ping >= PING_INTERVAL:
             last_ping = now
@@ -170,7 +184,7 @@ async def async_events(
     event loop is never blocked; ``is_disconnected`` (e.g. Starlette's
     ``request.is_disconnected``) ends the stream early."""
     cursor = _Cursor(api, since, after)
-    yield _OPEN
+    yield _open(RETRY_MS)
     start = last_ping = clock()
     while True:
         for frame in await asyncio.to_thread(cursor.poll):

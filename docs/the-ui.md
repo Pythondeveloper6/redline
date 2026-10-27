@@ -58,7 +58,8 @@ see [The HTTP API](http-api.md#get-apitraces). **Reset** clears all filters.
 <!-- verify: SSE live mode -->
 New requests stream into the list as they happen. The page subscribes to `api/stream`
 (Server-Sent Events: one event per new trace, a keep-alive comment every 15 seconds, and a
-reconnect after the server closes the stream every five minutes) and falls back to polling
+reconnect after the server closes the stream: every five minutes on ASGI servers, every
+25 seconds on WSGI servers so an open tab does not hold a worker thread) and falls back to polling
 every two seconds when streaming is unavailable or the `sse`
 [feature switch](access-control.md#feature-switches) is off. The pulsing **Live** button
 pauses (**Pause**, then **Resume**) while you read. The counter shows how many rows are

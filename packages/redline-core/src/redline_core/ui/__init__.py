@@ -123,26 +123,38 @@ def server_timing_enabled(settings: Settings, debug: bool) -> bool:
     return bool(settings.server_timing)
 
 
+#: Directives that govern ``<script src>``, most specific first (CSP3 fallback order).
+_SCRIPT_DIRECTIVES = ("script-src-elem", "script-src", "default-src")
+
+
 def csp_allows_badge(csp: str | None) -> bool:
     """Whether a ``Content-Security-Policy`` lets the page load ``<mount>/badge.js``.
 
-    No policy, or one without ``script-src`` / ``default-src``, allows it. Otherwise the
-    effective source list (``script-src``, else ``default-src``) must contain ``'self'``
-    or ``*``; anything stricter (nonces, hashes, other hosts only) skips the injection
-    rather than producing a CSP violation in the console.
+    ``csp`` may hold several policies joined with ``,`` (several headers, or one header
+    listing several); every one must allow it. In each, the directive that governs script
+    elements (``script-src-elem``, else ``script-src``, else ``default-src``; the first
+    occurrence of a directive wins) must list ``'self'`` or ``*`` and not
+    ``'strict-dynamic'`` (browsers then ignore ``'self'``, and the badge carries no nonce).
+    A policy without any of them allows it. Anything stricter (nonces, hashes, other hosts
+    only) skips the injection rather than producing a CSP violation in the console.
     """
     if not csp:
         return True
-    directives: dict[str, list[str]] = {}
-    for policy in csp.split(","):  # several policies: every one must allow it
+    for policy in csp.split(","):
+        directives: dict[str, list[str]] = {}
         for part in _DIRECTIVE.split(policy.strip()):
             name, _, value = part.strip().partition(" ")
             if name:
-                directives.setdefault(name.lower(), []).append(value.lower())
-    sources = directives.get("script-src") or directives.get("default-src")
-    if not sources:
-        return True
-    return all(("'self'" in v.split() or "*" in v.split()) for v in sources)
+                directives.setdefault(name.lower(), value.lower().split())
+        for name in _SCRIPT_DIRECTIVES:
+            sources = directives.get(name)
+            if sources is not None:
+                break
+        else:
+            continue
+        if "'strict-dynamic'" in sources or not ("'self'" in sources or "*" in sources):
+            return False
+    return True
 
 
 def badge_allowed(
@@ -151,9 +163,11 @@ def badge_allowed(
     *,
     content_encoding: str | None = None,
     csp: str | None = None,
+    content_disposition: str | None = None,
 ) -> bool:
-    """The response-side checks: 2xx, ``text/html``, not compressed, CSP allows it."""
-    if status is None or not 200 <= status < 300:
+    """The response-side checks: 2xx, ``text/html``, not compressed, not a download
+    (no ``Content-Disposition``), CSP allows it (all policies joined with ``,``)."""
+    if status is None or not 200 <= status < 300 or content_disposition:
         return False
     if not content_type or not content_type.split(";")[0].strip().lower() == "text/html":
         return False

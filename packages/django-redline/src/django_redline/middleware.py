@@ -214,6 +214,7 @@ def _badge_snippet(builder: TraceBuilder, response: HttpResponseBase) -> str | N
         response.get("Content-Type"),
         content_encoding=response.get("Content-Encoding"),
         csp=response.get("Content-Security-Policy"),
+        content_disposition=response.get("Content-Disposition"),
     ):
         return None
     if len(response.content) > ui.BADGE_MAX_BYTES:

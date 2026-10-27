@@ -89,10 +89,12 @@ JSON responses, redirects, downloads and error pages are untouched.
 ### Content-Security-Policy
 
 If your pages send a strict `Content-Security-Policy`, the badge script must be allowed by
-`script-src`. Because it is served from your own origin under Redline's mount, `'self'`
-covers it. A policy that uses **nonces or hashes only** (`script-src 'nonce-...'`) will block
-the badge, and the console will say so. Either allow `'self'` in development, or set
-`badge = False`. Redline does not rewrite your CSP header.
+`script-src-elem` (or `script-src`, or `default-src`). Because it is served from your own
+origin under Redline's mount, `'self'` covers it. A policy that uses **nonces or hashes only**
+(`script-src 'nonce-...'`) or `'strict-dynamic'` (which makes browsers ignore `'self'`) would
+block it, so Redline leaves such pages alone rather than cause a CSP error in the console.
+With several policies (several headers) every one must allow it. Allow `'self'` in
+development to see the badge. Redline does not rewrite your CSP header.
 
 ## Live mode and snapshots
 

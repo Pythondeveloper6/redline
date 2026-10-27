@@ -7,6 +7,10 @@ covers all of it, nested models included. The wrapper is looked up as a module g
 FastAPI's request handler, so patching the attribute is enough; it is defensive about the
 signature (keyword-only today, but only ``field``/``response_content`` are read, by name)
 and costs one ``ContextVar.get()`` outside a traced request.
+
+The span's callsite (a stack walk) is captured only when the serialization is over
+``slow_serializer_ms``, i.e. when a ``slow_serializer`` issue can point at it: the endpoint
+has already returned when FastAPI serializes, so a fast span's stack says nothing useful.
 """
 
 from __future__ import annotations
@@ -16,7 +20,7 @@ import time
 from typing import Any, get_args, get_origin
 
 from redline_core import record_span
-from redline_core.recorder import current
+from redline_core.recorder import _trace
 
 __all__ = ["instrument_serialization", "uninstrument_serialization"]
 
@@ -64,7 +68,8 @@ def instrument_serialization() -> bool:
 
     @functools.wraps(original)
     async def serialize_response(*args: Any, **kwargs: Any) -> Any:
-        if current() is None:
+        builder = _trace.get()
+        if builder is None:
             return await original(*args, **kwargs)
         start = _perf()
         try:
@@ -75,6 +80,7 @@ def instrument_serialization() -> bool:
                 name, items = _describe(kwargs.get("field"), kwargs.get("response_content"))
             except Exception:
                 name, items = "response", None
+            slow = duration * 1000.0 >= builder.recorder.settings.slow_serializer_ms
             record_span(
                 "serializer",
                 f"serialize {name}",
@@ -86,6 +92,7 @@ def instrument_serialization() -> bool:
                     "items": items,
                     "many": items is not None,
                 },
+                slow,
             )
 
     routing.serialize_response = serialize_response

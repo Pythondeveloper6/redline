@@ -106,7 +106,9 @@ def _badge_candidate(status: int, headers: list[tuple[bytes, bytes]]) -> bool:
         status,
         _header(headers, b"content-type"),
         content_encoding=_header(headers, b"content-encoding"),
-        csp=_header(headers, b"content-security-policy"),
+        csp=", ".join(
+            v.decode("latin-1") for k, v in headers if k.lower() == b"content-security-policy"
+        ),
     ):
         return False
     if _header(headers, b"content-disposition") or _header(headers, b"last-modified"):

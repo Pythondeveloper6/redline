@@ -406,8 +406,10 @@ data: {"id": "9d4c...", "method": "GET", "path": "/orders/", "status": 200, "dur
 ```
 
 Each `trace` event carries a `TraceSummary`. A comment line `: ping` is sent every 15
-seconds as a keep-alive, and the server closes the stream after five minutes; the client
-reconnects with `since=` set to the last trace it saw. It is served by the adapter and is
+seconds as a keep-alive, and the server closes the stream after five minutes on ASGI
+servers and after 25 seconds on WSGI servers (where an open stream holds a worker thread);
+the client reconnects (after the `retry:` delay the stream announces) with `Last-Event-ID`
+and `since=` set to the last trace it saw, so nothing is missed. It is served by the adapter and is
 subject to the same access control.
 
 ### GET api/traces/{id}/snapshot

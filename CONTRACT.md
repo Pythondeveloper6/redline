@@ -352,7 +352,7 @@ is set and the title reads `N+1: 24 queries on shop_customer from resolver order
 | large_result_rows / unbounded_rows | int | 1_000 / 200 |
 | slow_serializer_ms / long_transaction_ms / slow_external_ms | float | 50 / 200 / 500 |
 | capture_logs | bool | True |
-| log_level | str | "INFO" (minimum level captured into a trace; capture follows the app's logger levels – see below) |
+| log_level | str | "INFO" (additional minimum level captured into a trace; capture follows the app's logger levels – see below) |
 | max_logs_per_trace | int | 200 |
 | capture_locals | bool | True (redacted by `redact_keys`) |
 | editor | str | "vscode" – one of vscode, cursor, pycharm, idea, sublime, none, or a template containing `{file}` and `{line}` (`{file}` is absolute) |
@@ -362,13 +362,14 @@ is set and the title reads `N+1: 24 queries on shop_customer from resolver order
 | history_retention_days | int \| None | 90 (rollups/issue index/runs; independent of `max_age_days`) |
 | load_from_ui | bool | False – allow `POST api/runs` |
 
-Log level rule: the capture handler sits on the root logger, so it only sees records the app's loggers let
-through. When the app configured logging (the root logger has a handler of its own when Redline installs) levels
-are never touched. When logging is unconfigured (no root handler) and the root level (Python's default WARNING) is
-above `log_level`, the root level is lowered to `log_level` (restored when the handler is uninstalled); console
-output stays exactly as before: records below WARNING have no handler that prints them, and WARNING and above
-still reach `logging.lastResort` (stderr) because the capture handler stands in for it when no other handler is on
-the record's path.
+Log capture rule: Redline adds no logging handler and never changes a logger's level. It wraps the current log
+record factory (`logging.setLogRecordFactory`, chain-safe and idempotent; uninstalling restores the previous
+factory, or leaves a pass-through when the app has wrapped Redline's since), so `basicConfig`, `dictConfig` and
+`basicConfig(force=True)` called later neither become no-ops nor stop capture. `logging` only creates records for
+enabled loggers, so capture follows the app's levels and `log_level` is an *additional* minimum: capturing INFO
+needs the app's loggers at INFO (Django's default `LOGGING` and most configured apps are; an unconfigured app's
+root is at WARNING, so only WARNING and above are captured there). With no active trace a record costs one
+`ContextVar.get()`; records from the `redline.*` loggers are never captured.
 
 ## 11. Storage additions
 
@@ -467,7 +468,7 @@ Concrete decisions (v0.2 implementation):
 | `GET api/meta` | adds `project_root`, `editor`, `editor_url_template` (str\|null, with `{file}`/`{line}`), `release`, `features: {load_from_ui, sse, snapshot, explain, profile, replay, load, logs, locals}` (§18), `access: {policy, login, read_only, preset}` (§18) |
 | `GET api/traces` | adds filters `sql=<substring>` and `since=<epoch>`, `replay_of=<id>` |
 | `GET api/config` | effective configuration, sources and warnings (§18) |
-| `GET api/stream?since=<epoch>[&after=<seq>]` | **SSE** (adapter-served): `event: trace` with a TraceSummary (plus `seq`) per newly saved trace, in save order; the SSE `id:` is the `seq`. `since` is only the initial position; `after=<seq>` or the `Last-Event-ID` header resumes after that `seq` (and wins over `since`). `: ping` every 15 s, closes after 5 min. Core helper `api.poll(since, last_id, limit=100, after_seq=None) -> list[TraceSummary]` |
+| `GET api/stream?since=<epoch>[&after=<seq>]` | **SSE** (adapter-served): `event: trace` with a TraceSummary (plus `seq`) per newly saved trace, in save order; the SSE `id:` is the `seq`. `since` is only the initial position; `after=<seq>` or the `Last-Event-ID` header resumes after that `seq` (and wins over `since`). `: ping` every 15 s, closes after 5 min on ASGI and after 25 s on WSGI (a sync stream pins a worker thread; the opening `retry:` hint is 3000 ms on ASGI and 500 ms on WSGI, so `EventSource` reconnects promptly and resumes with `Last-Event-ID`). Core helper `api.poll(since, last_id, limit=100, after_seq=None) -> list[TraceSummary]` |
 | `GET api/traces/{id}/snapshot` | `text/html` standalone page (bundle inlined, `window.__REDLINE_SNAPSHOT__ = {trace, profile}`). `dispatch` returns a `RawResponse(status, content_type, body: bytes, headers)` for it; adapters send it as-is |
 | `GET api/compare?a=<id>&b=<id>` | `{a: TraceSummary, b: TraceSummary, delta: {duration_ms, query_count, query_ms}, by_kind: {kind: {a_ms, b_ms, a_count, b_count}}, sql: [{fingerprint, sql, a_count, b_count, a_ms, b_ms}], issues: {only_a, only_b, both}}` |
 | `GET api/sql?q=&window=` | `{items: [{fingerprint, sql, count, traces, total_ms, max_ms, routes, sample_trace_id}]}` |
@@ -571,7 +572,7 @@ adding `X-Redline-Replay-Of: <trace id>`; the recorder turns that header into th
 
 ## 13. Load tester (`redline_core.load`, extra `redline-core[load]` = httpx; console script `redline`)
 
-- `redline load SCENARIO [--rps N | --ramp A:B | --steps A:B:STEP] [--duration 60s] [--step-duration 30s] [--workers N] [--store PATH] [--json OUT] [--fail-p95-ms X] [--fail-error-rate Y]`, `redline load init --from-openapi URL|FILE | --from-traces [--store PATH]`. Exit code 1 when a `--fail-*` threshold is breached (CI-ready).
+- `redline load SCENARIO [--rps N | --ramp A:B | --steps A:B:STEP] [--duration 60s] [--step-duration 30s] [--workers N] [--base-url URL] [--ui-url PATH|URL] [--store PATH] [--json OUT] [--fail-p95-ms X] [--fail-error-rate Y]` (after a stored run it prints `Open the run in Redline: <ui>/#/load/<id>`, `<ui>` = `--ui-url`, else the scenario's `ui_url` (path on `base_url`'s origin or absolute URL), else `mount_path` resolved from the working directory's Redline config, else `/_redline`; no request is made to find it), `redline load init --from-openapi URL|FILE | --from-traces [--store PATH]`. Exit code 1 when a `--fail-*` threshold is breached (CI-ready).
 - Scenario: JSON, TOML (3.11+) or a Python file defining `SCENARIO = {...}`:
   `{name, base_url, headers, timeout_s, requests: [{name, method, path, weight, headers, json|body, expect_status}], profile: {mode: "constant"|"ramp"|"steps", rps, start_rps, end_rps, step_rps, duration_s, step_duration_s, stop_on: {error_rate, p95_ms}}, workers}`.
 - **Limits.** Every mode: fewer than 1000 steps (computed arithmetically before any plan is built), `duration_s` ≤ 24 h, rates ≤ 100 000 rps; `workers` ≤ 256, `connections` ≤ 10 000, `max_inflight` ≤ 100 000. Runs started from the UI (`launch_background`) are capped further: ≤ 200 steps, ≤ 1 h, ≤ 5 000 rps (400 `invalid_body`).
@@ -599,10 +600,13 @@ Concrete decisions (v0.2 implementation):
 
 - **Badge helpers** (`redline_core.ui`): `badge_enabled(settings, debug)` (`badge` True/False as given, `"auto"` =
   the framework's debug flag: Django `DEBUG`, Flask/FastAPI/Litestar `app.debug`; always off when `enabled` is
-  off); `badge_allowed(status, content_type, *, content_encoding=None, csp=None)` (2xx, `text/html`, not
-  compressed, `csp_allows_badge`); `csp_allows_badge(csp)` (no policy or no `script-src`/`default-src` → yes;
-  otherwise the effective `script-src` (else `default-src`) of **every** policy must contain `'self'` or `*` –
-  nonce/hash-only policies skip the injection rather than cause a CSP violation); `badge_summary(builder,
+  off); `badge_allowed(status, content_type, *, content_encoding=None, csp=None, content_disposition=None)`
+  (2xx, `text/html`, not compressed, no `Content-Disposition`, `csp_allows_badge`); `csp_allows_badge(csp)`
+  (`csp` = every `Content-Security-Policy` header joined with `, `; **every** policy must allow it. In each, the
+  directive governing script elements – `script-src-elem`, else `script-src`, else `default-src`, first
+  occurrence wins – must contain `'self'` or `*` and not `'strict-dynamic'` (browsers then ignore `'self'`, and
+  the badge has no nonce); a policy with none of the three allows it. Nonce/hash-only policies skip the
+  injection rather than cause a CSP violation); `badge_summary(builder,
   status)`; `badge_snippet(...)`; `inject_badge(body: bytes, snippet) -> bytes | None` (inserted before the
   **last** `</body>`, case-insensitive; `None` when there is none – the response is left as is);
   `BADGE_MAX_BYTES = 2 MiB` (never buffered beyond it).
@@ -615,9 +619,10 @@ Concrete decisions (v0.2 implementation):
   always `null` in the tag and the badge fetches `{mount}/api/traces/{id}` (same origin, the viewer's cookies)
   when it is hovered/opened, retrying a 404 briefly (the trace is saved a moment after the response; a trace
   dropped by sampling stays 404 – show the summary only). Clicking opens `{mount}/#/requests/{id}`.
-- **Where it is injected:** recorded requests only (never Redline's own URLs), status 200–299, `text/html`,
-  no `Content-Encoding`, CSP permitting, not a file (Django `FileResponse`, Flask `send_file`/streamed
-  responses, ASGI responses with `Content-Disposition` (both ASGI adapters) or `Last-Modified` (FastAPI), i.e.
+- **Where it is injected:** recorded requests only (never Redline's own URLs, never an inert builder),
+  status 200–299, `text/html`, no `Content-Encoding`, CSP permitting, no `Content-Disposition` (a download, all
+  adapters), not a file (Django `FileResponse`, Flask `send_file`/streamed
+  responses, ASGI responses with `Last-Modified` (FastAPI), i.e.
   `FileResponse`/`StaticFiles`/`File`), not streamed (Django `StreamingHttpResponse`; Flask: only responses
   with a numeric `Content-Length` ≤ 2 MiB, never `HEAD` or the legacy `write()` API; ASGI: the start message is
   held back only when it announces such a body with `Content-Length` ≤ 2 MiB or none, and the body must be
@@ -635,14 +640,16 @@ Concrete decisions (v0.2 implementation):
   `sync_events(api, since)` (WSGI: generator with `time.sleep`) and `async_events(api, since,
   is_disconnected=None)` (ASGI: store polls in `asyncio.to_thread`, never blocking the loop). Headers
   `Content-Type: text/event-stream; charset=utf-8`, `Cache-Control: no-cache`, `X-Accel-Buffering: no`,
-  `X-Frame-Options: DENY` (`SSE_HEADERS`). Frames: first `retry: 3000\n: connected\n\n`, then per new trace
+  `X-Frame-Options: DENY` (`SSE_HEADERS`). Frames: first `retry: <ms>\n: connected\n\n` (`RETRY_MS = 3000`
+  async, `SYNC_RETRY_MS = 500` sync), then per new trace
   `event: trace\nid: <trace id>\ndata: <TraceSummary JSON>\n\n` (oldest first; the cursor advances past every
   trace sent), `: ping\n\n` every `PING_INTERVAL = 15` s, polled every `POLL_INTERVAL = 1` s, closed after
-  `MAX_DURATION = 300` s (module constants, read at call time). The UI reconnects with `since` = the newest
-  `started_at` it has. The stream lives under the mount, so it is never recorded and sits behind the same
+  `MAX_DURATION = 300` s for `async_events` and `min(MAX_DURATION, SYNC_MAX_DURATION = 25)` s for
+  `sync_events` (module constants, read at call time). The browser reconnects by itself with `Last-Event-ID`
+  (and the UI's `since`). The stream lives under the mount, so it is never recorded and sits behind the same
   access guard as the API; between polls it holds no store lock and no app DB connection. Django picks
   `async_events` for an `ASGIRequest`, `sync_events` otherwise (a WSGI stream occupies a worker thread for up
-  to 5 min); Flask uses `sync_events` **without** `stream_with_context` (the generator only reads Redline's
+  to 25 s per connection); Flask uses `sync_events` **without** `stream_with_context` (the generator only reads Redline's
   store, so the app/request context – and e.g. a Flask-SQLAlchemy session – is torn down at once);
   FastAPI/Litestar stream `async_events` and stop on client disconnect.
 - **base_url** (for `POST api/runs`): the app's own origin as seen by the request: `scheme://host[:port]` +
@@ -831,7 +838,7 @@ server-side session store (logout clears the cookie in that browser only; rotati
 (Contract change: login/logout answer 200 JSON instead of 204, so the UI's JSON client handles them uniformly.)
 
 `RedlineAPI(..., config=ResolvedConfig | None, access=Access | None)`. With `logs` off a trace's `logs` is `[]`
-(and capture stops: the recorder installs no log handler); with `locals` off `error.frames[*].locals` is dropped
+(and capture stops: the recorder installs no record factory); with `locals` off `error.frames[*].locals` is dropped
 (and not captured); with `profile` off the snapshot has no profile. `replay` has no server route (UI only).
 
 **UI-started load runs:** the target is `settings.base_url` when set; otherwise the URL the adapter derived from the
@@ -848,6 +855,9 @@ decision's headers (and `X-Frame-Options: DENY`). TestClient peers named `testcl
 
 - **FastAPI** `install(..., prefix=None, dependencies=None)`: router dependency `redline_guard(access, prefix)` first,
   then the user's dependencies. `local_only`, `loopback_guard`, `csrf_guard` remain exported for explicit use.
+  Redline's routes are inserted first (they win over catch-alls) behind a prefix check: for a path not under the
+  prefix (after `root_path`) their `matches()` returns `NONE` without FastAPI walking them, so an application
+  request pays one `startswith`, and never the access gate (a route dependency).
 - **Flask** `Redline(..., url_prefix=None, permission=None)`: blueprint `before_request`; `permission(request)` is the
   framework hook (an `HTTPException` it raises is rendered as before; a False keeps the old message or the guard's
   `refusal()`).
