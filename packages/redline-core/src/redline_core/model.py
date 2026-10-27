@@ -72,7 +72,7 @@ IssueKind = Literal[
     "retry_storm",
 ]
 Severity = Literal["info", "warning", "critical"]
-Framework = Literal["django", "fastapi", "other"]
+Framework = Literal["django", "fastapi", "flask", "litestar", "other"]
 Confidence = Literal["high", "medium", "low"]
 
 SPAN_KINDS: tuple[str, ...] = (
@@ -106,7 +106,7 @@ ISSUE_KINDS: tuple[str, ...] = (
     "retry_storm",
 )
 SEVERITIES: tuple[str, ...] = ("info", "warning", "critical")
-FRAMEWORKS: tuple[str, ...] = ("django", "fastapi", "other")
+FRAMEWORKS: tuple[str, ...] = ("django", "fastapi", "flask", "litestar", "other")
 
 
 def new_id() -> str:

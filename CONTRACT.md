@@ -35,7 +35,7 @@ class Frame: file: str; line: int; function: str
 @dataclass
 class Trace:
     id: str
-    framework: Literal["django", "fastapi", "other"]
+    framework: Literal["django", "fastapi", "flask", "litestar", "other"]
     method: str
     path: str                  # concrete path, e.g. /orders/42/
     route: str | None          # template, e.g. /orders/<int:pk>/ or /orders/{id}
