@@ -100,7 +100,7 @@ export default function CommandPalette({ open, onClose, meta }: { open: boolean;
         <input data-autofocus autoFocus value={q} onChange={e => setQ(e.target.value)} onKeyDown={onKey}
           role="combobox" aria-expanded="true" aria-controls="palette-list" aria-autocomplete="list" aria-label="Search pages, requests, endpoints and issues"
           aria-activedescendant={results[active] ? 'pal-' + results[active].id : undefined}
-          placeholder="Search pages, requests, endpoints, issues…" className="flex-1 h-11 bg-transparent outline-none text-[13.5px] placeholder:text-faint" />
+          placeholder="Search pages, requests, endpoints, issues…" className="flex-1 h-11 bg-transparent outline-none focus-visible:outline-none text-[13.5px] placeholder:text-faint" />
         <Kbd>Esc</Kbd>
       </div>
       <div ref={listRef} id="palette-list" role="listbox" aria-label="Results" className="overflow-y-auto py-1 max-h-[55vh]">

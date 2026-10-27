@@ -233,6 +233,9 @@ replay = false
 
 ## Login and API
 
+![The login screen of a token-protected instance](assets/screenshots/fastapi-login-light.png){ .rl-shot .rl-only-light }
+![The login screen of a token-protected instance](assets/screenshots/fastapi-login-dark.png){ .rl-shot .rl-only-dark }
+
 | Endpoint | Behaviour |
 |---|---|
 | `POST api/login` | body `{"token": "..."}` or `{"username": "...", "password": "..."}` (4 KiB at most); answers `200 {"ok": true, "expires_at": <epoch>}` and sets the cookie. Never redirects. `400 invalid_json` / `invalid_body`, `401 invalid_credentials`, `429 too_many_requests`; `404` under other policies |
