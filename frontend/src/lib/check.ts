@@ -85,8 +85,9 @@ export function summarize(requests: ReportRequest[]): DerivedSummary {
     if (pv !== 'n/a' && b && a && b.median > 0 && a.median > 0 && !b.failed && !a.failed) {
       logSum += Math.log(a.median / b.median); s.speedSamples++
       if (r.perf.change_pct != null) {
-        if (r.perf.change_pct < 0) s.wins.push({ name: r.name, pct: r.perf.change_pct })
-        else if (r.perf.change_pct > 0) s.regressions.push({ name: r.name, pct: r.perf.change_pct })
+        // Only significant changes count as wins/regressions (same as the CLI summary).
+        if (pv === 'faster') s.wins.push({ name: r.name, pct: r.perf.change_pct })
+        else if (pv === 'slower') s.regressions.push({ name: r.name, pct: r.perf.change_pct })
       }
     }
     const qb = r.server?.before?.queries_median, qa = r.server?.after?.queries_median

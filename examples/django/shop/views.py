@@ -1,6 +1,8 @@
 """The demo shop's endpoints. Most of them are slow on purpose – Redline shows why."""
 
+import os
 import time
+import uuid
 
 from asgiref.sync import sync_to_async
 from django.core.cache import cache
@@ -10,6 +12,10 @@ from django.shortcuts import render
 from django_redline import span
 
 from .models import Customer, Order, OrderItem, Product, Review
+
+# SHOP_REFACTOR=1 simulates a refactor for `redline check` (see the README):
+# N+1 fixed, one view slower, one response field changed, one view broken.
+REFACTOR = os.environ.get("SHOP_REFACTOR") == "1"
 
 ENDPOINTS = [
     ("/orders/", "N+1 on order items – fix: prefetch_related"),
@@ -32,6 +38,8 @@ def home(request):
 def order_list(request):
     """N+1: one query for the orders, then one per order for its items."""
     orders = Order.objects.select_related("customer").order_by("-id")[:30]
+    if REFACTOR:  # refactor: two queries instead of one per order
+        orders = orders.prefetch_related("items")
     data = []
     for order in orders:
         items = [{"product_id": i.product_id, "qty": i.quantity} for i in order.items.all()]
@@ -60,6 +68,8 @@ def _customer_count():
 
 def dashboard(request):
     """A duplicate query: the same count runs twice."""
+    if REFACTOR:  # refactor: a slower code path
+        time.sleep(0.05)
     stats = {"customers": _customer_count(), "products": Product.objects.count()}
     stats["customers_again"] = _customer_count()
     return JsonResponse(stats)
@@ -94,7 +104,12 @@ def api_products(request):
         {
             "authenticated": token.startswith("Bearer "),
             "products": [
-                {"id": p.id, "name": p.name, "price": str(p.price), "category": p.category.name}
+                {
+                    "id": p.id,
+                    "name": p.name,
+                    "price": f"{p.price:.1f}" if REFACTOR else str(p.price),
+                    "category": p.category.name,
+                }
                 for p in products
             ],
         }
@@ -103,6 +118,8 @@ def api_products(request):
 
 async def async_summary(request):
     """An async view using the async ORM."""
+    if REFACTOR:  # refactor: a regression that breaks the view
+        raise RuntimeError("summary backend not configured")
     orders = await Order.objects.acount()
     latest = [o.id async for o in Order.objects.order_by("-id")[:5]]
     top = await sync_to_async(lambda: list(Product.objects.order_by("-price")[:3]))()
@@ -116,3 +133,8 @@ def cached(request):
         data = list(Product.objects.order_by("-price").values_list("name", flat=True)[:5])
         cache.set("shop:top-products", data, 60)
     return JsonResponse({"top": data})
+
+
+def status(request):
+    """A health check with volatile fields (change on every call)."""
+    return JsonResponse({"ok": True, "now": time.time(), "request_id": uuid.uuid4().hex})

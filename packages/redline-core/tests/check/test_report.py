@@ -389,3 +389,16 @@ def test_junit_parses():
     assert float(cases[0].get("time")) > 0
     passing = ET.fromstring(sample_report().with_fail_on(()).to_junit())
     assert passing.find("testsuite").get("failures") == "0"
+
+
+def test_type_change_diff_quotes_strings():
+    from redline_core.check.report import _diff_lines
+
+    e = {
+        "response": {
+            "diff": [{"path": "n", "kind": "type", "before": 200, "after": "200"}],
+            "diff_total": 1,
+            "text_diff": None,
+        }
+    }
+    assert _diff_lines(e, 10) == ['~ n: 200 → "200" (type)']

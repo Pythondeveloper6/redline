@@ -63,3 +63,12 @@ def test_route_filter_and_limit(store):
 def test_empty_store(store):
     with pytest.raises(ValueError, match="no recorded read-only traffic"):
         from_traces(store)
+
+
+def test_route_with_recent_failures_uses_an_older_healthy_trace(store):
+    # a refactor broke the route: its latest 12 traces are 500s, the healthy one is older
+    save(store, path="/flaky/", route="/flaky/", started_at=1_000)
+    for i in range(12):
+        save(store, path="/flaky/", route="/flaky/", status=500, started_at=2_000 + i)
+    data = from_traces(store, window_s=10**10)
+    assert [r["name"] for r in data["requests"]] == ["GET /flaky/"]

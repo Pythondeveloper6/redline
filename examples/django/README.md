@@ -42,6 +42,39 @@ curl -s -o /dev/null -H "Authorization: Bearer sk-live-123" http://127.0.0.1:800
 `shopsite/settings.py` lowers `SLOW_QUERY_MS` to 25 so the review scan counts as slow on a fast laptop.
 Traces are stored in `examples/django/.redline/redline.db`. Delete them with `manage.py redline_clear`.
 
+## Try the refactor check
+
+`check.toml` is a ready-made suite of read-only endpoints (the N+1 one, the slow one, one with
+volatile fields). Setting `SHOP_REFACTOR=1` simulates a refactor of the app, so you can see what
+`redline check` reports without touching the code:
+
+| Endpoint | What `SHOP_REFACTOR=1` does | Expected verdict |
+|---|---|---|
+| `GET /orders/` | adds `prefetch_related("items")` | faster, queries 31 -> 2, fixed N+1 |
+| `GET /dashboard/` | adds a 50 ms sleep | slower |
+| `GET /api/products/` | `price` now has one decimal (`1528.00` -> `1528.0`) | changed (`products[n].price`) |
+| `GET /async/summary/` | raises an error | broken (200 -> 500) |
+| `GET /status/` | unchanged; `now` and `request_id` differ on every call | same (volatile fields ignored) |
+
+```bash
+# 1. old code: start the app (as above) and, from the repository root in another terminal,
+#    record a baseline
+uv run python examples/django/manage.py runserver 8000 --noreload
+uv run --package redline-core --extra load redline check record examples/django/check.toml \
+    --base-url http://127.0.0.1:8000 --store examples/django/.redline/redline.db
+
+# 2. "refactored" code: restart the app with the toggle, then compare
+SHOP_REFACTOR=1 uv run python examples/django/manage.py runserver 8000 --noreload
+uv run --package redline-core --extra load redline check compare examples/django/check.toml \
+    --base-url http://127.0.0.1:8000 --store examples/django/.redline/redline.db --markdown report.md --junit report.xml
+echo $?   # 1: the refactor made things slower, changed a response and broke an endpoint
+```
+
+`--store` matters: the CLI defaults to `.redline/redline.db` relative to where you run it, which is
+the repository root here, not the app's store. In the UI, open the Checks page, create a suite from
+the routes Redline has seen, record a baseline,
+restart with the toggle and press Compare (log in as admin / admin first; `DEBUG = True` here, so `checks_from_ui` is on).
+
 ## Load test it
 
 With the app running (see above), run the bundled scenario from the repository root:
