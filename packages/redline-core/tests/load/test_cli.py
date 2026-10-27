@@ -395,6 +395,8 @@ def test_launch_background_and_stop_run(tmp_path, http_server):
     assert wait_for(lambda: not (rdir / f"{run_id}.pid").exists(), timeout=20), (
         rdir / f"{run_id}.log"
     ).read_text()
+    # the scenario file holds raw header values: gone once the run has ended
+    assert wait_for(lambda: not (rdir / f"{run_id}.scenario.json").exists(), timeout=5)
     results = rdir / f"{run_id}.json"
     if not hasattr(SQLiteStore, "save_run"):  # the store cannot hold runs → JSON fallback
         doc = json.loads(results.read_text())

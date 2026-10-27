@@ -24,6 +24,10 @@ _originals: dict[str, Any] = {}
 _KEY_CAP = 200
 #: Commands whose result says whether the key was found (``None`` = miss).
 _READS = frozenset({"get", "getex", "getdel", "hget", "mget", "hmget", "lindex"})
+#: Commands whose arguments can carry credentials (``AUTH pw``, ``HELLO 3 AUTH u pw``,
+#: ``CONFIG SET requirepass pw``, ``MIGRATE … AUTH pw``, ``ACL SETUSER u >pw``): no key is
+#: taken from them, so nothing of theirs reaches the span name or data.
+_NO_KEY = frozenset({"auth", "hello", "migrate", "config", "config set", "acl", "acl setuser"})
 
 
 def _key(args: tuple[Any, ...]) -> str | None:
@@ -46,7 +50,7 @@ def _hit(op: str, result: Any) -> bool | None:
 def _record(args: tuple[Any, ...], start: float, result: Any, ok: bool) -> None:
     op = args[0]
     op = (op.decode("utf-8", "replace") if isinstance(op, bytes) else str(op)).lower()
-    key = _key(args)
+    key = None if op in _NO_KEY else _key(args)
     record_span(
         "cache",
         f"{op} {key}" if key else op,
