@@ -14,6 +14,16 @@ CSRF
     failure is a JSON ``403`` with code ``csrf_failed``. The page
     embeds a fresh token in ``<meta name="redline-csrf">`` (so it works with
     ``CSRF_COOKIE_HTTPONLY`` and ``CSRF_USE_SESSIONS``) and the SPA sends it back.
+
+Live tail
+    ``GET api/stream?since=<epoch>`` is a server-sent-event stream (same guard as the API):
+    a sync generator under WSGI, an async one when the request came through ASGI (so it
+    never pins a worker thread while it sleeps between polls).
+
+Badge
+    Top-level bundle files (``badge.js``, ``favicon.svg``) are served without the
+    permission check: they hold no data, and the badge is injected into the app's own
+    pages for whoever is browsing them in ``DEBUG``. The API the badge calls is guarded.
 """
 
 from __future__ import annotations
@@ -34,16 +44,19 @@ from django.http import (
     HttpResponseBase,
     HttpResponseForbidden,
     JsonResponse,
+    StreamingHttpResponse,
 )
 from django.middleware.csrf import CsrfViewMiddleware, get_token
-from django.urls import NoReverseMatch, reverse
+from django.urls import NoReverseMatch, get_script_prefix, reverse
 from django.views.decorators.csrf import csrf_exempt, ensure_csrf_cookie
 
-from redline_core import ui
+from redline_core import stream, ui
+from redline_core.api import RawResponse
+from redline_core.storage import FilterError
 
 from .runtime import get_runtime
 
-__all__ = ["api", "asset", "index"]
+__all__ = ["api", "asset", "index", "top_level"]
 
 _HASHED = re.compile(r"-[A-Za-z0-9_-]{8,}\.(?:js|css|mjs)$")
 _API_METHODS = ("GET", "POST", "DELETE")
@@ -123,6 +136,20 @@ def asset(request: HttpRequest, path: str) -> FileResponse:
     else:
         response["Cache-Control"] = "public, max-age=3600"
     response["X-Content-Type-Options"] = "nosniff"
+    response["X-Frame-Options"] = "DENY"
+    return response
+
+
+def top_level(request: HttpRequest, name: str) -> HttpResponseBase:
+    """A top-level file of the bundle (``badge.js``, ``favicon.svg``); never an HTML page."""
+    _check_host(request)
+    file = None if name.endswith((".html", ".htm")) else ui.asset_path(name)
+    if file is None:
+        raise Http404("No such Redline file.")
+    response = FileResponse(file.open("rb"), content_type=ui.content_type(file))
+    response["Cache-Control"] = "public, max-age=3600"
+    response["X-Content-Type-Options"] = "nosniff"
+    response["X-Frame-Options"] = "DENY"
     return response
 
 
@@ -130,6 +157,49 @@ def _json(status: int, payload: Any) -> JsonResponse:
     response = JsonResponse(payload, status=status, safe=False, json_dumps_params={"default": str})
     response["Cache-Control"] = "no-store"
     response["X-Content-Type-Options"] = "nosniff"
+    response["X-Frame-Options"] = "DENY"
+    return response
+
+
+def _raw(result: RawResponse) -> HttpResponse:
+    """A non-JSON core answer (the snapshot page), sent as-is."""
+    response = HttpResponse(result.body, status=result.status, content_type=result.content_type)
+    for key, value in result.headers.items():
+        response[key] = value
+    response["Cache-Control"] = "no-store"
+    response["X-Content-Type-Options"] = "nosniff"
+    response["X-Frame-Options"] = "DENY"
+    return response
+
+
+def _base_url(request: HttpRequest) -> str:
+    """The app's own root URL: ``scheme://host[:port]`` + script prefix, no trailing slash."""
+    return f"{request.scheme}://{request.get_host()}{get_script_prefix()}".rstrip("/")
+
+
+def _is_asgi(request: HttpRequest) -> bool:
+    from django.core.handlers.asgi import ASGIRequest
+
+    return isinstance(request, ASGIRequest)
+
+
+def _stream(request: HttpRequest) -> HttpResponseBase:
+    """``GET api/stream``: server-sent events with new trace summaries."""
+    if request.method != "GET":
+        return _json(405, {"error": {"code": "method_not_allowed", "message": "Not allowed."}})
+    try:
+        since = stream.parse_since(request.GET)
+    except FilterError as exc:
+        return _json(400, {"error": {"code": "invalid_filter", "message": str(exc)}})
+    api_ = get_runtime().api
+    events: Any
+    if _is_asgi(request):
+        events = stream.async_events(api_, since)
+    else:
+        events = stream.sync_events(api_, since)
+    response = StreamingHttpResponse(events, content_type=stream.CONTENT_TYPE)
+    for key, value in stream.SSE_HEADERS.items():
+        response[key] = value
     return response
 
 
@@ -167,13 +237,22 @@ def api(request: HttpRequest, path: str = "") -> HttpResponseBase:
     rejection = _csrf_rejection(request)
     if rejection is not None:
         return rejection
+    if path.strip("/") == "stream":
+        return _stream(request)
     return _dispatch(request, path)
 
 
-def _dispatch(request: HttpRequest, path: str) -> JsonResponse:
+def _dispatch(request: HttpRequest, path: str) -> HttpResponseBase:
     params = {key: request.GET.getlist(key) for key in request.GET}
     body = request.body if request.method == "POST" else None
-    status, payload = get_runtime().api.dispatch(
-        request.method or "GET", f"api/{path}", params=params, body=body
+    result = get_runtime().api.dispatch(
+        request.method or "GET",
+        f"api/{path}",
+        params=params,
+        body=body,
+        base_url=_base_url(request),
     )
+    if isinstance(result, RawResponse):
+        return _raw(result)
+    status, payload = result
     return _json(status, payload)

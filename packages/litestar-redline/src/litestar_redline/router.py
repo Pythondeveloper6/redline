@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Sequence
+from functools import partial
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl
@@ -12,9 +13,11 @@ from litestar import Request, Response, Router, get, route
 from litestar.concurrency import sync_to_thread
 from litestar.enums import MediaType
 from litestar.exceptions import HTTPException
-from litestar.response import Redirect
+from litestar.response import Redirect, Stream
 
-from redline_core import ui
+from redline_core import stream, ui
+from redline_core.api import RawResponse
+from redline_core.storage import FilterError
 
 from ._security import RedlineHTTPError, csrf_guard
 
@@ -74,6 +77,25 @@ def _file_response(file: Path, headers: dict[str, str]) -> Response[Any]:
     )
 
 
+def _params(request: Request[Any, Any, Any]) -> dict[str, Any]:
+    params: dict[str, Any] = {}
+    query = request.scope.get("query_string", b"").decode("latin-1")
+    for key, value in parse_qsl(query, keep_blank_values=True):
+        if key in params:
+            prev = params[key]
+            params[key] = [*prev, value] if isinstance(prev, list) else [prev, value]
+        else:
+            params[key] = value
+    return params
+
+
+def base_url(request: Request[Any, Any, Any]) -> str:
+    """The application's own root URL: ``scheme://host[:port]`` + ``root_path``, no
+    trailing slash (the only target ``POST api/runs`` can load)."""
+    url = request.url
+    return f"{url.scheme}://{url.netloc}{request.scope.get('root_path', '')}".rstrip("/")
+
+
 def build_router(plugin: Any, path: str, guards: Sequence[Any]) -> Router:
     @get("/", include_in_schema=False)
     async def index(request: Request[Any, Any, Any]) -> Response[Any] | Redirect:
@@ -96,6 +118,20 @@ def build_router(plugin: Any, path: str, guards: Sequence[Any]) -> Router:
             return error_response(404, "not_found", "No such asset.")
         return _file_response(file, _IMMUTABLE)
 
+    @get("/api/stream", include_in_schema=False)
+    async def api_stream(request: Request[Any, Any, Any]) -> Response[Any]:
+        # Server-sent events (live tail). Litestar's Stream response cancels the generator
+        # when the client disconnects; store reads run in a worker thread.
+        try:
+            since = stream.parse_since(_params(request))
+        except FilterError as exc:
+            return error_response(400, "invalid_filter", str(exc))
+        return Stream(
+            stream.async_events(plugin.api, since),
+            media_type=stream.CONTENT_TYPE,
+            headers={**_SECURITY, **stream.SSE_HEADERS},
+        )
+
     @route(
         "/api/{rest:path}",
         http_method=["GET", "POST", "DELETE", "PUT", "PATCH"],  # core answers 405 to the last two
@@ -105,18 +141,25 @@ def build_router(plugin: Any, path: str, guards: Sequence[Any]) -> Router:
     )
     async def api(request: Request[Any, Any, Any]) -> Response[Any]:
         plugin.loop = asyncio.get_running_loop()
-        params: dict[str, Any] = {}
-        query = request.scope.get("query_string", b"").decode("latin-1")
-        for key, value in parse_qsl(query, keep_blank_values=True):
-            if key in params:
-                prev = params[key]
-                params[key] = [*prev, value] if isinstance(prev, list) else [prev, value]
-            else:
-                params[key] = value
+        params = _params(request)
         body = await request.body() if request.method == "POST" else None
         status, payload = await sync_to_thread(
-            plugin.api.dispatch, request.method, f"api/{_rest(request, 'rest')}", params, body
+            partial(
+                plugin.api.dispatch,
+                request.method,
+                f"api/{_rest(request, 'rest')}",
+                params,
+                body,
+                base_url=base_url(request),
+            )
         )
+        if isinstance(payload, RawResponse):  # the snapshot page
+            return Response(
+                payload.body,
+                status_code=payload.status,
+                media_type=payload.content_type,
+                headers={**_NO_STORE, **payload.headers, **_SECURITY},
+            )
         return Response(
             payload,
             status_code=status,
@@ -126,14 +169,14 @@ def build_router(plugin: Any, path: str, guards: Sequence[Any]) -> Router:
 
     @get("/{name:path}", include_in_schema=False)
     async def top_level(request: Request[Any, Any, Any]) -> Response[Any]:
-        file = ui.asset_path(_rest(request, "name"))  # favicon.svg etc.
+        file = ui.asset_path(_rest(request, "name"))  # badge.js, favicon.svg etc.
         if file is None:
             return error_response(404, "not_found", "Not found.")
         return _file_response(file, _NO_STORE)
 
     return Router(
         path=path,
-        route_handlers=[index, assets, api, top_level],
+        route_handlers=[index, assets, api_stream, api, top_level],
         guards=list(guards),
         exception_handlers={HTTPException: _http_exception_handler},
         include_in_schema=False,
