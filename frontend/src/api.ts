@@ -127,6 +127,28 @@ export async function call<T>(method: string, url: string, body?: unknown): Prom
   return json as T
 }
 
+/** GET a text/plain body (e.g. the TOML export). The dev mock answers `{text}` JSON for these. */
+export async function callText(url: string): Promise<string> {
+  if (getSnapshot()) throw new ApiError(403, 'snapshot', 'This is an offline snapshot; nothing can be exported.')
+  if (import.meta.env.DEV) {
+    if (!mockReady) mockReady = wantsMock() ? initMock(true) : Promise.resolve()
+    await mockReady
+    if (mock) {
+      const r = await mock('GET', url, undefined)
+      if (r.status >= 400) { const e = (r.json as any)?.error; throw new ApiError(r.status, e?.code ?? 'error', e?.message ?? `Request failed (${r.status})`) }
+      return String((r.json as any)?.text ?? '')
+    }
+  }
+  let res: Response
+  try { res = await fetch(url, { headers: { 'X-Redline-UI': '1' }, credentials: 'same-origin' }) } catch { throw new ApiError(0, 'network', 'Cannot reach the Redline API.') }
+  if (!res.ok) {
+    let e: any = null
+    try { e = (await res.json())?.error } catch { /* not JSON */ }
+    throw new ApiError(res.status, e?.code ?? 'error', e?.message ?? `Request failed (${res.status})`)
+  }
+  return res.text()
+}
+
 const enc = encodeURIComponent
 
 export const qs = (o: Record<string, string | number | undefined | null>) => {
