@@ -217,6 +217,7 @@ class Issue:
     count: int = 0
     total_ms: float = 0.0
     suggestion: Suggestion | None = None
+    extra: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -231,6 +232,7 @@ class Issue:
             "count": self.count,
             "total_ms": self.total_ms,
             "suggestion": self.suggestion.to_dict() if self.suggestion else None,
+            "extra": dict(self.extra),
         }
 
     @classmethod
@@ -247,6 +249,7 @@ class Issue:
             count=int(data.get("count", 0)),
             total_ms=float(data.get("total_ms", 0.0)),
             suggestion=Suggestion.from_dict(data.get("suggestion")),
+            extra=dict(data.get("extra") or {}),
         )
 
 
