@@ -778,7 +778,9 @@ def _run_config(body: Mapping[str, Any]) -> tuple[dict[str, Any], str | None]:
 _ASSET_REF = re.compile(
     r"""<(script|link)\b[^>]*?\b(?:src|href)=["']\./(assets/[^"']+)["'][^>]*>(?:</script>)?"""
 )
-_CHUNK_REF = re.compile(r"""(["'])\./([A-Za-z0-9_.-]+\.m?js)\1""")
+# Quoted ``"./chunk.js"`` / ``'./chunk.js'``, or a template literal without substitutions
+# (Vite 8 writes lazy imports as ``import(`./chunk.js`)``).
+_CHUNK_REF = re.compile(r"""(["'`])\./([A-Za-z0-9_.-]+\.m?js)\1""")
 _CSS_URL = re.compile(r"""url\((["']?)\./([^"')]+)\1\)""")
 
 
