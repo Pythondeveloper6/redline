@@ -6,8 +6,9 @@ Its UI and JSON API expose all of that. A defect here can be a defect in someone
 control, a leak of credentials, or a denial of service, so reports are taken seriously
 and answered.
 
-This policy covers all three distributions in this repository:
-`redline-core`, `django-redline` and `fastapi-redline`.
+This policy covers all the distributions in this repository:
+`redline-core`, `django-redline`, `fastapi-redline`, `flask-redline` and
+`litestar-redline`.
 
 ## Reporting a vulnerability
 
@@ -18,7 +19,7 @@ subject line.
 
 Please include, as far as you have it:
 
-- which package and version, plus Python and Django/FastAPI versions;
+- which package and version, plus Python and framework versions;
 - what an attacker gains: which traces, headers, bodies or SQL they can read or change,
   and as whom;
 - the smallest reproduction you can manage (a failing test is ideal);
@@ -40,18 +41,23 @@ please chase.
 
 | Version | Supported |
 | --- | --- |
-| 0.1.x (pre-release) | ✅ current development line |
+| 0.2.x (pre-release) | ✅ current development line |
+| 0.1.x (pre-release) | ⚠️ fixes only for serious issues, please upgrade |
 | < 0.1 | ❌ never released |
 
-The three packages are versioned in lockstep; a fix ships as a new version of all three.
+The packages are versioned in lockstep; a fix ships as a new version of all of them.
 
 ## Scope
 
 **In scope:**
 
 - the Redline UI or JSON API being reachable, or returning data, without the permission
-  the adapter documents as required (Django staff/permission hook; the auth dependency
-  you attach to the FastAPI mount);
+  the configured access policy requires (`local`, `token`, `basic`, the framework hook, or
+  your own check, including IP allow-lists, trusted proxies and `read_only`);
+- a bypass of the login (the token or basic credentials), of its rate limit, or of the
+  cookie's scoping;
+- the load-from-UI feature being usable to target anything other than the application that
+  serves it, or while `load_from_ui` is off;
 - secrets (Authorization, Cookie, Set-Cookie, API keys, passwords, tokens) appearing in
   stored traces, the UI or the API when the default redaction is on;
 - a stored-XSS path through captured paths, headers, bodies, SQL or source snippets;
@@ -62,10 +68,10 @@ The three packages are versioned in lockstep; a fix ships as a new version of al
 
 **Out of scope:**
 
-- the FastAPI mount being reachable when you attached it without an auth dependency.
-  Redline ships without authentication by design (it cannot know your auth), and the
-  documentation says so prominently. Report it as an ordinary issue if the documentation
-  is unclear;
+- the UI being reachable because you deliberately configured it open (`access = "open"`
+  with `REDLINE_ALLOW_OPEN=1`, or empty `dependencies` / `guards`), or because a reverse
+  proxy you configured makes every client look local. The documentation says so
+  prominently. Report it as an ordinary issue if the documentation is unclear;
 - anything requiring a Django superuser or someone already allowed to read traces;
 - findings from automated scanners with no demonstrated impact.
 
@@ -76,10 +82,15 @@ The three packages are versioned in lockstep; a fix ships as a new version of al
   headers and keys (Authorization, Cookie, Set-Cookie, X-Api-Key, and body or query keys
   matching password, token, secret or key). Extend the patterns in your settings for your
   own field names; do not turn redaction off in shared environments.
-- **Never expose the Redline UI publicly without authentication.** Keep it behind staff
-  login or an auth dependency, and do not mount it on a public host in production. Treat
-  the stored trace database as sensitive data.
+- **Never expose the Redline UI publicly without authentication.** Keep it behind a token,
+  staff login or your own check, preferably also behind a VPN, and do not mount it on a
+  public host in production. Use `preset = "production"`. Treat the stored trace database
+  as sensitive data.
+- Logs and exception locals are captured too. Redaction is key-based and does not catch a
+  secret held under an innocent name; the `staging` and `production` presets turn locals
+  off.
+- Run `redline load` only against systems you own or are authorised to test.
 - Use the sampling policy in production (a sample rate, plus slow and 5xx requests only)
   rather than capturing everything.
-- Targeting and request attribution use what the framework gives you; configure your
-  proxy-header handling rather than trusting raw forwarding headers.
+- Client addresses come from the connection. `X-Forwarded-For` is honoured only from
+  `trusted_proxies`; list only proxies you operate.

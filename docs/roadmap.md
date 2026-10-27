@@ -2,16 +2,16 @@
 
 [← Index](index.md)
 
-Redline has four parts: **Profile**, **Analyze**, **Stress** and **Compare/CI**. Version
-0.1 is Profile and Analyze. The rest is planned, **not built**. This page is the plan, not a
-promise: it is the intent as of 0.1.0a1, and it will change as the earlier parts meet real
+Redline has four parts: **Profile**, **Analyze**, **Stress** and **Compare/CI**. Versions 0.1
+and 0.2 built the first three. The rest is planned, **not built**. This page is the plan, not
+a promise: it is the intent as of 0.2.0a1, and it will change as the earlier parts meet real
 use.
 
 | Version | Theme | Status |
 |---|---|---|
-| **0.1** | Profile and Analyze: traces, N+1 with fix diffs, EXPLAIN, flamegraphs, UI, Django and FastAPI | **Built** (alpha) |
-| 0.2 | **Stress**: load testing correlated with in-app traces | Planned |
-| 0.3 | **Compare / CI**: baselines, diffs, a pytest plugin, PR comments | Planned |
+| **0.1** | Profile and Analyze: traces, N+1 with fix diffs, EXPLAIN, flamegraphs, UI, Django and FastAPI | **Built** |
+| **0.2** | Analyze more, **Stress**, History: Flask and Litestar, a load tester, new detectors, release history, access control | **Built** (alpha) |
+| 0.3 | **Compare / CI**: a pytest plugin, `redline ci`, flamegraph diffs, OTLP | Planned |
 | 1.0 | Hardened production mode and the long tail | Planned |
 
 ## The thesis
@@ -19,57 +19,54 @@ use.
 Load testers (Locust, k6, Gatling) only see an application from the outside. They tell
 you the p95 doubled at 150 users. They cannot tell you **which query** went from 3 ms to
 410 ms. Profilers like Redline see the inside but only one request at a time. No
-open-source tool connects the two. That connection is the reason the roadmap is shaped
-the way it is.
+open-source tool connected the two. 0.2 does: see [Load testing](load-testing.md).
 
-The foundations are already in 0.1: traces carry the reserved tags `run_id` and `step`,
-and the `X-Redline-Run: <id>;step=<n>` request header is parsed today into those tags (you
-can filter on them: `GET api/traces?tag=run_id:abc`). The load generator that sends the
-header does not exist yet.
+## v0.2: what shipped
 
-## v0.2: Stress
+Everything below is built and documented. The [changelog](changelog.md) has the detail.
 
-Load testing, **correlated with the traces Redline already records**.
-
-- A **`redline load` CLI** and a UI page. The load generator runs in **separate
-  processes** (asyncio and httpx workers), so it does not distort the app it measures.
-- An **open-model arrival-rate scheduler** (requests arrive at a rate you set, whether or
-  not earlier ones finished), recorded with **HdrHistogram** and corrected for
-  **coordinated omission**: the classic mistake that makes closed-loop load tests report
-  flattering latencies.
-- A **step-ramp mode** that finds the **knee**: RPS against p95 against errors, as a
-  chart.
-- **Scenarios** generated from the Django URLconf, from the FastAPI OpenAPI schema, or
-  from captured traffic (redacted).
-- **Run correlation**: requests carry `X-Redline-Run: <id>;step=<n>`, so in-app traces are
-  tagged and the UI can show the **bottleneck per step**: *query X: 3 ms at 10 users, 410
-  ms at 150 users*.
-- **Saturation signals**: database pool wait and lock detection (`pg_locks`), and for
-  FastAPI event-loop lag and threadpool saturation.
+- **Five frameworks**: Django (and Ninja), FastAPI, [Flask](flask.md), [Litestar](litestar.md).
+- **New analysis**: [blocking in async](async-blocking.md), [transactions and locks](transactions.md),
+  [large and unbounded results](result-size.md), count/exists, [slow serializers](serializers.md),
+  [external calls](external-calls.md), [cache efficiency](cache-efficiency.md),
+  [logs and exception locals](logs-and-exceptions.md), [GraphQL](graphql.md) resolvers.
+- **[Database](database.md)**: SQL search, a workload index advisor, unused indexes.
+- **[Static N+1 scan](static-scan.md)** for templates and DRF serializers.
+- **[Load testing](load-testing.md)**: `redline load`, an open-model scheduler corrected for
+  coordinated omission, step ramps, knee detection, per-step bottlenecks, scenarios generated
+  from OpenAPI or captured traffic.
+- **[History](history.md)**: releases, hourly rollups, before/after compare, new and resolved
+  issues, 90-day retention.
+- **UI**: command palette, keyboard, open in editor, copy as cURL/HTTPie, replay, compare,
+  Live mode, snapshots, the floating badge, Server-Timing.
+- **[Configuration](configuration.md) and [access control](access-control.md)**: presets,
+  `redline.toml`, `REDLINE_*`, tokens, basic auth, IP allow-lists, trusted proxies, read-only
+  mode, feature switches.
 
 ## v0.3: Compare and CI
 
 Make performance a thing you can regress-test.
 
-- **Runs and baselines** tagged with the git SHA, with **diffs per endpoint** and
-  **flamegraph diffs**.
 - A **pytest plugin**: `@pytest.mark.redline(max_queries=..., no_n_plus_one=True)`, so a
   test fails when a view regresses to an N+1.
-- **`redline ci`** emits **JUnit** output and a **Markdown PR comment** (`+queries`,
-  `+p95`, the culprit line).
+- **`redline ci`** emits **JUnit** output and a **Markdown PR comment** (`+queries`, `+p95`,
+  the culprit line), comparing a run against a stored baseline.
+- **Flamegraph diffs** between two requests or two releases.
+- **OTLP import and export**, so traces can flow to and from other tools.
+- Baselines and diffs per endpoint in CI, building on the History comparison already in 0.2.
 
 ## v1.0
 
 The long tail.
 
-- **Hardened production mode** with a **Postgres store**, replacing today's
-  single-node SQLite caveats.
-- **Celery and RQ trace stitching**, so a request and the background work it spawned
-  appear together.
+- **Hardened production mode** with a **Postgres store**, replacing today's single-node
+  SQLite caveats.
+- **Celery and RQ trace stitching**, so a request and the background work it spawned appear
+  together.
 - A **memory-per-request** extra (tracemalloc or memray).
 - In-process **fault injection**: latency or errors per endpoint or query.
 - **Index what-if** through HypoPG: test a suggested index without creating it.
-- **OTLP import and export**.
+- **Lock-wait detection** from `pg_locks`, and deeper pool and threadpool saturation signals.
 - Optional **AI diagnosis** (bring your own key): from the trace, SQL, plan and source to a
   ranked diagnosis and a patch.
 - **Folding `django-signal-tracer` in** as a panel.
@@ -78,17 +75,18 @@ The long tail.
 
 Be realistic about gaps that are not on the list above:
 
-- Frameworks other than Django and FastAPI/Starlette (Flask, Litestar, Falcon).
+- Frameworks other than Django, FastAPI, Flask and Litestar (Falcon, Sanic, Pyramid).
 - ORMs other than the Django ORM and SQLAlchemy (you can write a
   [FixSuggester](extending.md#fixsuggester)).
-- Non-SQL data stores (Redis commands beyond Django's cache API, MongoDB).
+- Non-SQL data stores beyond Redis and Django's cache API (MongoDB).
 - Cross-service distributed tracing.
 - Alerting.
-- Publishing to PyPI. The repository is private and nothing is published; that is a
-  separate decision.
+- Distributed load generation, browsers and WebSockets in the load tester.
+- A PyPI release. Until then you install from GitHub.
 
 ## How the roadmap is decided
 
 Each version gets its own detailed plan before work starts, and each stays small. The
-outline above is from the project plan; details, ordering and scope inside each version
-may change.
+outline above is from the project plan; details, ordering and scope inside each version may
+change. Issues and ideas are welcome on the
+[issue tracker](https://github.com/Pythondeveloper6/redline/issues).

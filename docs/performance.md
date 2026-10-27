@@ -8,7 +8,7 @@ goes and what you can do about it) and the [measured numbers](#measured-numbers)
 
 !!! abstract "In one line"
 
-    Measured on an Apple M2 Pro (Python 3.13, 2026-10-26): recording costs about
+    Measured on an Apple M2 Pro (Python 3.13, 2026-10-26, on `0.1.0a1`): recording costs about
     **0.04 to 0.06 ms per request plus 12 to 44 µs per SQL query**, depending on the
     framework and on whether the trace is kept; disabled, it is a few µs. Details and how
     to reproduce are [below](#measured-numbers).
@@ -49,13 +49,37 @@ and JSON serialisation. Lowering `sample_rate` reduces this directly.
 SQLite inserts, with WAL. It competes for the GIL with your request threads, but it is off
 the request path. The request only does a `put_nowait`.
 
+### What 0.2 adds to the cost model
+
+The 0.2 features were designed to cost nothing when idle. Their cost, by where it falls:
+
+| Feature | When it costs | What it costs |
+|---|---|---|
+| Event-loop lag monitor ([Blocking in async](async-blocking.md)) | only while a request is in flight on a loop | a timer callback every 5 ms per busy loop; a watchdog thread that sleeps until a tick is overdue. Nothing in an idle process. `detect_blocking = False` removes it |
+| Row counts and `has_limit` on SQL spans | per query | reading `rowcount` and one scan of the SQL text; no extra query |
+| Transaction and pool-wait spans | per transaction / checkout | one span each |
+| Log capture ([Logs](logs-and-exceptions.md)) | per log record inside a request | formatting, redaction and a callsite lookup; one `ContextVar.get()` outside a request |
+| Exception locals | only when a request raises | walking the traceback once; nothing on the happy path |
+| Derived tables (`trace_sql`, `trace_ext`, `trace_cache`, rollups, issue index) | per **kept** trace, on the **writer thread** | more rows per batch in the same transaction. The request thread is not involved |
+| `Server-Timing` header | per recorded response | formatting one string |
+| Badge injection | per recorded HTML response in debug mode | one string insert before `</body>` |
+| Contrib integrations (`requests`, redis, asyncpg, psycopg) | per call inside a request | one `ContextVar.get()` outside a request; a span inside |
+| The aggregate pages and History | when a page is opened | queries over small summary tables, not over trace bodies |
+| Load testing | while a run is going | the generator runs in separate **processes**; run it from another machine if you want its CPU kept off the app under test |
+
+The per-request and per-query figures below were measured on 0.1; the additions above are
+small per-span or per-batch costs that follow the same shape, and **have not been separately
+benchmarked yet**. If you need a number for your app, use [Measure it yourself](#measure-it-yourself).
+
 ### Plus, on demand
 
 | Feature | Cost |
 |---|---|
 | Profiling a request | pyinstrument sampling every millisecond while the request runs; only for profiled requests |
 | EXPLAIN | one query on your database, once, when someone clicks. `ANALYZE` runs the query for real |
-| The UI polling | one `COUNT(*)` plus a page query every two seconds while a Requests page is open |
+| The UI polling | one `COUNT(*)` plus a page query every two seconds while a Requests page is open and Live mode is on polling (Live mode normally uses one open SSE connection instead) |
+| `api/stream` | one open connection per viewer, closed after five minutes (the client reconnects) |
+| A snapshot download | building one HTML file (the UI bundle, inlined) |
 
 ## What the design avoids
 
@@ -95,7 +119,7 @@ the request path. The request only does a `put_nowait`.
 
 ## Measured numbers
 
-From `benchmarks/RESULTS.md`, measured on **2026-10-26**, Apple M2 Pro, Python 3.13.15
+From `benchmarks/RESULTS.md`, measured on **2026-10-26** against `0.1.0a1`, Apple M2 Pro, Python 3.13.15
 (CPython, macOS arm64), Django 6.1.2, FastAPI 0.162.0, SQLAlchemy 2.1.6, pyinstrument
 5.1.3. Each cell is 1500 timed requests after warm-up, in a fresh subprocess, through an
 in-process client against in-memory SQLite. The baseline (`off`) is a bare view with no
@@ -144,7 +168,7 @@ The benchmark is a bare view. To know the cost in your application, A/B it with 
 representative load:
 
 1. Run the app with `enabled: false`, record requests per second and latency percentiles
-   with a load tool you trust (Locust, k6, `wrk`, `hey`).
+   with a load tool you trust (`redline load`, Locust, k6, `wrk`, `hey`).
 2. Run again with Redline on at the settings you intend for production.
 3. Compare latency percentiles and CPU, not just the mean.
 4. Check `storage.dropped` in `GET api/meta` after the run: it must be `0`.

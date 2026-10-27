@@ -1,5 +1,5 @@
 site_name: Redline
-site_description: "A request profiler and backend analyzer for Django and FastAPI. N+1 detection with fix diffs, one-click EXPLAIN, flamegraphs and a fast web UI."
+site_description: "A request profiler, backend analyzer and load tester for Django, FastAPI, Flask and Litestar. N+1 detection with fix diffs, one-click EXPLAIN, flamegraphs, load testing and a fast web UI."
 site_author: Mahmoud Ahmed
 site_url: https://pythondeveloper6.github.io/redline/
 repo_url: https://github.com/Pythondeveloper6/redline
@@ -97,28 +97,53 @@ markdown_extensions:
 
 nav:
   - Home: index.md
-  - Guide:
+  - Get started:
       - Getting started: getting-started.md
       - How it works: how-it-works.md
       - The UI: the-ui.md
+      - Server-Timing and the badge: server-timing-badge.md
+  - Guide:
       - N+1 detection: n-plus-one.md
       - EXPLAIN: explain.md
       - Flamegraphs: flamegraphs.md
       - Custom spans: custom-spans.md
       - Issues and endpoints: issues-and-endpoints.md
+  - Analysis:
+      - Detectors overview: detectors.md
+      - Blocking in async: async-blocking.md
+      - Transactions and locks: transactions.md
+      - Large and unbounded results: result-size.md
+      - Slow serializers: serializers.md
+      - External calls: external-calls.md
+      - Cache efficiency: cache-efficiency.md
+      - Logs and exceptions: logs-and-exceptions.md
+      - Database: database.md
+      - Static N+1 scan: static-scan.md
+      - GraphQL: graphql.md
+  - Load and history:
+      - Load testing: load-testing.md
+      - History and releases: history.md
   - Integrations:
       - Django: django.md
+      - Django Ninja: django-ninja.md
       - FastAPI: fastapi.md
-      - The HTTP API: http-api.md
+      - Flask: flask.md
+      - Litestar: litestar.md
+      - Libraries (requests, Redis, ...): integrations.md
       - Extending: extending.md
   - Operations:
-      - Settings reference: settings.md
+      - Configuration: configuration.md
+      - Access control: access-control.md
       - Production: production.md
       - Security: security.md
       - Storage: storage.md
       - Performance and overhead: performance.md
-  - Roadmap: roadmap.md
-  - FAQ: faq.md
-  - About:
+  - Reference:
+      - Settings reference: settings.md
+      - The HTTP API: http-api.md
+      - Command line: cli.md
+  - Project:
+      - Roadmap: roadmap.md
+      - FAQ: faq.md
       - Changelog: changelog.md
       - Contributing: contributing.md
