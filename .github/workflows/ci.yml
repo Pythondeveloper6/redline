@@ -66,11 +66,13 @@ jobs:
           python-version: ${{ matrix.python-version }}
       # Not `uv sync`: the workspace's combined requires-python is >=3.12 (django-redline),
       # which would refuse 3.10/3.11. An isolated venv installs only this distribution.
+      # The dev group brings the optional integrations (SQLAlchemy, httpx, redis, GraphQL,
+      # drivers) so the contrib tests run instead of failing to import.
       - name: Install redline-core (isolated venv)
+        working-directory: packages/redline-core
         run: |
           uv venv --python "${{ matrix.python-version }}" "$RUNNER_TEMP/venv"
-          VIRTUAL_ENV="$RUNNER_TEMP/venv" uv pip install -e "packages/redline-core[profile]" \
-            "pytest>=8.3" "pytest-asyncio>=0.24"
+          VIRTUAL_ENV="$RUNNER_TEMP/venv" uv pip install -e ".[profile]" --group dev
       - name: Test
         working-directory: packages/redline-core
         run: $RUNNER_TEMP/venv/bin/python -m pytest
