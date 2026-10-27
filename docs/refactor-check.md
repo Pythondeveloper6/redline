@@ -542,31 +542,287 @@ warmup plus repeat, added up) and 15 minutes. See [Settings](settings.md#develop
 
 Each demo shop in `examples/` (Django, FastAPI, Flask and Litestar) ships a ready suite,
 `examples/<fw>/check.toml`, and an environment toggle, `SHOP_REFACTOR=1`, that turns the shop
-into "after a refactor". With it set the demo:
+into "after a refactor". All four shops get the same changes, so one compare shows every kind
+of verdict:
 
 - **fixes the N+1** on the orders list (faster, and far fewer queries);
 - **slows one endpoint** down on purpose (a `slower` verdict);
 - **changes one field** in a response (a `changed` verdict with a diff);
 - **breaks one endpoint** (a `broken` verdict).
 
-So one compare shows every kind of verdict. From the FastAPI demo, for example:
+The `/status` endpoint is in every suite too. The toggle does not change it, but some of its
+fields differ on every call, so it shows how the check ignores fields that change on their own
+and still reports `same`.
 
-```bash
-cd examples/fastapi
-uv run --project ../.. python seed.py
+From the repository root, install the workspace once with `uv sync --all-packages`. Then pick a
+framework.
 
-# 1. the "old" code
-uv run --project ../.. uvicorn shop.main:app --port 8000 &
-uv run --project ../.. redline check record check.toml --label before
-kill %1
+### What `SHOP_REFACTOR=1` changes
 
-# 2. the "refactored" code
-SHOP_REFACTOR=1 uv run --project ../.. uvicorn shop.main:app --port 8000 &
-uv run --project ../.. redline check compare check.toml --markdown report.md
+=== "Django"
+
+    | Endpoint | What `SHOP_REFACTOR=1` does | Expected verdict |
+    |---|---|---|
+    | `GET /orders/` | adds `prefetch_related("items")` | faster, queries 31 -> 2, fixed N+1 |
+    | `GET /dashboard/` | adds a 50 ms sleep | slower |
+    | `GET /api/products/` | `price` now has one decimal (`1528.00` -> `1528.0`) | changed (`products[n].price`) |
+    | `GET /async/summary/` | raises an error | broken (200 -> 500) |
+    | `GET /status/` | unchanged; `now` and `request_id` differ on every call | same (volatile fields ignored) |
+
+=== "FastAPI"
+
+    | Endpoint | What `SHOP_REFACTOR=1` does | Expected verdict |
+    |---|---|---|
+    | `GET /orders` | fixes the N+1 with `selectinload` | faster, queries 31 -> 2, fixed N+1 |
+    | `GET /orders/1` | adds a 50 ms sleep | slower |
+    | `GET /report/duplicates` | `products` becomes a string | changed (`products`, type) |
+    | `GET /sync/orders` | raises an error | broken (200 -> 500) |
+    | `GET /status` | unchanged; `now` and `request_id` differ on every call | same (volatile fields ignored) |
+
+=== "Flask"
+
+    | Endpoint | What `SHOP_REFACTOR=1` does | Expected verdict |
+    |---|---|---|
+    | `GET /orders` | fixes the N+1 with `selectinload` | faster, queries 31 -> 2, fixed N+1 |
+    | `GET /orders/1` | adds a 50 ms sleep | slower |
+    | `GET /report/duplicates` | `products` becomes a string | changed (`products`, type) |
+    | `GET /orders/tags` | raises an error | broken (200 -> 500) |
+    | `GET /status` | unchanged; `now` and `request_id` differ on every call | same (volatile fields ignored) |
+
+=== "Litestar"
+
+    | Endpoint | What `SHOP_REFACTOR=1` does | Expected verdict |
+    |---|---|---|
+    | `GET /orders` | fixes the N+1 with `selectinload` | faster, queries 31 -> 2, fixed N+1 |
+    | `GET /orders/1` | adds a 50 ms sleep | slower |
+    | `GET /report/duplicates` | `products` becomes a string | changed (`products`, type) |
+    | `GET /sync/orders` | raises an error | broken (200 -> 500) |
+    | `GET /status` | unchanged; `now` and `request_id` differ on every call | same (volatile fields ignored) |
+
+Every other request in `check.toml` is unchanged, so it should come out `same`.
+
+### Run the check
+
+Use the same three steps for every framework: record a baseline on the code as it is, restart
+the app with the toggle, then compare. The `redline` commands run from the repository root, and
+the `--store` path points at the demo's own store (see the note in the example README).
+
+=== "Django"
+
+    ```bash
+    # 1. old code: set up the demo and start the app (in its own terminal)
+    uv run python examples/django/manage.py migrate
+    uv run python examples/django/manage.py seed        # ~400k reviews, takes a few seconds
+    uv run python examples/django/manage.py runserver 8000 --noreload
+    ```
+
+    Generate some traffic from another terminal, with the curl loop from the example README:
+
+    ```bash
+    for u in / /orders/ /items/ /orders/page/ /dashboard/ "/reviews/search/?q=battery" \
+             /slow/ "/slow/?_redline=profile" /boom/ /async/summary/ /cached/ /cached/; do
+      curl -s -o /dev/null -w "%{http_code} $u\n" "http://127.0.0.1:8000$u"
+    done
+    curl -s -o /dev/null -H "Authorization: Bearer sk-live-123" http://127.0.0.1:8000/api/products/
+    ```
+
+    Record the baseline, from the repository root in another terminal:
+
+    ```bash
+    uv run --package redline-core --extra load redline check record examples/django/check.toml \
+        --base-url http://127.0.0.1:8000 --store examples/django/.redline/redline.db
+    ```
+
+    ```bash
+    # 2. "refactored" code: stop the server (Ctrl-C), restart it with the toggle
+    SHOP_REFACTOR=1 uv run python examples/django/manage.py runserver 8000 --noreload
+    ```
+
+    Compare, from the repository root:
+
+    ```bash
+    uv run --package redline-core --extra load redline check compare examples/django/check.toml \
+        --base-url http://127.0.0.1:8000 --store examples/django/.redline/redline.db --markdown report.md --junit report.xml
+    echo $?   # 1: the refactor made things slower, changed a response and broke an endpoint
+    ```
+
+    In the UI, the Checks page is at **http://127.0.0.1:8000/redline/#/checks** (log in as
+    admin / admin first; `DEBUG = True` here, so `checks_from_ui` is on).
+
+=== "FastAPI"
+
+    ```bash
+    # 1. old code: set up the demo and start the app (in its own terminal)
+    cd examples/fastapi
+    uv run --project ../.. python seed.py                      # creates shop.db (~2 s)
+    uv run --project ../.. uvicorn shop.main:app --port 8000
+    ```
+
+    Generate some traffic by hitting the endpoints in the table in the example README
+    (open http://127.0.0.1:8000/ or use curl). Then record the baseline, from the repository
+    root in another terminal:
+
+    ```bash
+    uv run --package redline-core --extra load redline check record examples/fastapi/check.toml \
+        --base-url http://127.0.0.1:8000 --store examples/fastapi/.redline/redline.db
+    ```
+
+    ```bash
+    # 2. "refactored" code: stop the server (Ctrl-C), restart it with the toggle, still in examples/fastapi
+    SHOP_REFACTOR=1 uv run --project ../.. uvicorn shop.main:app --port 8000
+    ```
+
+    Compare, from the repository root:
+
+    ```bash
+    uv run --package redline-core --extra load redline check compare examples/fastapi/check.toml \
+        --base-url http://127.0.0.1:8000 --store examples/fastapi/.redline/redline.db --markdown report.md --junit report.xml
+    echo $?   # 1: the refactor made things slower, changed a response and broke an endpoint
+    ```
+
+    In the UI, the Checks page is at **http://127.0.0.1:8000/_redline/#/checks** (local access
+    only; the UI starts runs because `checks_from_ui` defaults to on in debug mode).
+
+=== "Flask"
+
+    ```bash
+    # 1. old code: set up the demo and start the app (in its own terminal)
+    cd examples/flask
+    uv run --project ../.. python seed.py                                # creates shop.db (~2 s)
+    uv run --project ../.. flask --app shop.main run --port 8000         # http://127.0.0.1:8000/
+    ```
+
+    Generate some traffic by hitting the endpoints in the table in the example README
+    (open http://127.0.0.1:8000/ or use curl). Then record the baseline, from the repository
+    root in another terminal:
+
+    ```bash
+    uv run --package redline-core --extra load redline check record examples/flask/check.toml \
+        --base-url http://127.0.0.1:8000 --store examples/flask/.redline/redline.db
+    ```
+
+    ```bash
+    # 2. "refactored" code: stop the server (Ctrl-C), restart it with the toggle, still in examples/flask
+    SHOP_REFACTOR=1 uv run --project ../.. flask --app shop.main run --port 8000
+    ```
+
+    Compare, from the repository root:
+
+    ```bash
+    uv run --package redline-core --extra load redline check compare examples/flask/check.toml \
+        --base-url http://127.0.0.1:8000 --store examples/flask/.redline/redline.db --markdown report.md --junit report.xml
+    echo $?   # 1: the refactor made things slower, changed a response and broke an endpoint
+    ```
+
+    In the UI, the Checks page is at **http://127.0.0.1:8000/_redline/#/checks** (local access
+    only; the UI starts runs because `checks_from_ui` defaults to on in debug mode).
+
+=== "Litestar"
+
+    ```bash
+    # 1. old code: set up the demo and start the app (in its own terminal)
+    cd examples/litestar
+    uv run --project ../.. python seed.py                      # creates shop.db (~2 s)
+    uv run --project ../.. uvicorn shop.main:app --port 8000   # http://127.0.0.1:8000/
+    ```
+
+    Generate some traffic by hitting the endpoints in the table in the example README
+    (open http://127.0.0.1:8000/ or use curl). Then record the baseline, from the repository
+    root in another terminal:
+
+    ```bash
+    uv run --package redline-core --extra load redline check record examples/litestar/check.toml \
+        --base-url http://127.0.0.1:8000 --store examples/litestar/.redline/redline.db
+    ```
+
+    ```bash
+    # 2. "refactored" code: stop the server (Ctrl-C), restart it with the toggle, still in examples/litestar
+    SHOP_REFACTOR=1 uv run --project ../.. uvicorn shop.main:app --port 8000
+    ```
+
+    Compare, from the repository root:
+
+    ```bash
+    uv run --package redline-core --extra load redline check compare examples/litestar/check.toml \
+        --base-url http://127.0.0.1:8000 --store examples/litestar/.redline/redline.db --markdown report.md --junit report.xml
+    echo $?   # 1: the refactor made things slower, changed a response and broke an endpoint
+    ```
+
+    In the UI, the Checks page is at **http://127.0.0.1:8000/_redline/#/checks** (local access
+    only; the UI starts runs because `checks_from_ui` defaults to on in debug mode).
+
+### Read the compare report
+
+This is the Django run, from the steps above. The other frameworks print the same table, with
+their own rows (one per request in their `check.toml`):
+
+```text
+request                   perf        median before → after        Δ  queries    response
+list orders (N+1)         faster      7.94ms → 3.02ms         -61.9%  31 → 2     same
+dashboard                 slower      1.59ms → 57.1ms        +3485.5%  3 → 3      same
+products API              same        1.50ms → 1.78ms         +18.7%  1 → 1      changed (20 differences)
+async summary             slower      2.46ms → 9.11ms        +269.7%  3 → 0      broken (status 200 → 500)
+slow view                 same        362ms → 364ms            +0.6%  0 → 0      same
+cached top products       same        1.08ms → 1.03ms          -4.9%  0 → 0      same
+status (volatile fields)  same        0.86ms → 0.85ms          -1.2%  0 → 0      same
+
+list orders (N+1):  fixed issue: n_plus_one – N+1: 30 queries on shop_orderitem from shop/views.py:45
+products API:  ~ products[0].price: 1528.00 → 1528.0 … 8 more
+status (volatile fields):  ignored (changes on every call): now, request_id
+
+7 requests · perf: 1 faster, 2 slower, 4 same · response: 5 same, 1 changed, 1 broken · overall 78.0% slower · queries 38 → 6 (-32)
+FAIL: 3 of 7 requests match --fail-on slower,changed,broken: dashboard, products API, async summary
 ```
 
-The other frameworks start the same way their `README.md` describes; only the toggle and the
-suite are new. Then open `#/checks` in the Redline UI to see the same runs as a report.
+What each row says:
+
+- **list orders (N+1)**: `faster`, and the queries drop from 31 to 2. The N+1 is reported as a
+  fixed issue, with the line that caused it.
+- **dashboard**: `slower` on the clock alone. The query count did not change; the 50 ms sleep did.
+- **products API**: the speed is `same`, but the response is `changed`. The `price` field of the
+  products now has one decimal place, so 20 values differ. Expand the row to see the paths.
+- **async summary**: `broken`, because the status went from 200 to 500. The timings of the failing
+  calls are still measured, which is why this row also reads `slower`; the response column is the
+  verdict that matters here.
+- **slow view** and **cached top products**: untouched by the toggle, so `same`. They are there to
+  show that an unchanged endpoint stays quiet.
+- **status (volatile fields)**: `same`. `now` and `request_id` change on every call, so the check
+  lists them as ignored instead of reporting them as differences.
+
+The last line is the exit code's reason. `compare` exits with 1 when any request matches
+`--fail-on`, which defaults to `slower,changed,broken`. Here that is three requests, so the
+command exits with 1.
+
+### In the UI
+
+The same run is on the Checks page, with the steps from
+[the workflow above](#the-workflow-in-three-steps). Open the page for your framework (the URLs
+are in the tabs above) and:
+
+1. Build a suite from the routes Redline has seen: *New suite* lists them, and you tick the ones
+   you want.
+
+    ![The Checks page: suites with their last baseline and last compare](assets/screenshots/checks-list-light.png){ .rl-shot .rl-only-light }
+    ![The Checks page: suites with their last baseline and last compare](assets/screenshots/checks-list-dark.png){ .rl-shot .rl-only-dark }
+
+    ![The suite builder: routes Redline has seen, with a sample path, p50 and queries](assets/screenshots/checks-builder-light.png){ .rl-shot .rl-only-light }
+    ![The suite builder: routes Redline has seen, with a sample path, p50 and queries](assets/screenshots/checks-builder-dark.png){ .rl-shot .rl-only-dark }
+
+2. Press *Baseline* on the suite page while the app runs the old code.
+
+    ![A suite page: record a baseline, compare, and the history of runs](assets/screenshots/checks-suite-light.png){ .rl-shot .rl-only-light }
+    ![A suite page: record a baseline, compare, and the history of runs](assets/screenshots/checks-suite-dark.png){ .rl-shot .rl-only-dark }
+
+3. Restart the app with `SHOP_REFACTOR=1`, press *Compare*, and the report opens when the run ends.
+   Its cards and table match the terminal output above.
+
+    ![The report: summary cards and a table with one row per request](assets/screenshots/checks-report-light.png){ .rl-shot .rl-only-light }
+    ![The report: summary cards and a table with one row per request](assets/screenshots/checks-report-dark.png){ .rl-shot .rl-only-dark }
+
+    Expand a row to see the latency of both runs, the response diff and the SQL that went away.
+
+    ![A request expanded: latency, the response diff and the SQL that went away](assets/screenshots/checks-report-expanded-light.png){ .rl-shot .rl-only-light }
+    ![A request expanded: latency, the response diff and the SQL that went away](assets/screenshots/checks-report-expanded-dark.png){ .rl-shot .rl-only-dark }
 
 ## Limits and what's next
 
