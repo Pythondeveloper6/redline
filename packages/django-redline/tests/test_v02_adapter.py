@@ -338,6 +338,7 @@ def test_checks_suites_and_runs(client, staff, tmp_path, monkeypatch):
         assert run["status"] == "running"
         # bodies over DATA_UPLOAD_MAX_MEMORY_SIZE still reach the import endpoint
         big = {"format": "redline-check-baseline", "version": 1, "requests": [],
+               "suite": {"name": "s", **CHECK_SUITE}, "created_at": 1767000000.0,
                "pad": "x" * (3 * 1024 * 1024)}  # fmt: skip
         r = _send(client, "post", "/redline/api/checks/baselines/import", big)
         assert r.status_code == 201, r.content

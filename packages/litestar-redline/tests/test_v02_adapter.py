@@ -333,6 +333,7 @@ def test_checks_suites_and_runs(make_app, monkeypatch):
         assert seen["base_url"] == "http://127.0.0.1:80"  # scope["server"], never Host
         assert c.get(f"/_redline/api/checks/runs/{r.json()['id']}").json()["status"] == "running"
         big = {"format": "redline-check-baseline", "version": 1, "requests": [],
+               "suite": {"name": "s", **CHECK_SUITE}, "created_at": 1767000000.0,
                "pad": "x" * (10 * 1000 * 1000 + 10)}  # fmt: skip
         r = c.post("/_redline/api/checks/baselines/import", json=big)  # > Litestar's 10 MB
         assert r.status_code == 201, r.text
