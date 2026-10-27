@@ -18,6 +18,7 @@ PACKAGES = {
     "redline-core": "redline_core",
     "django-redline": "django_redline",
     "fastapi-redline": "fastapi_redline",
+    "litestar-redline": "litestar_redline",
 }
 
 
