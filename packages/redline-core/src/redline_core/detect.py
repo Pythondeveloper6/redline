@@ -121,7 +121,52 @@ class GenericSuggester:
                 "and duplicate issues on this request first.",
                 confidence="low",
             )
+        return _generic_v02(issue)
+
+
+_GENERIC_V02: dict[str, tuple[str, str]] = {
+    "large_result": (
+        "Fetch fewer rows: paginate (LIMIT/OFFSET or keyset), stream in chunks, filter in "
+        "SQL instead of in Python, and select only the columns the response uses.",
+        "low",
+    ),
+    "unbounded_query": (
+        "Add a LIMIT (or paginate) so the query cannot grow with the table; if you really "
+        "need every row, process it in chunks.",
+        "low",
+    ),
+    "inefficient_count": (
+        "Ask the database: use a COUNT(*) query to count and an EXISTS / LIMIT 1 query to "
+        "test for any row, instead of loading the rows.",
+        "low",
+    ),
+    "slow_serializer": (
+        "Profile the serializer: remove per-item queries and computed fields, drop unused "
+        "fields, and paginate large collections.",
+        "low",
+    ),
+    "slow_external": (
+        "Set a short timeout, cache the response, or move the call out of the request path "
+        "(background task).",
+        "low",
+    ),
+    "duplicate_external": (
+        "Call the service once per request and reuse the response, or cache it.",
+        "low",
+    ),
+    "retry_storm": (
+        "Cap retries, add exponential backoff with jitter, and use a circuit breaker so a "
+        "failing service cannot multiply your latency.",
+        "low",
+    ),
+}
+
+
+def _generic_v02(issue: Issue) -> Suggestion | None:
+    hint = _GENERIC_V02.get(issue.kind)
+    if hint is None:
         return None
+    return Suggestion(summary=hint[0], confidence="low")
 
 
 class Detector:

@@ -34,7 +34,10 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
 
+from sqlalchemy import JSON, LargeBinary, Text
+
 from redline_core import sql as sqlmod
+from redline_core.linefix import line_diff
 from redline_core.model import Issue, Span, Suggestion
 
 logger = logging.getLogger("redline")
@@ -42,6 +45,10 @@ logger = logging.getLogger("redline")
 __all__ = ["SQLAlchemyFixSuggester"]
 
 DOCS_URL = "https://docs.sqlalchemy.org/en/20/orm/queryguide/relationships.html"
+DOCS_LOAD_ONLY = "https://docs.sqlalchemy.org/en/20/orm/queryguide/columns.html"
+DOCS_QUERYING = "https://docs.sqlalchemy.org/en/20/orm/queryguide/select.html"
+
+_WIDE_TYPES = (Text, LargeBinary, JSON)
 
 #: Methods that end a query chain; ``.options()`` must be inserted before them.
 _TERMINAL = frozenset(
@@ -102,6 +109,10 @@ class SQLAlchemyFixSuggester:
 
     # protocol ---------------------------------------------------------------
     def suggest(self, issue: Issue, spans: list[Span]) -> Suggestion | None:
+        if issue.kind in ("large_result", "unbounded_query") and spans:
+            return self._result_size(issue, spans)
+        if issue.kind == "inefficient_count":
+            return self._count(issue)
         if issue.kind != "n_plus_one" or not spans:
             return None
         sql = str(spans[0].data.get("sql", ""))
@@ -197,7 +208,141 @@ class SQLAlchemyFixSuggester:
             return _Located(frame.file, source, tree, lineno, col, node)
         return None
 
+    # result size ----------------------------------------------------------------
+    def wide_columns(self, sql: str) -> tuple[Any, list[str]]:
+        """``(mapper, [attribute names])`` of the Text/LargeBinary/JSON columns ``sql`` selects.
+
+        Computed here, off the hot path, from the SQL column list and the mappers.
+        """
+        table = sqlmod.primary_table(sql)
+        if table is None:
+            return None, []
+        mapper = next(
+            (m for m in self._mappers() if getattr(m.local_table, "name", None) == table), None
+        )
+        if mapper is None:
+            return None, []
+        aliases = sqlmod.table_aliases(sql)
+        wide: list[str] = []
+        for qualifier, column in sqlmod.select_columns(sql):
+            if qualifier is not None and aliases.get(qualifier, qualifier) != table:
+                continue
+            col = mapper.local_table.columns.get(column)
+            if col is None or not isinstance(col.type, _WIDE_TYPES):
+                continue
+            try:
+                key = mapper.get_property_by_column(col).key
+            except Exception:
+                key = column
+            if key not in wide:
+                wide.append(key)
+        return mapper, wide
+
+    def _result_size(self, issue: Issue, spans: list[Span]) -> Suggestion | None:
+        sql = str(spans[0].data.get("sql", ""))
+        mapper, wide = self.wide_columns(sql)
+        if mapper is None:
+            return None
+        if wide:
+            issue.extra["wide_columns"] = wide
+            for sp in spans:
+                sp.data.setdefault("wide_columns", wide)
+        owner = str(mapper.class_.__name__)
+        rows = issue.extra.get("rows")
+        sized = f"{rows:,} {owner} rows" if isinstance(rows, int) else f"{owner} rows"
+        paginate = (
+            "Paginate it (.limit()/.offset() or keyset pagination), or stream it with "
+            ".execution_options(yield_per=...)."
+        )
+        callsite = issue.callsite or spans[0].callsite
+        located = self._locate_owner(owner, callsite) if callsite else None
+        if wide:
+            expr = ", ".join(f"defer({owner}.{k})" for k in wide)
+            summary = (
+                f"The query loads {sized} including the large column(s) {', '.join(wide)}. "
+                f"Defer them with defer() (or select only the needed columns with "
+                f"load_only()) so they load on first access. {paginate}"
+            )
+            diff = self._options_diff(located, expr, "defer") if located else None
+            return Suggestion(
+                summary=summary,
+                code=f"select({owner}).options({expr})",
+                diff=diff,
+                confidence="high" if diff else "medium",
+                docs_url=DOCS_LOAD_ONLY,
+            )
+        if issue.kind == "unbounded_query":
+            summary = f"This query has no limit and returned {sized}. Add .limit(N). {paginate}"
+            code = f"select({owner}).limit(100)"
+        else:
+            summary = f"The query returned {sized}. {paginate}"
+            code = f"select({owner}).execution_options(yield_per=1000)"
+        return Suggestion(summary=summary, code=code, confidence="low", docs_url=DOCS_LOAD_ONLY)
+
+    # inefficient count ------------------------------------------------------------
+    def _count(self, issue: Issue) -> Suggestion | None:
+        extra = issue.extra
+        pattern, expr, old = extra.get("pattern"), str(extra.get("expr", "")), extra.get("old")
+        if not (pattern and expr and old):
+            return None
+        legacy_all = expr.endswith(".all()") and "query(" in expr
+        new: str | None = None
+        if pattern == "count_cmp":
+            negate = str(extra.get("new", "")).startswith("not ")
+            new = f"{expr}.first() is {'' if negate else 'not '}None"
+            summary = (
+                f"`{old}` counts every matching row only to compare with zero. "
+                f"`{new}` stops at the first row (LIMIT 1)."
+            )
+            hint = new
+        elif pattern == "len":
+            if legacy_all:
+                new = expr[: -len(".all()")] + ".count()"
+            summary = (
+                "Let the database count instead of loading every row: "
+                "select(func.count()).select_from(<statement>.subquery()) with session.scalar(), "
+                "or Query.count()."
+            )
+            hint = new or "session.scalar(select(func.count()).select_from(stmt.subquery()))"
+        else:
+            if legacy_all:
+                first = expr[: -len(".all()")] + ".first()"
+                new = first if pattern == "truthy" else f"{first} is not None"
+            summary = (
+                f"`{old}` loads every row just to test for any. Fetch one row "
+                "(.first() / LIMIT 1) or select an EXISTS."
+            )
+            hint = new or "session.scalar(select(exists().where(...)))"
+        diff = line_diff(self.project_root, issue.callsite, str(old), new) if new else None
+        code = None
+        if new:
+            code = str(extra.get("fix_line", "")).replace(str(extra.get("new", "")), new, 1)
+        return Suggestion(
+            summary=summary,
+            code=code or hint,
+            diff=diff,
+            confidence="high" if diff else "low",
+            docs_url=DOCS_QUERYING,
+        )
+
+    def _locate_owner(self, owner: str, callsite: Any) -> _Located | None:
+        frames = list(getattr(callsite, "stack", ()) or ()) or [callsite]
+        for frame in reversed(frames):
+            loaded = self._read(frame.file)
+            if loaded is None:
+                continue
+            _path, tree, source = loaded
+            func = _enclosing_function(tree, frame.function, frame.line)
+            found = _find_statement(func if func is not None else tree, owner, frame.line)
+            if found is not None:
+                node, lineno, col = found
+                return _Located(frame.file, source, tree, lineno, col, node)
+        return None
+
     def _diff(self, loc: _Located, cand: _Candidate) -> str | None:
+        return self._options_diff(loc, cand.expr, cand.loader)
+
+    def _options_diff(self, loc: _Located, expr: str, import_name: str) -> str | None:
         lines = loc.source.splitlines(keepends=True)
         i = loc.lineno - 1
         if not 0 <= i < len(lines):
@@ -205,10 +350,10 @@ class SQLAlchemyFixSuggester:
         line = lines[i]
         # ast col offsets are UTF-8 byte offsets
         prefix = line.encode("utf-8")[: loc.col].decode("utf-8", errors="ignore")
-        insert = f".options({cand.expr})"
+        insert = f".options({expr})"
         new_lines = list(lines)
         new_lines[i] = prefix + insert + line[len(prefix) :]
-        new_lines = _ensure_import(loc.tree, new_lines, cand.loader)
+        new_lines = _ensure_import(loc.tree, new_lines, import_name)
         if new_lines == lines:
             return None
         diff = difflib.unified_diff(
