@@ -1,8 +1,11 @@
-import { useState } from 'react'
-import { NavLink, Outlet } from 'react-router-dom'
+import { useEffect, useState } from 'react'
+import { NavLink, Outlet, useLocation } from 'react-router-dom'
 import { api } from '../api'
 import { setTheme, useTheme, type ThemePref } from '../theme'
-import { ConfirmDialog, I, Icon, useAsync } from './ui'
+import { isTyping } from '../lib/hooks'
+import CommandPalette from './CommandPalette'
+import ShortcutsHelp from './ShortcutsHelp'
+import { ConfirmDialog, I, Icon, Kbd, useAsync } from './ui'
 
 export function Logo() {
   return (
@@ -39,6 +42,21 @@ export default function Shell() {
   const [confirm, setConfirm] = useState(false)
   const [busy, setBusy] = useState(false)
   const [epoch, setEpoch] = useState(0)
+  const [palette, setPalette] = useState(false)
+  const [help, setHelp] = useState(false)
+  const { pathname } = useLocation()
+  const onList = pathname === '/requests'
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === 'k') { e.preventDefault(); setHelp(false); setPalette(o => !o); return }
+      if (isTyping(e) || e.metaKey || e.ctrlKey || e.altKey || document.querySelector('[aria-modal="true"]')) return
+      // On the Requests list `/` focuses the filter box (handled by the page); everywhere else it opens the palette.
+      if (e.key === '/' && !onList) { e.preventDefault(); setPalette(true) }
+      else if (e.key === '?') { e.preventDefault(); setHelp(true) }
+    }
+    window.addEventListener('keydown', h)
+    return () => window.removeEventListener('keydown', h)
+  }, [onList])
   const link = ({ isActive }: { isActive: boolean }) =>
     `px-2.5 h-8 inline-flex items-center rounded-md text-[12.5px] font-medium ${isActive ? 'bg-raised text-ink' : 'text-muted hover:text-ink hover:bg-raised/60'}`
   return (
@@ -57,6 +75,9 @@ export default function Shell() {
               {meta.data.framework} <span className="text-faint">v{meta.data.version}</span>
             </span>
           )}
+          <button className="btn text-muted" onClick={() => setPalette(true)} aria-label="Open command palette" title="Command palette">
+            <Icon d={I.search} size={12} /><span className="hidden sm:inline">Search</span><span className="hidden md:inline-flex gap-0.5"><Kbd>{/mac|iphone|ipad/i.test(navigator.platform || navigator.userAgent) ? '⌘' : 'Ctrl'}</Kbd><Kbd>K</Kbd></span>
+          </button>
           <ThemeToggle />
           <button className="btn" onClick={() => setConfirm(true)} title="Delete all recorded requests"><Icon d={I.trash} size={12} /><span className="hidden sm:inline">Clear all</span></button>
         </div>
@@ -64,6 +85,8 @@ export default function Shell() {
       <main className="flex-1 mx-auto w-full max-w-[1500px] px-3 sm:px-5 py-4" key={epoch}>
         <Outlet />
       </main>
+      <CommandPalette open={palette} onClose={() => setPalette(false)} />
+      <ShortcutsHelp open={help} onClose={() => setHelp(false)} />
       <ConfirmDialog open={confirm} busy={busy} title="Clear all recorded requests?" confirmLabel="Delete everything"
         body={<>This permanently deletes every stored request, query, profile and issue{meta.data ? <> ({meta.data.storage.rows.toLocaleString()} requests)</> : null}. It cannot be undone.</>}
         onCancel={() => setConfirm(false)}

@@ -1,4 +1,4 @@
-import type { EndpointStats, ExplainResult, IssueGroup, Meta, Page, Speedscope, Trace, TraceFilters } from './types'
+import type { CompareResult, EndpointStats, ExplainResult, IssueGroup, Meta, Page, Speedscope, Trace, TraceFilters } from './types'
 
 export class ApiError extends Error {
   status: number
@@ -104,6 +104,7 @@ export const api = {
   profile: (id: string) => call<Speedscope>('GET', `./api/traces/${enc(id)}/profile`),
   endpoints: (window: string) => call<{ items: EndpointStats[] }>('GET', './api/endpoints' + qs({ window })),
   issues: (window: string, kind?: string) => call<{ items: IssueGroup[] }>('GET', './api/issues' + qs({ window, kind })),
+  compare: (a: string, b: string) => call<CompareResult>('GET', './api/compare' + qs({ a, b })),
   explain: (trace_id: string, span_id: string, analyze = false) =>
     call<ExplainResult>('POST', './api/explain', { trace_id, span_id, analyze }),
   clear: () => call<{ deleted: number }>('DELETE', './api/traces'),
