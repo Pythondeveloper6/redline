@@ -14,7 +14,12 @@ contextvar, so both halves write into the same trace.
   closes the response), so a generator's own work counts towards the latency;
 * ``direct_passthrough`` responses (``send_file``, anything served by the server's
   ``wsgi.file_wrapper``) are returned untouched, so ``sendfile`` still works; only the size
-  is recorded.
+  is recorded;
+* recorded responses get a ``Server-Timing`` header (``Settings.server_timing``, appended
+  to one the app set) and, when the badge is on, small non-streamed ``text/html`` 2xx
+  pages get the badge ``<script>`` before ``</body>`` (Content-Length fixed). Streams,
+  files, compressed bodies, pages over ``ui.BADGE_MAX_BYTES`` and pages whose CSP does
+  not allow ``'self'`` scripts are left alone.
 """
 
 from __future__ import annotations
@@ -27,7 +32,7 @@ from typing import Any
 from werkzeug.datastructures import EnvironHeaders
 from werkzeug.wsgi import FileWrapper, get_path_info
 
-from redline_core import Recorder
+from redline_core import Recorder, ui
 from redline_core.recorder import TraceBuilder
 from redline_core.sampling import profile_requested
 
@@ -165,12 +170,23 @@ def _header(headers: Iterable[tuple[str, str]], name: str) -> str | None:
 
 
 class RedlineMiddleware:
-    """Record one trace per request. Wraps ``app.wsgi_app`` (see ``Redline.init_app``)."""
+    """Record one trace per request. Wraps ``app.wsgi_app`` (see ``Redline.init_app``).
 
-    def __init__(self, wsgi_app: Any, recorder: Recorder, prefix: str = "/_redline") -> None:
+    ``badge`` is a ``() -> bool`` telling whether the floating badge is on right now
+    (``Settings.badge``, ``"auto"`` = ``app.debug``); ``None`` never injects it.
+    """
+
+    def __init__(
+        self,
+        wsgi_app: Any,
+        recorder: Recorder,
+        prefix: str = "/_redline",
+        badge: Callable[[], bool] | None = None,
+    ) -> None:
         self.wsgi_app = wsgi_app
         self.recorder = recorder
         self.prefix = prefix
+        self.badge = badge
 
     def __call__(self, environ: dict[str, Any], start_response: Any) -> Any:
         recorder = self.recorder
@@ -188,9 +204,10 @@ class RedlineMiddleware:
         settings = recorder.settings
         headers = dict(EnvironHeaders(environ).items())
         query = environ.get("QUERY_STRING", "")
+        method = environ.get("REQUEST_METHOD", "GET")
         builder = recorder.start_trace(
             framework="flask",  # type: ignore[arg-type]
-            method=environ.get("REQUEST_METHOD", "GET"),
+            method=method,
             path=path,
             headers=headers,
             query=query,
@@ -208,7 +225,14 @@ class RedlineMiddleware:
             req = _Capture(limit)
             environ["wsgi.input"] = _TeeInput(environ["wsgi.input"], req)
         res = _Capture(limit) if settings.capture_response_body else None
-        state: dict[str, Any] = {"status": None, "headers": [], "done": False, "written": 0}
+        state: dict[str, Any] = {
+            "status": None,
+            "headers": [],
+            "done": False,
+            "written": 0,
+            "deferred": None,  # (status line, headers) held back to inject the badge
+        }
+        badge = self.badge is not None and method != "HEAD" and builder.active and self.badge()
 
         def finish(
             status: int | None = None, error: BaseException | None = None, size: int | None = None
@@ -242,12 +266,21 @@ class RedlineMiddleware:
                 logger.exception("Redline failed to finish a trace")
 
         def start(status: str, response_headers: list[tuple[str, str]], exc_info: Any = None):
-            state["status"] = int(status.split(None, 1)[0])
+            code = int(status.split(None, 1)[0])
+            state["status"] = code
             response_headers = self._finalise_headers(builder, response_headers)
             state["headers"] = response_headers
-            write = start_response(status, response_headers, exc_info)
+            if badge and exc_info is None and _badge_candidate(code, response_headers, environ):
+                state["deferred"] = (status, response_headers)
+                write = None
+            else:
+                write = start_response(status, response_headers, exc_info)
 
             def write_wrapper(data: bytes) -> Any:
+                nonlocal write
+                if write is None:  # the legacy write() API: no injection after all
+                    held, state["deferred"] = state["deferred"], None
+                    write = start_response(*held)
                 state["written"] += len(data)
                 if res is not None:
                     res.add(data)
@@ -257,6 +290,8 @@ class RedlineMiddleware:
 
         try:
             iterable = self.wsgi_app(environ, start)
+            if state["deferred"] is not None:
+                iterable = self._inject_badge(iterable, builder, environ, state, start_response)
         except Exception as exc:
             finish(status=state["status"] or 500, error=exc)
             raise
@@ -270,15 +305,75 @@ class RedlineMiddleware:
             return iterable
         return self._finalise_body(_Body(iterable, res, finish), builder, environ)
 
-    # The one place where response headers and body are finalised: Server-Timing, the
-    # floating badge and similar response decoration belong in these two methods.
+    # The one place where response headers and body are finalised: Server-Timing and the
+    # floating badge.
     def _finalise_headers(
         self, builder: TraceBuilder, headers: list[tuple[str, str]]
     ) -> list[tuple[str, str]]:
-        return headers
+        if not self.recorder.settings.server_timing:
+            return headers
+        timing = builder.server_timing()
+        if not timing:
+            return headers
+        out = []
+        merged = False
+        for key, value in headers:
+            if not merged and key.lower() == "server-timing":
+                value = f"{value}, {timing}" if value.strip() else timing
+                merged = True
+            out.append((key, value))
+        if not merged:
+            out.append(("Server-Timing", timing))
+        return out
 
     def _finalise_body(self, body: _Body, builder: TraceBuilder, environ: dict[str, Any]) -> Any:
         return body
+
+    def _inject_badge(
+        self,
+        iterable: Iterable[bytes],
+        builder: TraceBuilder,
+        environ: dict[str, Any],
+        state: dict[str, Any],
+        start_response: Any,
+    ) -> Iterable[bytes]:
+        """Read the (small, non-streamed) HTML body, add the badge, fix Content-Length and
+        only then start the response."""
+        status_line, headers = state["deferred"]
+        state["deferred"] = None
+        try:
+            body = b"".join(iterable)
+        finally:
+            close = getattr(iterable, "close", None)
+            if close is not None:
+                close()
+        script = environ.get("SCRIPT_NAME", "").rstrip("/")
+        snippet = ui.badge_snippet(
+            builder.id, script + self.prefix, ui.badge_summary(builder, state["status"])
+        )
+        injected = ui.inject_badge(body, snippet)
+        if injected is not None:
+            body = injected
+            headers = [(k, v) for k, v in headers if k.lower() != "content-length"]
+            headers.append(("Content-Length", str(len(body))))
+            state["headers"] = headers
+        start_response(status_line, headers)
+        return [body]
+
+
+def _badge_candidate(status: int, headers: list[tuple[str, str]], environ: dict[str, Any]) -> bool:
+    """HTML, 2xx, a known small length (not streamed), not a file, CSP allows it."""
+    if environ.get(PASSTHROUGH_KEY):
+        return False
+    length = _header(headers, "content-length")
+    if not length or not length.isdigit() or int(length) > ui.BADGE_MAX_BYTES:
+        return False
+    return ui.badge_allowed(
+        status,
+        _header(headers, "content-type"),
+        content_encoding=_header(headers, "content-encoding"),
+        csp=_header(headers, "content-security-policy"),
+    )
 
 
 def _file_wrappers(environ: dict[str, Any]) -> tuple[type, ...]:

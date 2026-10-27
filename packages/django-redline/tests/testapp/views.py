@@ -163,6 +163,24 @@ async def async_n_plus_one(request):
     return JsonResponse({"totals": totals})
 
 
+def html_page(request):
+    response = HttpResponse(
+        "<html><body><h1>Hi</h1></body></html>", content_type="text/html; charset=utf-8"
+    )
+    csp = request.GET.get("csp")
+    if csp:
+        response["Content-Security-Policy"] = csp
+    if request.GET.get("timing"):
+        response["Server-Timing"] = "app;dur=1"
+    if request.GET.get("length"):
+        response["Content-Length"] = str(len(response.content))
+    return response
+
+
+def html_stream(request):
+    return StreamingHttpResponse(iter([b"<html><body>x</body></html>"]), content_type="text/html")
+
+
 def echo(request):
     return HttpResponse(request.body, content_type="application/json")
 
@@ -193,5 +211,7 @@ urlpatterns = [
     path("templated/", templated),
     path("async/", async_view),
     path("echo/", echo),
+    path("html/", html_page),
+    path("html-stream/", html_stream),
     path("static/thing.css", plain),
 ]

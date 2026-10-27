@@ -65,7 +65,19 @@ def build_runtime(settings: Settings | None = None) -> Runtime:
     store, owned = build_store(options.store, core)
     suggester = DjangoFixSuggester(project_root=core.project_root)
     recorder = configure(core, store, [suggester])
-    api = RedlineAPI(store, core, framework="django", explain_executor=executor_factory)
+    launcher = stopper = None
+    if core.load_from_ui:  # importing the load tester only when it can be used
+        from redline_core.load.control import run_hooks
+
+        launcher, stopper = run_hooks(store, core)
+    api = RedlineAPI(
+        store,
+        core,
+        framework="django",
+        explain_executor=executor_factory,
+        run_launcher=launcher,
+        run_stopper=stopper,
+    )
     return Runtime(
         settings=core,
         options=options,

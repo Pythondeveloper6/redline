@@ -221,6 +221,44 @@ def http_out() -> dict:
         return c.get("/internal?api_key=hunter2&x=1").json()
 
 
+HTML_PAGE = "<!doctype html><html><head><title>x</title></head><body><h1>hi</h1></BODY></html>"
+
+
+@bp.get("/html")
+def html_page() -> str:
+    return HTML_PAGE
+
+
+@bp.get("/html-csp")
+def html_csp() -> object:
+    return HTML_PAGE, {"Content-Security-Policy": "script-src 'nonce-abc'"}
+
+
+@bp.get("/html-fragment")
+def html_fragment() -> str:
+    return "<p>no body tag</p>"
+
+
+@bp.get("/html-stream")
+def html_stream() -> object:
+    def gen():
+        yield "<html><body>"
+        yield "streamed</body></html>"
+
+    return gen(), {"Content-Type": "text/html; charset=utf-8"}
+
+
+@bp.get("/timed")
+def timed() -> object:
+    return {"ok": True}, {"Server-Timing": 'app;dur=1.0;desc="mine"'}
+
+
+@bp.get("/async-sleep")
+async def async_sleep() -> dict:
+    time.sleep(0.08)  # blocks asgiref's event loop
+    return {"ok": True}
+
+
 def build_app() -> Flask:
     app = Flask(__name__)
     app.register_blueprint(bp)

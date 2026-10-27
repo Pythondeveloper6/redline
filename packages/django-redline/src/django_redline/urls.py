@@ -16,4 +16,5 @@ urlpatterns = [
     path("", views.index, name="index"),
     path("assets/<path:path>", views.asset, name="asset"),
     path("api/<path:path>", views.api, name="api"),
+    path("<str:name>", views.top_level, name="file"),  # badge.js, favicon.svg
 ]
