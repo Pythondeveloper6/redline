@@ -1,0 +1,179 @@
+# Publish all five Redline distributions to PyPI on a version tag.
+#
+# The packages are released in lockstep (redline-core, django-redline, fastapi-redline,
+# flask-redline, litestar-redline), so one tag publishes all of them from one build.
+#
+# ─────────────────────────────────────────────────────────────────────────────────────
+#  Trusted Publishing only: no API token is involved anywhere in this file, and none
+#  should be added. It needs, once, a *pending* publisher for each of the five projects
+#  on pypi.org (environment `pypi`) and on test.pypi.org (environment `testpypi`), and
+#  the two GitHub environments. RELEASING.md lists every field exactly.
+#
+#  Trusted Publishing cannot be verified from a developer machine, so tag a pre-release
+#  (a, b, rc or dev) first and watch it land on TestPyPI before tagging a real one. A
+#  version number on PyPI can never be reused, only yanked.
+# ─────────────────────────────────────────────────────────────────────────────────────
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  # Lets the build-and-verify half be exercised without cutting a tag.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and verify the distributions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.3.2
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+          python-version: "3.13"
+
+      # A tag that disagrees with the packages is how a release gets published under the
+      # wrong number, and it is unfixable afterwards. Without a tag (workflow_dispatch)
+      # the packages still have to agree with each other.
+      - name: Lockstep versions, and the tag must match them
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            python3 scripts/check_versions.py --expect "${GITHUB_REF_NAME#v}"
+          else
+            python3 scripts/check_versions.py
+          fi
+
+      # The wheels ship the committed UI bundle, so publishing a stale one ships a UI that
+      # does not match the frontend sources. Same check as CI's `frontend` job.
+      - uses: actions/setup-node@v5
+        with:
+          node-version: lts/*
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Rebuild the UI
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+      - name: Committed bundle is up to date
+        run: |
+          status="$(git status --porcelain -- packages/redline-core/src/redline_core/ui/static)"
+          if [ -n "$status" ]; then
+            echo "::error::The committed UI bundle is stale. Run scripts/build_ui.sh and commit the result."
+            echo "$status"
+            git diff --stat -- packages/redline-core/src/redline_core/ui/static
+            exit 1
+          fi
+
+      - name: Build
+        run: uv build --all-packages --out-dir dist
+
+      # One upload step publishes everything in dist/, so the set must be exactly right.
+      - name: Exactly five wheels and five sdists
+        run: |
+          ls -l dist
+          wheels=$(find dist -maxdepth 1 -name '*.whl' | wc -l)
+          sdists=$(find dist -maxdepth 1 -name '*.tar.gz' | wc -l)
+          if [ "$wheels" -ne 5 ] || [ "$sdists" -ne 5 ]; then
+            echo "::error::expected 5 wheels and 5 sdists, found $wheels and $sdists"
+            exit 1
+          fi
+
+      - name: twine check
+        run: uvx twine check --strict dist/*
+
+      # Same gate as CI: install from the wheels alone, import, check the bundled UI.
+      # A release is exactly the moment a wheel missing its UI would go unnoticed.
+      - name: Install from the wheels alone and smoke-test
+        run: |
+          uv venv "$RUNNER_TEMP/wheelcheck"
+          # The distributions resolve from dist/ only (none is on any index yet); their
+          # third-party dependencies come from PyPI as a user would get them.
+          VIRTUAL_ENV="$RUNNER_TEMP/wheelcheck" uv pip install --find-links dist \
+            --prerelease=if-necessary django-redline fastapi-redline flask-redline litestar-redline
+          "$RUNNER_TEMP/wheelcheck/bin/python" scripts/smoke_wheels.py
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  publish-testpypi:
+    name: Publish to TestPyPI
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/project/redline-core/
+    permissions:
+      # The OIDC token Trusted Publishing exchanges for a short-lived upload token.
+      # Nothing else in this job needs a permission, so nothing else is granted.
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@v1.14.2
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          # Re-tagging after a failed run should not be blocked by the files that
+          # already uploaded.
+          skip-existing: true
+
+  publish-pypi:
+    name: Publish to PyPI
+    needs: publish-testpypi
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    environment:
+      name: pypi
+      url: https://pypi.org/project/redline-core/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@v1.14.2
+        with:
+          # PEP 740 attestations, signed by the same OIDC identity. Free provenance.
+          attestations: true
+
+  github-release:
+    name: Create the GitHub release
+    needs: publish-pypi
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist/
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          flags=()
+          # PEP 440 pre-releases: 0.2.0a1, 0.2.0b2, 0.2.0rc1, 0.2.0.dev3
+          if [[ "$version" =~ (a|b|rc|\.?dev)[0-9]+ ]]; then
+            flags+=(--prerelease)
+          fi
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --notes "See [CHANGELOG.md](https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_REF_NAME/CHANGELOG.md) for what changed in this release." \
+            "${flags[@]}"
