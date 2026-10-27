@@ -115,6 +115,7 @@ nav:
       - Flamegraphs: flamegraphs.md
       - Custom spans: custom-spans.md
       - Issues and endpoints: issues-and-endpoints.md
+      - Refactor check: refactor-check.md
   - Analysis:
       - Detectors overview: detectors.md
       - Queries and data:

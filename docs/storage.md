@@ -42,7 +42,7 @@ Created on first open with `CREATE TABLE IF NOT EXISTS`.
 
 ### Schema version 3 (0.2)
 
-Version 0.2 adds a `meta(key, value)` table holding `schema_version` (now `3`) and a set of
+Version 0.2 adds a `meta(key, value)` table holding `schema_version` (`3` in 0.2, `4` since 0.3; see below) and a set of
 **derived tables** that are written in the same transaction as the trace, from the same
 batch:
 
@@ -74,10 +74,31 @@ A re-saved trace id replaces its trace-scoped rows and is **not** counted again 
 releases or the issue index. History reflects **kept** traces, so [sampling](production.md#sampling)
 applies to it.
 
+### Schema version 4 (0.3)
+
+Version 0.3 adds the [refactor check](refactor-check.md) tables. They are new tables only; no
+existing table changes.
+
+| Table | Holds | Lives |
+|---|---|---|
+| `check_suites` | a saved suite: id, name, the suite as JSON (secret header values redacted, `${env:NAME}` placeholders kept), created and updated time | until you delete the suite (which deletes its runs) |
+| `check_runs` | one row per baseline or compare run: kind, status (`running`, `done`, `failed`, `stopped`), label, commit sha and branch, the baseline it was compared with, a summary, the redacted suite snapshot, base URL, release, progress and error | the 50 most recent per suite |
+| `check_results` | one row per request of a run, `(run_id, idx)`: the baseline data or the comparison result as JSON | with its run |
+
+Retention is by count, not age: whenever a run is created or a baseline is imported, each
+suite keeps its **50 newest runs** (runs without a suite form one group). A run that is still
+running is never removed, and neither is a baseline that a kept compare run refers to.
+**Clear all** (`DELETE api/traces`) and `redline_clear` do not touch these tables. A `running`
+row whose background process died (checked when runs are listed, after 10 seconds) becomes
+`failed` with the error `the check process exited unexpectedly`.
+
+The tables are written synchronously, outside the trace writer's batches, because a check run
+is a handful of writes and the report must be readable the moment the run ends.
+
 ### Migration
 
 Migrations are additive and run when the store connects. A 0.1 file (no `schema_version`
-row) or a version 2 file is migrated **in place**, inside one `BEGIN IMMEDIATE` transaction that re-checks the
+row) a version 2 file or a version 3 file is migrated **in place**, inside one `BEGIN IMMEDIATE` transaction that re-checks the
 version once it holds the lock, so several workers starting at once migrate it exactly once.
 The new tables are created and **backfilled from the traces already stored**. Traces
 written by 0.1 still load: every new field has a default.

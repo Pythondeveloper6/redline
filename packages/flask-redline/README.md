@@ -147,6 +147,7 @@ discovered on the first request (they may not exist yet when `Redline(app)` runs
   `threading.Thread` is not attributed to any request.
 - Your own spans: `with redline_core.span("pricing.compute"): ...` (also as a decorator).
 - `X-Redline-Run: <id>;step=<n>` becomes tags (used by the load tester).
+- `X-Redline-Check: <id>;req=<i>;n=<k>` becomes tags (used by `redline check`, only for a check run that exists in the store).
 - Requests under `url_prefix` are never recorded.
 
 If you put `werkzeug.middleware.proxy_fix.ProxyFix` (or any other WSGI middleware) around

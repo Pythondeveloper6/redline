@@ -26,6 +26,8 @@ backend analyzer and load tester for Django, FastAPI, Flask and Litestar.
   history;
 - a load tester (`redline load`, extra `load`) with an open-model scheduler, knee detection
   and per-step bottlenecks;
+- a refactor check (`redline check`, extra `load`): record a baseline of read-only requests,
+  compare a new version, per-endpoint verdicts on responses and speed, JUnit and Markdown output;
 - optional integrations in `redline_core.contrib` (SQLAlchemy, httpx, requests, redis,
   asyncpg, psycopg, Marshmallow, Strawberry, Graphene);
 - the access policy and layered configuration shared by every adapter;

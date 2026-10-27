@@ -186,6 +186,7 @@ a trace with no queries, **31 KiB** with 20 queries and **260 KiB** with 200, ro
 | `badge` | Injects a script tag into your pages; leave it to development |
 | `server_timing` | Exposes timings to every client; turn off if you do not want that |
 | `load_from_ui: True` | Lets a UI user generate real load on your instance |
+| `checks_from_ui: True` | Lets a UI user start refactor-check runs (sequential `GET` requests, up to 5 000 calls) against your instance. `auto` is off outside debug mode, and the production preset sets it to `false` |
 | `access = "open"` | Refused without `REDLINE_ALLOW_OPEN=1`, and never right here |
 | `capture_response_body: True` | Response bodies are the biggest and most sensitive thing stored. Keep them off unless you are debugging a specific problem |
 | `sample_rate: 1.0` | The cost scales with traffic and the store churns |

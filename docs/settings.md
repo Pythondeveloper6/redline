@@ -153,6 +153,7 @@ See [Flamegraphs](flamegraphs.md). Needs `redline-core[profile]`.
 | `server_timing` | `"auto"` or `bool` | `"auto"` | Add a `Server-Timing` header (trace id, query count and time) to recorded responses. `auto` means on when the framework is in debug mode. See [Server-Timing and the badge](server-timing-badge.md) |
 | `badge` | `"auto"` or `bool` | `"auto"` | Inject the floating badge into HTML responses. `auto` means on when the framework is in debug mode (FastAPI, Flask and Litestar: the app's `debug` flag) |
 | `load_from_ui` | `bool` | `False` | Allow starting a [load run](load-testing.md#starting-a-run-from-the-ui) from the UI (`POST api/runs`). Needs `redline-core[load]`. Off whenever `read_only` is on or the `load` feature is off |
+| `checks_from_ui` | `"auto"` or `bool` | `"auto"` | Allow starting [refactor-check](refactor-check.md) baseline and compare runs from the UI (`POST api/checks/runs`). `auto` means on only while the framework is in debug mode; `true` and `false` force it. Needs `redline-core[load]` (httpx). Off whenever `read_only` is on or the `checks` feature is off; the `production` preset sets it to `false`. Reading suites and reports is not affected |
 
 ## Storage and retention
 
@@ -190,12 +191,12 @@ Who may open the UI and API, and how. The policies, recipes and reasoning are on
 | `basic_users` | table of user to hash (secret) | `{}` | For `access = "basic"`; hashes made by `redline hash-password` (`pbkdf2_sha256$...`). User names may not contain `:` |
 | `secret_key` | `str`, 16 characters or more (secret) | `None` | Signs the login cookie. Unset: a random key per process, so with several workers a login only works on the worker that issued it, and every restart logs everyone out |
 | `read_only` | `bool` | `False` | Refuse every non-GET `api/` call except `api/explain`, `api/login` and `api/logout` with `403 read_only`; `POST api/explain` with `analyze` is refused too |
-| `features` | table of switch to `bool` | all `True` | Turn individual features off: `explain`, `profile`, `replay`, `snapshot`, `load`, `logs`, `locals`, `sse`. An unknown name is an error. Merged per key across layers |
+| `features` | table of switch to `bool` | all `True` | Turn individual features off: `explain`, `profile`, `replay`, `snapshot`, `load`, `checks`, `logs`, `locals`, `sse`. An unknown name is an error. Merged per key across layers |
 | `ui_enabled` | `bool` | `True` | `False`: every Redline URL answers `404` while capture continues |
 | `mount_path` | `str` | `None` | Where FastAPI (`prefix`), Flask (`url_prefix`) and Litestar (`path`) serve the UI when that argument is not given; those arguments now default to `None`, and the final default is `/_redline`. Django ignores it (the URLconf decides). Also the default for `redline load --ui-url` |
 | `session_ttl_s` | `int`, 1 or more | `43200` | Login cookie lifetime in seconds |
 | `max_login_attempts` | `int`, 1 or more | `10` | Failed credential attempts per client IP per 300 seconds before `429 too_many_requests` |
-| `base_url` | http(s) URL | `None` | Target of load runs started from the UI. Unset: `127.0.0.1` on the port the server listens on (ASGI `scope["server"]`, WSGI `SERVER_PORT`), never the `Host` header; required when that is unknown (a unix socket). `GET api/config` masks userinfo in it |
+| `base_url` | http(s) URL | `None` | Target of load runs and refactor checks started from the UI. Unset: `127.0.0.1` on the port the server listens on (ASGI `scope["server"]`, WSGI `SERVER_PORT`), never the `Host` header; required when that is unknown (a unix socket). `GET api/config` masks userinfo in it |
 
 ## Presets
 
@@ -214,6 +215,7 @@ exactly what `redline_core.conf.PRESETS` applies:
 | `badge` | `auto` | `auto` | off |
 | `server_timing` | `auto` | `auto` | off |
 | `load_from_ui` | off | off | off |
+| `checks_from_ui` | `auto` | `auto` | off |
 | `explain_analyze` | off | off | off |
 
 Outside `dev` a token must be at least 24 characters, and `access = "token"` without a

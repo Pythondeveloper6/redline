@@ -14,13 +14,15 @@ Redline has two kinds of commands:
 ```text
 redline load SCENARIO [options]       run a load test against a running app
 redline load init ...                 write a scenario file
+redline check record|compare|run|init|show   refactor check: prove a refactor is safe
 redline config                        print the effective configuration
 redline doctor                        check the setup
 redline hash-password                 make a password hash for access = "basic"
 ```
 
 Exit codes: `0` success, `1` a check or threshold failed, `2` a usage, configuration or
-scenario error, `130` interrupted with Ctrl-C.
+scenario error, `130` interrupted with Ctrl-C. `redline check` adds `3`, the app could not be
+reached.
 
 ### `redline load`
 
@@ -43,6 +45,59 @@ redline load init --from-traces --top 15 --window 7d -o scenario.toml
 ```
 
 See [Generating scenarios](load-testing.md#generating-scenarios).
+
+### `redline check`
+
+The [refactor check](refactor-check.md): replay a suite of read-only requests against the old
+code, then the new code, and compare the responses and the timings. Needs `redline-core[load]`
+(httpx). Python 3.10 needs `tomli` for TOML suites (JSON suites always work).
+
+```text
+redline check record  SUITE [options]   run a suite and write a baseline
+redline check compare SUITE [options]   run it again and compare with a baseline
+redline check run     SUITE [options]   record if there is no baseline file yet, else compare
+redline check init --from-traces [...]  write a suite from recorded read-only traffic
+redline check show    REPORT.json       print a saved report again
+```
+
+`SUITE` is a `.toml` or `.json` [suite file](refactor-check.md#the-suite-file).
+
+| Option | On | Meaning |
+|---|---|---|
+| `--base-url URL` | record, compare, run | Override the suite's `base_url` |
+| `--store PATH` | record, compare, run | The app's Redline store, for [server-side metrics](refactor-check.md#server-side-metrics). Default: the configured `storage_path` when that file exists |
+| `--no-store` | record, compare, run | Client-side metrics only |
+| `--label TEXT` | record, compare, run | A label for this run (for example `before`) |
+| `-q`, `--quiet` | record, compare, run | No progress line |
+| `--out FILE` | record, run | Baseline file to write. Default `<suite>.baseline.json` next to the suite |
+| `--baseline FILE` | compare, run | Baseline JSON. Default `<suite>.baseline.json` |
+| `--baseline-id ID` | compare, run | A baseline stored in `--store` instead of a file. Not together with `--baseline` |
+| `--json OUT` | compare, run | Write the full report as JSON |
+| `--markdown OUT` | compare, run | Write a Markdown PR comment |
+| `--junit OUT` | compare, run | Write JUnit XML, one test case per request |
+| `--fail-on LIST` | compare, run, show | Verdicts that make the exit code `1`: any of `slower`, `changed`, `broken`, `noisy`, `faster`, or `none`. Default `slower,changed,broken` |
+| `--slower-pct X`, `--slower-ms Y` | compare, run | Override `thresholds.slower_pct` and `thresholds.slower_ms` for this run |
+| `--no-color` | compare, run, show | No ANSI colours |
+
+`redline check init` takes `--from-traces` (required), `--store PATH`, `--route PATTERN`
+(repeatable `fnmatch` pattern on the route), `--limit N` (default `20`), `--base-url URL`,
+`-o`/`--out OUT` (default `check.toml`; `.json` writes JSON; `-` writes to stdout) and
+`--force`. It writes one request per read-only route Redline has seen, using the most recent
+concrete path; header values are never copied, and an `Authorization` or `Cookie` header gets
+a `${env:REDLINE_CHECK_AUTHORIZATION}` or `${env:REDLINE_CHECK_COOKIE}` placeholder.
+
+`redline check show` takes the report JSON and prints it again; `--markdown OUT` and
+`--junit OUT` write those files from it. It exits `0` unless `--fail-on` is given.
+
+```bash
+redline check init --from-traces --route '/orders*' -o checks/orders.toml
+redline check record checks/orders.toml --label before
+redline check compare checks/orders.toml --markdown report.md --junit report.xml
+```
+
+Exit codes: `0` nothing matched `--fail-on`, `1` something did, `2` a usage, suite or baseline
+error, `3` the app could not be reached at all, `130` interrupted (Ctrl-C or SIGTERM; a
+`record` then writes no baseline). More in [Outputs and exit codes](refactor-check.md#outputs-and-exit-codes).
 
 ### `redline config`
 
