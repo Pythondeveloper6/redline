@@ -62,3 +62,25 @@ def test_from_dict_fills_defaults():
     t = Trace.from_dict({"id": "x", "method": "GET", "path": "/"})
     assert t.request["headers"] == {} and t.response["size"] is None
     assert t.framework == "other" and t.spans == [] and t.profile is None
+
+
+def test_new_id_is_uuid4_hex_unique_and_fork_safe():
+    import uuid
+
+    from redline_core.model import new_id
+
+    ids = [new_id() for _ in range(2_000)]  # spans several urandom batches
+    assert len(set(ids)) == len(ids)
+    for value in ids[:50]:
+        parsed = uuid.UUID(value)
+        assert parsed.version == 4 and parsed.hex == value
+    # a forked child resets the pool (register_at_fork), so it cannot reuse the parent's ids
+    from redline_core import model
+
+    new_id()
+    pool, pos = model._id_pool, model._id_pos
+    left = {pool[i : i + 16].hex() for i in range(pos, len(pool), 16)}
+    model._reset_ids()
+    assert model._id_pool == b""
+    fresh = bytes.fromhex(new_id())
+    assert all(bytes.fromhex(h)[9:] != fresh[9:] for h in left)

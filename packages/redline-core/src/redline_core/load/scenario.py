@@ -83,6 +83,7 @@ _SCENARIO_KEYS = {
     "connections",
     "max_inflight",
     "seed",
+    "ui_url",
 }
 _REQUEST_KEYS = {"name", "method", "path", "weight", "headers", "json", "body", "expect_status"}
 
@@ -133,6 +134,9 @@ class Scenario:
     connections: int = DEFAULT_CONNECTIONS
     max_inflight: int = DEFAULT_MAX_INFLIGHT
     seed: int | None = None
+    #: Where the Redline UI is mounted (a path on ``base_url`` or an absolute URL); only
+    #: used for the link ``redline load`` prints.
+    ui_url: str | None = None
     source: str | None = None
     extra: dict[str, Any] = field(default_factory=dict)  # private ``_keys``, kept verbatim
 
@@ -156,6 +160,8 @@ class Scenario:
             out["workers"] = self.workers
         if self.seed is not None:
             out["seed"] = self.seed
+        if self.ui_url is not None:
+            out["ui_url"] = self.ui_url
         return out
 
 
@@ -254,6 +260,9 @@ def parse_scenario(
     seed = data.get("seed")
     if seed is not None and (isinstance(seed, bool) or not isinstance(seed, int)):
         raise ScenarioError(f"must be an integer (got {seed!r})", "seed")
+    ui_url = data.get("ui_url")
+    if ui_url is not None:
+        ui_url = validate_ui_url(ui_url, "ui_url")
     extra = {k: v for k, v in data.items() if isinstance(k, str) and k.startswith("_")}
     return Scenario(
         name=name.strip(),
@@ -266,8 +275,20 @@ def parse_scenario(
         connections=connections,
         max_inflight=max_inflight,
         seed=seed,
+        ui_url=ui_url,
         source=source,
         extra=extra,
+    )
+
+
+def validate_ui_url(value: Any, path: str = "ui_url") -> str:
+    """The Redline UI location: a path (``/redline``) or an ``http(s)://`` URL."""
+    if isinstance(value, str):
+        value = value.strip()
+        if re.match(r"^https?://[^/\s]+", value) or re.match(r"^/(?![/\\])\S*$", value):
+            return value.rstrip("/") or "/"
+    raise ScenarioError(
+        f"must be a path such as '/redline' or an http(s):// URL (got {value!r})", path
     )
 
 

@@ -423,7 +423,7 @@ data: {"id": "9d4c...", "seq": 1842, "method": "GET", "path": "/orders/", "statu
 : ping
 ```
 
-Each `trace` event carries a `TraceSummary`. The stream opens with a `retry: 3000` hint and
+Each `trace` event carries a `TraceSummary`. The stream opens with a `retry:` hint (3000 ms on ASGI, 500 ms on WSGI) and
 a `: connected` comment, polls the store every second, and sends a comment line `: ping`
 every 15 seconds as a keep-alive. The server closes the stream so the browser reconnects:
 after **five minutes** on ASGI servers (FastAPI, Litestar) and after about **25 seconds**

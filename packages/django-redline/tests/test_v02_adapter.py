@@ -86,7 +86,16 @@ def test_badge_forced_off(client):
 
 @override_settings(DEBUG=True)
 @pytest.mark.parametrize(
-    "url", ["/html-stream/", "/file/", "/plain/", "/missing/", "/html/?csp=script-src%20'none'"]
+    "url",
+    [
+        "/html-stream/",
+        "/file/",
+        "/plain/",
+        "/missing/",
+        "/html/?csp=script-src%20'none'",
+        "/html/?csp=script-src%20'self'%20'strict-dynamic'",
+        "/html/?download=1",
+    ],
 )
 def test_badge_not_injected(client, url):
     response = client.get(url)

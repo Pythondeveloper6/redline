@@ -39,6 +39,38 @@ __all__ = ["Redline", "install"]
 logger = logging.getLogger("redline")
 
 
+def _guard_prefix(routes: Sequence[Any], prefix: str) -> None:
+    """Make Redline's routes cost one ``str.startswith`` for every other request.
+
+    They sit first in the app's route list (so they win over catch-all routes), and
+    FastAPI's own matching of an included router walks each of its routes; this skips
+    that walk unless the path is under ``prefix``. Each route keeps its type, so
+    ``isinstance`` checks in FastAPI (OpenAPI, ``url_path_for``…) see it unchanged.
+    """
+    from starlette.routing import Match
+
+    under = prefix + "/"
+
+    for route in routes:
+        original = route.matches
+
+        def matches(scope: Any, _original: Any = original) -> Any:
+            path = scope.get("path", "")
+            if path != prefix and not path.startswith(under):
+                root = scope.get("root_path", "")
+                if not root or not path.startswith(root):
+                    return Match.NONE, {}
+                path = path[len(root) :]
+                if path != prefix and not path.startswith(under):
+                    return Match.NONE, {}
+            return _original(scope)
+
+        try:
+            route.matches = matches
+        except AttributeError:  # pragma: no cover - a route type with __slots__
+            pass
+
+
 class Redline:
     """The handle ``install()`` returns."""
 
@@ -179,6 +211,7 @@ def install(
     app.include_router(router, prefix=prefix)
     added = app.router.routes[before:]
     del app.router.routes[before:]
+    _guard_prefix(added, prefix)
     app.router.routes[0:0] = added  # win over catch-all routes declared earlier
 
     if cfg.enabled:  # disabled: no middleware and no SQLAlchemy listeners at all

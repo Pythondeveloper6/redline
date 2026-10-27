@@ -56,6 +56,18 @@ def test_badge_enabled():
         ("default-src 'none'", False),
         ("default-src 'none'; script-src *", True),
         ("script-src 'self', script-src 'none'", False),
+        # 'strict-dynamic' makes browsers ignore 'self' (and the badge has no nonce)
+        ("script-src 'self' 'strict-dynamic' 'nonce-x'", False),
+        ("default-src 'self' 'strict-dynamic'", False),
+        # script-src-elem governs <script src> before script-src / default-src
+        ("script-src 'none'; script-src-elem 'self'", True),
+        ("script-src 'self'; script-src-elem 'nonce-x'", False),
+        ("default-src 'self'; script-src-elem https://cdn.example", False),
+        # several policies (joined headers): each falls back on its own, all must allow
+        ("script-src 'self', default-src 'none'", False),
+        ("default-src 'self', frame-ancestors 'none'", True),
+        # the first occurrence of a directive wins
+        ("script-src 'none'; script-src 'self'", False),
     ],
 )
 def test_csp_allows_badge(csp, ok):
@@ -68,6 +80,8 @@ def test_badge_allowed():
     assert not ui.badge_allowed(200, "application/json")
     assert not ui.badge_allowed(200, "text/html", content_encoding="gzip")
     assert not ui.badge_allowed(200, "text/html", csp="script-src 'none'")
+    assert not ui.badge_allowed(200, "text/html", content_disposition='attachment; filename="a"')
+    assert not ui.badge_allowed(200, "text/html", content_disposition="inline")
 
 
 def test_badge_summary_from_builder(tmp_path):
@@ -110,6 +124,32 @@ def test_sync_events_trace_ping_and_close(monkeypatch):
     assert frames[1].startswith(b"event: trace\nid: t1\ndata: {")
     assert stream.PING in frames
     assert api.calls[1] == (10.0, "t1")  # the cursor advanced past the sent trace
+
+
+def test_sync_events_close_sooner_than_async(monkeypatch):
+    """A WSGI stream pins a worker thread: it is recycled after SYNC_MAX_DURATION, with a
+    short ``retry:`` so the browser reconnects (resuming from Last-Event-ID) at once."""
+    monkeypatch.setattr(stream, "POLL_INTERVAL", 0)
+    assert stream.MAX_DURATION == 300 and stream.SYNC_MAX_DURATION <= 30
+    ticks = iter(range(1000))
+    sleeps = []
+    frames = list(
+        stream.sync_events(_FakeAPI([]), 1.0, sleep=sleeps.append, clock=lambda: next(ticks))
+    )
+    assert frames[0] == f"retry: {stream.SYNC_RETRY_MS}\n: connected\n\n".encode()
+    assert stream.SYNC_RETRY_MS <= 1000
+    assert len(sleeps) == stream.SYNC_MAX_DURATION - 1  # closed at 25 s (1 s ticks), not 300 s
+
+    async def collect():
+        out = []
+        async for frame in stream.async_events(_FakeAPI([]), 0.0, clock=lambda: next(aticks)):
+            out.append(frame)
+        return out
+
+    aticks = iter(range(0, 1000, 50))
+    frames = asyncio.run(collect())
+    assert frames[0] == f"retry: {stream.RETRY_MS}\n: connected\n\n".encode()
+    assert frames.count(stream.PING) >= 1  # still open past 25 s: ASGI keeps 300 s
 
 
 def test_async_events_disconnect(monkeypatch):

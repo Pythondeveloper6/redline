@@ -28,9 +28,9 @@ export default function ReplayModal({ trace, open, onClose }: { trace: Trace; op
   const send = async () => {
     if (missing.length) return
     setBusy(true); setErr(null); setOut(null)
-    const { url, init } = buildReplay(trace, values, removed, { profile: profile && canProfile, replayOf: trace.id })
     const t0 = performance.now()
     try {
+      const { url, init } = buildReplay(trace, values, removed, { profile: profile && canProfile, replayOf: trace.id, origin: location.origin })
       const res = await fetch(url, init)
       setOut({ status: res.status, ms: performance.now() - t0, statusText: res.statusText })
       void res.body?.cancel()

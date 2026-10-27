@@ -365,7 +365,7 @@ class RedlineMiddleware:
 
 
 def _badge_candidate(status: int, headers: list[tuple[str, str]], environ: dict[str, Any]) -> bool:
-    """HTML, 2xx, a known small length (not streamed), not a file, CSP allows it."""
+    """HTML, 2xx, a known small length (not streamed), not a file or download, CSP allows it."""
     if environ.get(PASSTHROUGH_KEY):
         return False
     length = _header(headers, "content-length")
@@ -375,7 +375,8 @@ def _badge_candidate(status: int, headers: list[tuple[str, str]], environ: dict[
         status,
         _header(headers, "content-type"),
         content_encoding=_header(headers, "content-encoding"),
-        csp=_header(headers, "content-security-policy"),
+        csp=", ".join(v for k, v in headers if k.lower() == "content-security-policy"),
+        content_disposition=_header(headers, "content-disposition"),
     )
 
 
