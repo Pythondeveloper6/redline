@@ -327,6 +327,9 @@ for numbers you trust, run it from another host.
 
 ## Reading the results
 
+![A load run: steps, latency chart, the knee and the bottlenecks found under load](assets/screenshots/fastapi-load-light.png){ .rl-shot .rl-only-light }
+![A load run: steps, latency chart, the knee and the bottlenecks found under load](assets/screenshots/fastapi-load-dark.png){ .rl-shot .rl-only-dark }
+
 ### The step table
 
 | Column | Meaning |

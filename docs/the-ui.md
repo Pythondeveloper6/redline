@@ -90,6 +90,9 @@ Press `?` anywhere for the list.
 title to open that issue, `db` for the Database page. Arrow keys move, `Enter` opens, `Esc`
 closes. It is the fastest way around the UI.
 
+![The command palette searching for "iss"](assets/screenshots/fastapi-palette-light.png){ .rl-shot .rl-only-light }
+![The command palette searching for "iss"](assets/screenshots/fastapi-palette-dark.png){ .rl-shot .rl-only-dark }
+
 ### The empty state
 
 With nothing recorded yet the page shows a ready-to-copy installation snippet for your
@@ -268,6 +271,9 @@ redacted must be **re-entered** by you. You can ask for a flamegraph of the repl
 
 ## Compare two requests
 
+![Comparing two requests](assets/screenshots/fastapi-compare-light.png){ .rl-shot .rl-only-light }
+![Comparing two requests](assets/screenshots/fastapi-compare-dark.png){ .rl-shot .rl-only-dark }
+
 Press `x` on two rows in the Requests list, then `c`. The page at `#/compare/<a>/<b>`
 shows:
 
@@ -317,6 +323,9 @@ cannot provide (a custom store) says so instead of failing.
 
 ## Login and the Settings page
 
+![The login screen](assets/screenshots/fastapi-login-light.png){ .rl-shot .rl-only-light }
+![The login screen](assets/screenshots/fastapi-login-dark.png){ .rl-shot .rl-only-dark }
+
 When the instance uses `access = "token"` or `"basic"` and you are not signed in, the API
 answers `401 login_required` and the UI shows a **login screen**: a token field, or a
 username and password for `basic`. It posts to `api/login` and reloads. **Log out** (in the
@@ -328,6 +337,9 @@ The **Settings** page (`#/settings`, in the More menu and the palette) is a read
 of the effective configuration, grouped, with a chip showing where each value came from and
 the warnings: `GET api/config`, including the settings you gave in code, which
 `redline config` cannot see. Secrets show as `***`.
+
+![The Settings page](assets/screenshots/fastapi-settings-light.png){ .rl-shot .rl-only-light }
+![The Settings page](assets/screenshots/fastapi-settings-dark.png){ .rl-shot .rl-only-dark }
 
 The UI hides what is switched off: `features` hide Explain, the Profile tab, Replay,
 snapshot download, the Load page, the Logs tab, locals and Live mode, and `read_only` hides

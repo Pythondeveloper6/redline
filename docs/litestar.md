@@ -153,6 +153,9 @@ See [Load testing](load-testing.md#generating-scenarios).
 
 ## Server-Timing, the badge and live mode
 
+![The Litestar demo shop in Redline: the requests list](assets/screenshots/litestar-requests-light.png){ .rl-shot .rl-only-light }
+![The Litestar demo shop in Redline: the requests list](assets/screenshots/litestar-requests-dark.png){ .rl-shot .rl-only-dark }
+
 Every recorded response carries a `Server-Timing` header when `server_timing` is on (`"auto"`
 by default: on in debug mode, off otherwise), HTML pages get the floating badge when
 `badge` is on (`"auto"`: debug mode), `api/stream` feeds [Live mode](the-ui.md#live-mode)
