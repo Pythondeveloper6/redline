@@ -4,6 +4,7 @@
 #   packages/redline-core     -> redline-core     (redline_core)     engine + bundled UI
 #   packages/django-redline   -> django-redline   (django_redline)   Django adapter
 #   packages/fastapi-redline  -> fastapi-redline  (fastapi_redline)  FastAPI + SQLAlchemy adapter
+#   packages/litestar-redline -> litestar-redline (litestar_redline) Litestar + SQLAlchemy adapter
 #
 # `uv sync --all-packages` installs all three, editable, plus the dev group below.
 # Each package's tests run from its own directory (`cd packages/<dist> && uv run pytest`)
@@ -41,7 +42,7 @@ select = ["E", "F", "I", "UP", "B", "C4", "RUF", "DJ"]
 ignore = ["B008", "RUF012", "RUF001", "RUF002", "RUF003"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["redline_core", "django_redline", "fastapi_redline"]
+known-first-party = ["redline_core", "django_redline", "fastapi_redline", "litestar_redline"]
 
 [tool.ruff.lint.per-file-ignores]
 "**/migrations/*.py" = ["E501", "RUF012"]
