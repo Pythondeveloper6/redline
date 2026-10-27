@@ -479,8 +479,8 @@ def _counts(counts: Mapping[str, int], order: Sequence[str]) -> str:
     return ", ".join(f"{counts.get(k, 0)} {k}" for k in order if counts.get(k))
 
 
-def _short_value(value: Any) -> str:
-    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+def _short_value(value: Any, quote: bool = False) -> str:
+    text = value if isinstance(value, str) and not quote else json.dumps(value, ensure_ascii=False)
     return text if len(text) <= 60 else text[:59] + "…"
 
 
@@ -495,9 +495,10 @@ def _diff_lines(entry: Mapping[str, Any], limit: int) -> list[str]:
         elif d["kind"] == "removed":
             lines.append(f"- {d['path']}: {_short_value(d['before'])}")
         else:
+            q = d["kind"] == "type"  # 200 → "200" must not read as unchanged
             lines.append(
-                f"~ {d['path']}: {_short_value(d['before'])} → {_short_value(d['after'])}"
-                + (" (type)" if d["kind"] == "type" else "")
+                f"~ {d['path']}: {_short_value(d['before'], q)} → {_short_value(d['after'], q)}"
+                + (" (type)" if q else "")
             )
     lines += list(r.get("text_diff") or [])
     extra = (r.get("diff_total") or 0) - len(r.get("diff") or [])

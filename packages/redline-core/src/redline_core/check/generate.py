@@ -57,10 +57,15 @@ def _sample(store: Any, route: str, method: str) -> tuple[str, dict[str, str]] |
     """``(path?query, {header: placeholder})`` of the most recent clean trace of a route."""
     from ..storage import Filters
 
-    page = store.list(Filters(route=route, method=method), limit=_SAMPLES)
-    if not page.items:  # endpoints() falls back to the path when there is no route
-        page = store.list(Filters(q=route, method=method), limit=_SAMPLES)
-    for item in page.items:  # newest first
+    # Ask for successful responses only: a route whose latest calls all failed (a refactor
+    # that broke it) must still be sampled from its older, healthy traces.
+    items: list[Any] = []
+    for status in ("2xx", "3xx"):
+        page = store.list(Filters(route=route, method=method, status=status), limit=_SAMPLES)
+        if not page.items:  # endpoints() falls back to the path when there is no route
+            page = store.list(Filters(q=route, method=method, status=status), limit=_SAMPLES)
+        items.extend(page.items)
+    for item in items:  # newest first within each class
         path = item.get("path")
         status = int(item.get("status") or 0)
         if not _clean(path) or not path.startswith("/") or path.startswith("//"):

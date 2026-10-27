@@ -551,3 +551,11 @@ def test_main_unreadable_config(store, tmp_path):
                          "--run-id", "m1"]) == 1  # fmt: skip
     run = store.get_check_run("m1")
     assert run["status"] == "failed" and "cannot read" in run["error"]
+
+
+def test_draft_uses_older_healthy_trace_when_latest_calls_failed(env, store):
+    _seen(store, "/flaky", "/flaky")
+    for _ in range(12):  # a broken refactor's calls come after the healthy one
+        _seen(store, "/flaky", "/flaky", status=500)
+    status, suite = call(env(), "POST", "api/checks/suites/draft", {"routes": ["/flaky"]})
+    assert status == 200 and [r["name"] for r in suite["requests"]] == ["GET /flaky"]
