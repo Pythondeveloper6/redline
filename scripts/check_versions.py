@@ -50,6 +50,10 @@ def main() -> int:
             elif pin.group(1) != versions["redline-core"]:
                 core = versions["redline-core"]
                 errors.append(f"{dist} pins core {pin.group(1)}, core is {core}")
+            # Extras pins (e.g. ``redline-core[profile]==``) move in lockstep too.
+            for extra_pin in re.findall(r'"redline-core\[[^\]]+\]==([^"]+)"', pyproject):
+                if extra_pin != versions["redline-core"]:
+                    errors.append(f"{dist} pins core extras at {extra_pin}")
     if len(set(versions.values())) != 1:
         errors.append(f"versions differ: {versions}")
     if args.expect is not None:
