@@ -41,3 +41,19 @@ curl -s -o /dev/null -H "Authorization: Bearer sk-live-123" http://127.0.0.1:800
 
 `shopsite/settings.py` lowers `SLOW_QUERY_MS` to 25 so the review scan counts as slow on a fast laptop.
 Traces are stored in `examples/django/.redline/redline.db`. Delete them with `manage.py redline_clear`.
+
+## Load test it
+
+With the app running (see above), run the bundled scenario from the repository root:
+
+```bash
+uv run --package redline-core --extra load redline load examples/django/scenario.toml \
+    --store examples/django/.redline/redline.db
+```
+
+It ramps from 5 to 50 rps in steps of 5, 10 s each (about 100 s), and writes the run to the
+app's store. `--store` matters: the CLI defaults to `.redline/redline.db` relative to where
+you run it, which is the repository root here, not the app's store. Then open the Load page
+at **http://127.0.0.1:8000/redline/#/load** (log in as admin / admin first; the link the CLI
+prints uses `/_redline/`, which this app does not mount) to see the per-step latency, the knee,
+and the bottlenecks found under load.
