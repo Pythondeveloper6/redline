@@ -136,7 +136,8 @@ def test_sql_cache_external(api, store):
     for path in ("api/sql", "api/cache", "api/external", "api/history"):
         err(api.dispatch("GET", path, {"window": "forever"}), 400, "invalid_window")
         err(api.dispatch("POST", path), 405, "method_not_allowed")
-    err(api.dispatch("GET", "api/indexes"), 501, "not_supported")
+    indexes = ok(api.dispatch("GET", "api/indexes"))
+    assert {"candidates", "unused", "unused_supported"} <= set(indexes)
 
 
 def test_history_and_releases(api, store):

@@ -36,7 +36,8 @@ _FUNC_KEYWORDS = {
 
 _PRED = re.compile(
     rf"(?<![\w.$:])(?P<lhs>(?:\w+\s*\(\s*)*(?P<col>{sqlmod._QUALIFIED})(?:\s*::\s*\w+)?[\s)]*?)"
-    r"\s*(?P<op>NOT\s+ILIKE|NOT\s+LIKE|NOT\s+IN|ILIKE|LIKE|IS\s+NOT\s+NULL|IS\s+NULL"
+    r"\s*(?P<op>NOT\s+ILIKE|NOT\s+LIKE|NOT\s+IN|NOT\s+BETWEEN|ILIKE|LIKE|BETWEEN"
+    r"|IS\s+NOT\s+NULL|IS\s+NULL"
     r"|!=|<>|<=|>=|=|<|>|\bIN\b)(?![\w])"
     rf"(?:\s*(?:\w+\s*\(\s*)?{_VALUE}(?P<val>\d+){_VALUE})?",
     re.IGNORECASE,
@@ -53,6 +54,9 @@ class Predicate:
     pattern: str | None = None  # LIKE/ILIKE pattern when known
     expr: str = ""  # the left-hand expression as written
     path: tuple[tuple[int, int], ...] = ()  # (OR-group id, branch) of enclosing ORs
+    #: ``a.x = b.y``: the right-hand column (a join condition, not a filter on a value).
+    join_table: str | None = None
+    join_column: str | None = None
 
 
 def leading_wildcard(pattern: str) -> bool:
@@ -123,10 +127,13 @@ def analyze_predicates(sql: str, params: Any = None) -> dict[str, list[Predicate
                 if pred is None:
                     continue
                 path = []
+                pos = m.start("col")  # m.start() may sit on a preceding "AND (" token
                 for sid, (start, end, ors) in enumerate(spans):
-                    if start <= m.start() < end or (start == 0 and end == len(body)):
-                        path.append((sid, sum(1 for o in ors if o < m.start())))
+                    if start <= pos < end or (start == 0 and end == len(body)):
+                        path.append((sid, sum(1 for o in ors if o < pos)))
                 pred.path = tuple(path)
+                if pred.op == "eq" and m.group("val") is None:
+                    _join_side(pred, body[m.end() :], aliases, first)
                 result.setdefault(pred.table, []).append(pred)
         return result
     except Exception:  # pragma: no cover - regex safety net
@@ -155,6 +162,8 @@ def _predicate(
         "<=": "range",
         ">=": "range",
         "IN": "in",
+        "BETWEEN": "range",
+        "NOT BETWEEN": "ne",
         "LIKE": "like",
         "ILIKE": "ilike",
         "NOT LIKE": "not_like",
@@ -177,6 +186,23 @@ def _predicate(
         pattern=pattern,
         expr=re.sub(r"\s+", " ", lhs).strip(),
     )
+
+
+_RHS_COLUMN = re.compile(rf"\s*(?P<col>{sqlmod._QUALIFIED})(?![\w$.(\"`\]])(?!\s*\()")
+
+
+def _join_side(pred: Predicate, rest: str, aliases: dict[str, str], first: str | None) -> None:
+    """Mark ``pred`` as a join condition when its right-hand side is a column."""
+    m = _RHS_COLUMN.match(rest)
+    if not m:
+        return
+    parts = sqlmod._split_qualified(m.group("col"))
+    if not parts or parts[0].upper() in sqlmod.KEYWORDS or parts[-1].upper() in sqlmod.KEYWORDS:
+        return
+    table = aliases.get(parts[-2], parts[-2]) if len(parts) >= 2 else first
+    if table is None:
+        return
+    pred.join_table, pred.join_column = table, parts[-1]
 
 
 def blocked_reason(p: Predicate) -> str | None:
