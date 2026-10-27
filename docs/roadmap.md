@@ -3,15 +3,16 @@
 [← Index](index.md)
 
 Redline has four parts: **Profile**, **Analyze**, **Stress** and **Compare/CI**. Versions 0.1
-and 0.2 built the first three. The rest is planned, **not built**. This page is the plan, not
-a promise: it is the intent as of 0.2.0a1, and it will change as the earlier parts meet real
-use.
+and 0.2 built the first three. Compare/CI has started: its first piece, the
+[refactor check](refactor-check.md), is built in 0.3.0a1. The rest of it is planned, **not
+built**. This page is the plan, not a promise: it is the intent as of 0.2.0a1, and it will
+change as the earlier parts meet real use.
 
 | Version | Theme | Status |
 |---|---|---|
 | **0.1** | Profile and Analyze: traces, N+1 with fix diffs, EXPLAIN, flamegraphs, UI, Django and FastAPI | **Built** |
 | **0.2** | Analyze more, **Stress**, History: Flask and Litestar, a load tester, new detectors, release history, access control | **Built** (alpha) |
-| 0.3 | **Compare / CI**: a pytest plugin, `redline ci`, flamegraph diffs, OTLP | Planned |
+| 0.3 | **Compare / CI**: the refactor check, a pytest plugin, `redline ci`, flamegraph diffs, OTLP | In progress: the refactor check is built (0.3.0a1); the rest is planned |
 | 1.0 | Hardened production mode and the long tail | Planned |
 
 ## The thesis

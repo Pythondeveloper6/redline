@@ -335,8 +335,8 @@ refactor is safe and see what it gained. It has four pages.
 - **Builder** (`#/checks/new`, `#/checks/suites/{id}/edit`): pick from the read-only routes
   Redline has seen (search, sample path, last p50 and query count) or add a request by hand;
   per request Perf and Response switches, ignore paths, headers and expected status; suite
-  settings for repeat, warmup and thresholds. *Save*, or *Export TOML*.
-- **Suite** (`#/checks/suites/{id}`): *Baseline* and *Compare* buttons (disabled, with the
+  settings for repeat, warmup and thresholds. *Save suite* (*Save changes* when editing), or *Export TOML*.
+- **Suite** (`#/checks/suites/{id}`): *Record baseline* and *Compare* buttons (disabled, with the
   reason, when `checks_from_ui` is off or the app is read-only), a baseline picker and the
   history of runs.
 - **Report** (`#/checks/runs/{id}`): summary cards, a sortable table with the verdicts, and
@@ -380,7 +380,9 @@ tables below breakpoints (p50, p99 and the query columns hide first).
 ## What the UI does not do
 
 - It does not edit your application: the mutating actions are **Clear all**, **Replay**, running
-  an EXPLAIN, and (when `load_from_ui` is on) starting or stopping a load run.
+  an EXPLAIN, and (when `load_from_ui` is on) starting or stopping a load run. The Checks pages
+  also save, edit and delete refactor-check suites and runs, stop a running check, and start
+  check runs when `checks_from_ui` is on.
 - It cannot delete a single request (the API can: `DELETE api/traces/<id>`).
 - It has no saved filters and no sharing links to filtered views. Its login screen is a front
   for the [access control](access-control.md) policy, not an account system.
