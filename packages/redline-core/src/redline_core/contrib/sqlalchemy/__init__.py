@@ -20,7 +20,9 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from redline_core import record_query
-from redline_core.recorder import current
+from redline_core.blocking import note_sync_call
+from redline_core.recorder import current, record_span
+from redline_core.transactions import begin_transaction, end_transaction
 
 from .suggest import SQLAlchemyFixSuggester
 
@@ -156,6 +158,7 @@ def instrument_engine(engine: EngineLike, alias: str = "default") -> None:
         return
     _instrumented.add(sync_engine)
     vendor = vendor_of(sync_engine)
+    is_async = bool(getattr(sync_engine.dialect, "is_async", False))
 
     def before(conn: Any, cursor: Any, statement: str, parameters: Any, context: Any, many: bool):
         if context is not None and current() is not None:
@@ -188,6 +191,8 @@ def instrument_engine(engine: EngineLike, alias: str = "default") -> None:
             span.callsite = _callsite(builder.recorder)
             if span.data["rows"] is None and span.data["explainable"] and context is not None:
                 context.cursor = _CountingCursor(cursor, span.data)
+            if not is_async:  # a sync driver called from a coroutine blocks the loop
+                note_sync_call(span, "SQLAlchemy (sync)")
 
     def failed(exc_context: Any):
         context = exc_context.execution_context
@@ -197,6 +202,89 @@ def instrument_engine(engine: EngineLike, alias: str = "default") -> None:
     event.listen(sync_engine, "before_cursor_execute", before)
     event.listen(sync_engine, "after_cursor_execute", after)
     event.listen(sync_engine, "handle_error", failed)
+    _instrument_transactions(sync_engine, alias)
+    _instrument_pool(sync_engine, alias)
+
+
+# ── transactions and pool checkout ─────────────────────────────────────────────────────
+
+_TX = "_redline_tx"
+
+
+def _instrument_transactions(sync_engine: Engine, alias: str) -> None:
+    """``begin``/``commit``/``rollback`` → one ``transaction`` span per transaction.
+
+    Savepoints (``begin_nested``) have their own events and are ignored.
+    """
+
+    def on_begin(conn: Any) -> None:
+        builder = current()
+        if builder is None:
+            return
+        state = begin_transaction(builder, _callsite(builder.recorder))
+        if state is not None:
+            setattr(conn, _TX, state)
+
+    def ender(outcome: Any) -> Callable[[Any], None]:
+        def on_end(conn: Any) -> None:
+            state = conn.__dict__.pop(_TX, None)
+            if state is not None:
+                end_transaction(state, db_alias=alias, outcome=outcome)
+
+        return on_end
+
+    event.listen(sync_engine, "begin", on_begin)
+    event.listen(sync_engine, "commit", ender("commit"))
+    event.listen(sync_engine, "rollback", ender("rollback"))
+
+
+#: Pool checkouts shorter than this are not recorded (seconds).
+POOL_WAIT_MIN = 0.001
+
+
+def _instrument_pool(sync_engine: Engine, alias: str) -> None:
+    """Time ``Engine.raw_connection`` (the pool checkout) → ``pool_wait`` spans ≥ 1 ms.
+
+    The pool has no "checkout requested" event, so the engine's own ``raw_connection`` is
+    wrapped on the instance (``Connection`` calls it for every ``engine.connect()``). The
+    time includes opening a new DBAPI connection when the pool has none to hand out.
+    """
+    original = sync_engine.raw_connection
+
+    def raw_connection(*args: Any, **kwargs: Any) -> Any:
+        if current() is None:
+            return original(*args, **kwargs)
+        start = _perf()
+        dbapi_conn = original(*args, **kwargs)
+        duration = _perf() - start
+        if duration >= POOL_WAIT_MIN:
+            builder = current()
+            pool = sync_engine.pool
+            record_span(
+                "pool_wait",
+                f"pool checkout {alias}",
+                start,
+                duration,
+                {
+                    "db_alias": alias,
+                    "pool_size": _pool_stat(pool, "size"),
+                    "checked_out": _pool_stat(pool, "checkedout"),
+                },
+                capture_callsite=False,
+                callsite=_callsite(builder.recorder) if builder is not None else None,
+            )
+        return dbapi_conn
+
+    sync_engine.raw_connection = raw_connection  # type: ignore[method-assign]
+
+
+def _pool_stat(pool: Any, name: str) -> int | None:
+    value = getattr(pool, name, None)
+    try:
+        value = value() if callable(value) else value
+    except Exception:
+        return None
+    return value if isinstance(value, int) else None
 
 
 # ── EXPLAIN ────────────────────────────────────────────────────────────────────────────

@@ -20,6 +20,10 @@ Detect = Callable[[Trace, Settings], list[Issue]]
 #: Detector functions, in run order. Filled in by the detector modules' owners.
 REGISTRY: list[Detect] = []
 
-from . import external, results, serializers  # noqa: E402
+# Detector modules import ``redline_core.detect`` lazily (inside ``detect()``), because
+# ``redline_core.detect`` imports this package.
+from . import blocking, external, results, serializers, transactions  # noqa: E402
 
-REGISTRY.extend([results.detect, serializers.detect, external.detect])
+REGISTRY.extend(
+    [results.detect, serializers.detect, external.detect, blocking.detect, transactions.detect]
+)

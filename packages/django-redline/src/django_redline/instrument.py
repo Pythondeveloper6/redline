@@ -34,6 +34,7 @@ from django.core.handlers.base import BaseHandler
 from django.db import connections
 from django.db.backends.signals import connection_created
 
+from redline_core.blocking import note_sync_call
 from redline_core.callsite import MAX_STACK
 from redline_core.model import Callsite, Frame
 from redline_core.recorder import SpanContext, current, record_query, record_span
@@ -99,6 +100,9 @@ def install() -> None:
     _install_templates()
     _install_view_hook()
     install_drf()
+    from .transactions import install_atomic
+
+    install_atomic()
 
 
 # ── SQL ─────────────────────────────────────────────────────────────────────────────
@@ -146,6 +150,7 @@ def _record(sql: Any, params: Any, many: bool, context: dict, start: float, dura
         attribute_to_view(span)
         if rows is None and not many and cursor is not None and span.data.get("explainable"):
             _count_fetched_rows(cursor, span)
+        note_sync_call(span, "sync ORM")  # sync ORM on the event loop (async views)
 
 
 class _RowCounter:
