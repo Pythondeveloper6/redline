@@ -141,6 +141,7 @@ class TraceBuilder:
         "logs_dropped",
         "max_spans",
         "method",
+        "on_finish",
         "overflow",
         "path",
         "profiler",
@@ -202,6 +203,9 @@ class TraceBuilder:
         self.started_at = time.time()
         self.t0 = _perf()
         self.profiler: Any = None
+        #: Callbacks run at the start of :meth:`Recorder.finish_trace` (e.g. the event-loop
+        #: monitor flushing a stall that is still in progress); ``None`` when there are none.
+        self.on_finish: list[Callable[[TraceBuilder], None]] | None = None
         self._lock = threading.Lock()
         self._token: Token[TraceBuilder | None] | None = None
         self._parent_token: Token[str | None] | None = None
@@ -389,6 +393,13 @@ class Recorder:
         Response ``headers``/``body`` are redacted like the request's. ``error`` is the
         unhandled exception, if any.
         """
+        if builder.on_finish:
+            for callback in builder.on_finish:
+                try:
+                    callback(builder)
+                except Exception:  # a hook must never break the response
+                    logger.exception("Redline finish hook failed")
+            builder.on_finish = None
         end = _perf()
         builder.finished = True
         _reset(builder)

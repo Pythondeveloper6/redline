@@ -221,7 +221,8 @@ class Detector:
             spans = [by_id[i] for i in issue.span_ids if i in by_id]
             if not spans and issue.id in samples:
                 spans = [samples[issue.id]]
-            issue.suggestion = self._suggest(issue, spans)
+            # a detector's own suggestion is kept unless a suggester has a better one
+            issue.suggestion = self._suggest(issue, spans) or issue.suggestion
         order = {"critical": 0, "warning": 1, "info": 2}
         issues.sort(key=lambda i: (order[i.severity], -i.total_ms))
         return issues

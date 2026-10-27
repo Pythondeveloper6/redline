@@ -294,7 +294,7 @@ Span `data` for the new kinds and new keys:
 | serializer | `library` ("drf" \| "pydantic" \| "marshmallow" \| "other"), `serializer` (class name), `items` (int\|None), `many` (bool) |
 | resolver | `path` ("orders.0.customer" with list indexes as `*`: "orders.*.customer"), `field`, `parent_type` |
 | transaction | `db_alias`, `outcome` ("commit" \| "rollback"), `queries` (int), `http_out` (int: outbound calls made inside) |
-| blocking | `reason` ("loop_lag" \| "sync_call"), `call` (e.g. "time.sleep", "requests.get", "sync ORM"), `lag_ms` |
+| blocking | `reason` ("loop_lag" \| "sync_call"), `call` (e.g. "time.sleep", "requests.get", "sync ORM"; None when unknown), `lag_ms`; `sync_call` also has `span_id` (the SQL span) |
 | pool_wait | `db_alias`, `pool_size`, `checked_out` |
 
 Notes (sql data): `has_limit` is computed in core from the SQL text (top-level `LIMIT`, `FETCH FIRST|NEXT`,
@@ -409,6 +409,7 @@ adding `X-Redline-Replay-Of: <trace id>`; the recorder turns that header into th
 - `contrib.httpx` (moved), `contrib.requests`, `contrib.redis` (redis-py sync + asyncio → `cache` spans with `op` = command, `key`, `hit` for GET-like commands), `contrib.asyncpg`, `contrib.psycopg` (psycopg 3 without an ORM → `sql` spans).
 - `contrib.strawberry` (`RedlineExtension`) and `contrib.graphene` (`RedlineMiddleware`) → `resolver` spans.
 - `contrib.asgi`: async helpers shared by ASGI adapters (event-loop lag monitor, Server-Timing/badge body injection).
+  The lag monitor itself is zero-dependency core: `redline_core.blocking.track_request(builder)` (sync + async context manager, re-exported by `contrib.asgi`) watches the running loop while the request is in flight (no-op without a running loop, for an inert builder or with `detect_blocking` off); stalls still in progress are flushed through `TraceBuilder.on_finish` callbacks, which `finish_trace` runs first. SQL hooks of *sync* drivers call `redline_core.blocking.note_sync_call(span, call)` after recording. `redline_core.transactions.begin_transaction(builder, callsite)` / `end_transaction(state, db_alias=, outcome=)` build `transaction` spans (empty transactions and control statements such as `SAVEPOINT` are not counted/recorded).
 - Core helpers used by every adapter: `TraceBuilder.server_timing() -> str` (`total;dur=…, db;dur=…;desc="12 queries", cache;dur=…, http;dur=…, tpl;dur=…, redline;desc="<trace id>"`) and `redline_core.ui.badge_snippet(trace_id, mount_url, summary) -> str` (a `<script src=".../assets/badge.js" data-…>` tag; badge.js is a dependency-free script shipped in the bundle).
 
 ## 15. Adapters
