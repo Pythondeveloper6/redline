@@ -1,0 +1,8 @@
+<!doctype html>
+<title>Orders</title>
+<h1>Orders</h1>
+<ul>
+{% for order in orders %}
+  <li>#{{ order.id }} for {{ order.customer.name }}: {{ order.items|length }} items</li>
+{% endfor %}
+</ul>

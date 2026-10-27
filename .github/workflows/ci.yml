@@ -1,15 +1,16 @@
 # Continuous integration for the whole monorepo.
 #
-# Three distributions live here and ship in lockstep, so one workflow tests them all:
+# The distributions live here and ship in lockstep, so one workflow tests them all:
 #
 #   lint      ruff (check + format --check) and the lockstep-version check.
 #   core      redline-core on every interpreter it claims (3.10 - 3.14).
 #   django    django-redline across Python x Django.
 #   fastapi   fastapi-redline across Python.
+#   flask     flask-redline across Python.
 #   postgres  the EXPLAIN tests that need a real PostgreSQL server (they skip elsewhere).
 #   frontend  builds the React UI and fails if the committed bundle is stale.
 #   docs      the MkDocs site, built with --strict.
-#   package   builds all three distributions, installs the wheels into an empty
+#   package   builds every distribution, installs the wheels into an empty
 #             virtualenv and imports them, checking the bundled UI actually shipped.
 #
 # There is deliberately no release, publish or Pages-deploy job: the repository is private
@@ -129,6 +130,31 @@ jobs:
         working-directory: packages/fastapi-redline
         run: $RUNNER_TEMP/venv/bin/python -m pytest
 
+  flask:
+    name: flask / py${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.2
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+          python-version: ${{ matrix.python-version }}
+      # Isolated venv for the same reason as the core job (workspace requires >=3.12).
+      - name: Install flask-redline (isolated venv)
+        run: |
+          uv venv --python "${{ matrix.python-version }}" "$RUNNER_TEMP/venv"
+          VIRTUAL_ENV="$RUNNER_TEMP/venv" uv pip install -e "packages/redline-core[profile]" \
+            -e "packages/flask-redline[profile]" "pytest>=8.3" "flask-sqlalchemy>=3.1" \
+            "asgiref>=3.8" "httpx>=0.27" "requests>=2.31"
+      - name: Test
+        working-directory: packages/flask-redline
+        run: $RUNNER_TEMP/venv/bin/python -m pytest
+
   # The live-EXPLAIN tests skip themselves without a server, so the matrix jobs above
   # never exercise them. Core's fixture reads REDLINE_TEST_POSTGRES_DSN (and also needs
   # psycopg importable); django-redline's settings add a `pg` database when
@@ -228,7 +254,7 @@ jobs:
           python-version: "3.13"
       - name: Lockstep versions
         run: python3 scripts/check_versions.py
-      - name: Build all three distributions
+      - name: Build all distributions
         run: uv build --all-packages --out-dir dist
       - name: Check metadata
         run: uvx twine check dist/*
@@ -238,5 +264,5 @@ jobs:
           # The distributions resolve from dist/ only (none is on any index); their
           # third-party dependencies come from PyPI as a user would get them.
           VIRTUAL_ENV="$RUNNER_TEMP/wheelcheck" uv pip install --find-links dist \
-            --prerelease=if-necessary django-redline fastapi-redline
+            --prerelease=if-necessary django-redline fastapi-redline flask-redline
           "$RUNNER_TEMP/wheelcheck/bin/python" scripts/smoke_wheels.py

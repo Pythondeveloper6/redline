@@ -1,4 +1,4 @@
-"""Fail unless all three distributions share one version and the adapters pin it.
+"""Fail unless every distribution shares one version and the adapters pin it.
 
 The packages are released in lockstep: an adapter is only ever tested against the exact
 core release beside it, so it pins ``redline-core==<same version>``. This check
@@ -18,6 +18,7 @@ PACKAGES = {
     "redline-core": "redline_core",
     "django-redline": "django_redline",
     "fastapi-redline": "fastapi_redline",
+    "flask-redline": "flask_redline",
 }
 
 
@@ -44,7 +45,7 @@ def main() -> int:
     for error in errors:
         print(f"error: {error}", file=sys.stderr)
     if not errors:
-        print(f"ok: all three at {next(iter(versions.values()))}")
+        print(f"ok: all at {next(iter(versions.values()))}")
     return 1 if errors else 0
 
 
