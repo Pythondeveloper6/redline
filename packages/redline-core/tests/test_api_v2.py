@@ -378,7 +378,10 @@ def test_snapshot_with_synthetic_bundle(tmp_path, monkeypatch):
         '<link rel="modulepreload" href="./assets/lazy.js">'
         '<link rel="stylesheet" href="./assets/app.css"></head><body></body></html>'
     )
-    (static / "assets" / "main.js").write_text('import("./lazy.js");export const a=1;')
+    (static / "assets" / "main.js").write_text(
+        'import("./lazy.js");import(`./tick.js`);export const a=1;'
+    )
+    (static / "assets" / "tick.js").write_text("export const t=1;")
     (static / "assets" / "lazy.js").write_text('import{a}from"./main.js";const u="./x.js";')
     (static / "assets" / "app.css").write_text(
         "body{background:url(./bg.svg)}/*</style>*/a{b:url(./missing.png)}"
@@ -387,7 +390,10 @@ def test_snapshot_with_synthetic_bundle(tmp_path, monkeypatch):
     monkeypatch.setattr(ui, "_STATIC", static.resolve())
     page = snapshot_html({"trace": None})
     modules = _decode_imports(page)
-    assert modules["@redline/main.js"] == 'import("@redline/lazy.js");export const a=1;'
+    assert modules["@redline/main.js"] == (
+        'import("@redline/lazy.js");import(`@redline/tick.js`);export const a=1;'
+    )
+    assert "@redline/tick.js" in modules  # backtick-quoted lazy chunk (Vite 8)
     assert modules["@redline/lazy.js"] == 'import{a}from"@redline/main.js";const u="./x.js";'
     assert "modulepreload" not in page
     assert "url(data:image/svg+xml;base64," in page and "url(./missing.png)" in page
