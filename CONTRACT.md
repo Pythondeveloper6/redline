@@ -376,9 +376,12 @@ Concrete decisions (v0.2 implementation):
   `SqlStats`, `CacheStats`, `ExternalStats`, `History`, `ReleaseInfo`, `PeriodStats`, `PeriodComparison`,
   `IssueIndexEntry`, `Bottlenecks`; `Period = ("release", name) | ("range", start, end)` and
   `parse_period("release:<name>" | "range:<start>-<end>")` (raises `FilterError`).
-- **Schema.** `meta.schema_version` = 2. A v0.1 file (no version row) is migrated in place on connect inside one
+- **Schema.** `meta.schema_version` = 3. A v0.1/v0.2-early file is migrated in place on connect inside one
   `BEGIN IMMEDIATE` (re-checked inside, so concurrent workers migrate once): the new tables are created and
-  **backfilled from the stored traces**. Additive columns beyond the list above: `trace_sql.rows_n` (executions
+  **backfilled from the stored traces**. Version 3 adds `traces.saved_seq INTEGER` (indexed; backfilled from
+  rowid order) and the `meta.last_seq` counter: the writer reserves `seq` numbers inside its write transaction,
+  so they are unique and increasing across processes and never reused after pruning (a re-saved trace gets a
+  new one). Every write transaction is `BEGIN IMMEDIATE` (several processes may write one file). Additive columns beyond the list above: `trace_sql.rows_n` (executions
   with a known row count), `trace_sql.vendor`, `trace_sql.db_alias`, `releases.requests`; one extra history
   table `issue_rollups(bucket, release, issue_id, occurrences)` (per-period issue sets for `compare_periods`).
 - **trace_sql.** `fingerprint` is the 16-hex `sql.fingerprint_hash` (sha1 of the normalised statement); `sql` is
@@ -419,8 +422,18 @@ Concrete decisions (v0.2 implementation):
   `p95_ms` over each request's mean, `count`; `growth = last mean / max(first mean, 0.01)` (1.0 with a single step);
   top 50 by growth. Steps come from `run_steps`, else from the tags (`target_rps: null`). `None` (→ 404) when there is
   neither the run nor a tagged trace.
-- `traces_since(started_at, trace_id="", limit=100)` → TraceSummaries strictly after `(started_at, trace_id)`,
-  oldest first.
+- `traces_since(started_at, trace_id="", limit=100, after_seq=None)` → TraceSummaries (each with an extra `seq`)
+  in **insertion order** (`saved_seq`), oldest saved first. Traces are written when they finish, so paging by
+  `started_at` would never deliver a slow request that started before already-streamed fast ones. Without
+  `after_seq`: traces with `started_at` strictly after `(started_at, trace_id)` (the initial position, an
+  epoch); with it: traces saved after that `seq`.
+- **Unmatched routes.** Rollups and the issue index key a request with no route as `"(unmatched)"`
+  (`derive.UNMATCHED`), not by its path, so 404s and scanners do not add rows per path for 90 days. Trace rows,
+  `trace_sql` and the per-trace `issues` table keep the real path.
+- **Dead runs.** `get_run` / `list_runs` mark a `running` row older than 10 s whose `runs/<id>.pid` is missing or
+  names a dead process as `failed` (`summary.message` = "the load process exited unexpectedly", persisted), so it
+  can be deleted. Only when a `runs` directory sits beside the store file (runs without process control are left
+  alone).
 
 ## 12. API additions (§5 rules apply)
 
@@ -428,7 +441,7 @@ Concrete decisions (v0.2 implementation):
 |---|---|
 | `GET api/meta` | adds `project_root`, `editor`, `editor_url_template` (str\|null, with `{file}`/`{line}`), `release`, `features: {load_from_ui, sse, snapshot}` |
 | `GET api/traces` | adds filters `sql=<substring>` and `since=<epoch>`, `replay_of=<id>` |
-| `GET api/stream?since=<epoch>` | **SSE** (adapter-served): `event: trace` with a TraceSummary per new trace, `: ping` every 15 s, closes after 5 min. Core helper `api.poll(since, last_id) -> list[TraceSummary]` |
+| `GET api/stream?since=<epoch>[&after=<seq>]` | **SSE** (adapter-served): `event: trace` with a TraceSummary (plus `seq`) per newly saved trace, in save order; the SSE `id:` is the `seq`. `since` is only the initial position; `after=<seq>` or the `Last-Event-ID` header resumes after that `seq` (and wins over `since`). `: ping` every 15 s, closes after 5 min. Core helper `api.poll(since, last_id, limit=100, after_seq=None) -> list[TraceSummary]` |
 | `GET api/traces/{id}/snapshot` | `text/html` standalone page (bundle inlined, `window.__REDLINE_SNAPSHOT__ = {trace, profile}`). `dispatch` returns a `RawResponse(status, content_type, body: bytes, headers)` for it; adapters send it as-is |
 | `GET api/compare?a=<id>&b=<id>` | `{a: TraceSummary, b: TraceSummary, delta: {duration_ms, query_count, query_ms}, by_kind: {kind: {a_ms, b_ms, a_count, b_count}}, sql: [{fingerprint, sql, a_count, b_count, a_ms, b_ms}], issues: {only_a, only_b, both}}` |
 | `GET api/sql?q=&window=` | `{items: [{fingerprint, sql, count, traces, total_ms, max_ms, routes, sample_trace_id}]}` |
@@ -465,8 +478,9 @@ Concrete decisions (v0.2 implementation):
   `@redline/<chunk>` and mapped by an import map to `data:` URLs; `window.__REDLINE_SNAPSHOT__ = {trace (with
   has_profile), profile}` is set by a classic script **before** the import map and the entry module. JSON is escaped
   for `<script>` (`<`, `>`, `&`, U+2028/9).
-- `api.poll(since, last_id=None, limit=100) -> [TraceSummary]` oldest first (falls back to `list(since=…)` when the
+- `api.poll(since, last_id=None, limit=100, after_seq=None) -> [TraceSummary]` in save order (`seq`) (falls back to `list(since=…)` when the
   store has no `traces_since`).
+- `GET api/traces?since=` is exclusive and filters on `started_at` (unchanged); only the live tail follows save order.
 - `GET api/traces`: `sql` matches the normalised SQL (case-insensitive substring), `since` is exclusive, invalid →
   400 `invalid_filter`.
 - `GET api/compare`: `sql` rows keyed by the 16-hex fingerprint, `sql` = normalised statement, sorted by the
@@ -534,6 +548,8 @@ adding `X-Redline-Replay-Of: <trace id>`; the recorder turns that header into th
 - `redline load SCENARIO [--rps N | --ramp A:B | --steps A:B:STEP] [--duration 60s] [--step-duration 30s] [--workers N] [--store PATH] [--json OUT] [--fail-p95-ms X] [--fail-error-rate Y]`, `redline load init --from-openapi URL|FILE | --from-traces [--store PATH]`. Exit code 1 when a `--fail-*` threshold is breached (CI-ready).
 - Scenario: JSON, TOML (3.11+) or a Python file defining `SCENARIO = {...}`:
   `{name, base_url, headers, timeout_s, requests: [{name, method, path, weight, headers, json|body, expect_status}], profile: {mode: "constant"|"ramp"|"steps", rps, start_rps, end_rps, step_rps, duration_s, step_duration_s, stop_on: {error_rate, p95_ms}}, workers}`.
+- **Limits.** Every mode: fewer than 1000 steps (computed arithmetically before any plan is built), `duration_s` ≤ 24 h, rates ≤ 100 000 rps; `workers` ≤ 256, `connections` ≤ 10 000, `max_inflight` ≤ 100 000. Runs started from the UI (`launch_background`) are capped further: ≤ 200 steps, ≤ 1 h, ≤ 5 000 rps (400 `invalid_body`).
+- **Process control.** The CLI marks the run `failed` (with the message) on any error once a run id exists; SIGTERM stops a run like Ctrl-C; workers exit when their parent dies (`os.getppid()` change; pid probe on Windows). `_pid_alive` uses `OpenProcess`/`GetExitCodeProcess` on Windows, `os.kill(pid, 0)` elsewhere.
 - **Open model**: arrivals are scheduled at the target rate independent of responses (fixed interval or `poisson: true`); latency is measured from the *scheduled* time (coordinated-omission corrected), with a per-worker in-flight cap (beyond it: counted `dropped`). Workers are separate **processes** (asyncio + httpx each) sending per-second histograms to the parent.
 - Every request carries `X-Redline-Run: <run_id>;step=<n>` so app-side traces are tagged; the run (steps, histograms) is written to the same store the app uses (`--store`, default `.redline/redline.db`) and appears in the UI.
 - Knee: the first step whose p95 > 2× the first step's, or error rate > 1 %, or achieved < 90 % of target. `summary.knee_step`, `summary.max_ok_rps`.

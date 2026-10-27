@@ -34,12 +34,20 @@ export function useLiveStream(enabled: boolean, getSince: () => number, onTrace:
     let failures = 0
     let openedAt = 0
     let stopped = false
+    // Insertion-order cursor: traces are saved when they finish, so a slow request started
+    // before already-seen ones still arrives after them. Resumes reconnects past what was seen.
+    let lastSeq: number | null = null
     const connect = () => {
       if (stopped) return
-      es = new EventSource(`./api/stream?since=${encodeURIComponent(String(since.current()))}`)
+      const after = lastSeq === null ? '' : `&after=${lastSeq}`
+      es = new EventSource(`./api/stream?since=${encodeURIComponent(String(since.current()))}${after}`)
       es.onopen = () => { openedAt = Date.now(); setState('live') }
       es.addEventListener('trace', ev => {
-        try { cb.current(JSON.parse((ev as MessageEvent).data) as TraceSummary) } catch { /* malformed frame */ }
+        try {
+          const t = JSON.parse((ev as MessageEvent).data) as TraceSummary
+          if (typeof t.seq === 'number') lastSeq = t.seq
+          cb.current(t)
+        } catch { /* malformed frame */ }
       })
       es.onerror = () => {
         es?.close(); es = null

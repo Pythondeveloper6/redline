@@ -67,6 +67,9 @@ METHODS = ("GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE")
 DEFAULT_TIMEOUT_S = 10.0
 DEFAULT_CONNECTIONS = 64
 DEFAULT_MAX_INFLIGHT = 1_000
+MAX_WORKERS = 256
+MAX_CONNECTIONS = 10_000
+MAX_INFLIGHT = 100_000
 
 _SCENARIO_KEYS = {
     "name",
@@ -239,9 +242,15 @@ def parse_scenario(
         raise ScenarioError("at least one request needs a weight > 0", "requests")
 
     profile = parse_profile(data.get("profile"), "profile")
-    workers = _int(data.get("workers"), "workers", minimum=1)
-    connections = _int(data.get("connections"), "connections", minimum=1) or DEFAULT_CONNECTIONS
-    max_inflight = _int(data.get("max_inflight"), "max_inflight", minimum=1) or DEFAULT_MAX_INFLIGHT
+    workers = _int(data.get("workers"), "workers", minimum=1, maximum=MAX_WORKERS)
+    connections = (
+        _int(data.get("connections"), "connections", minimum=1, maximum=MAX_CONNECTIONS)
+        or DEFAULT_CONNECTIONS
+    )
+    max_inflight = (
+        _int(data.get("max_inflight"), "max_inflight", minimum=1, maximum=MAX_INFLIGHT)
+        or DEFAULT_MAX_INFLIGHT
+    )
     seed = data.get("seed")
     if seed is not None and (isinstance(seed, bool) or not isinstance(seed, int)):
         raise ScenarioError(f"must be an integer (got {seed!r})", "seed")
@@ -268,11 +277,13 @@ def validate_base_url(value: Any, path: str = "base_url") -> str:
     return value.strip().rstrip("/")
 
 
-def _int(value: Any, path: str, *, minimum: int) -> int | None:
+def _int(value: Any, path: str, *, minimum: int, maximum: int | None = None) -> int | None:
     if value is None:
         return None
     if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
         raise ScenarioError(f"must be an integer ≥ {minimum} (got {value!r})", path)
+    if maximum is not None and value > maximum:
+        raise ScenarioError(f"must be ≤ {maximum} (got {value!r})", path)
     return value
 
 

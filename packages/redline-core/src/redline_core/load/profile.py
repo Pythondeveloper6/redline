@@ -45,6 +45,9 @@ DEFAULT_RAMP_STEP_S = 5.0
 DEFAULT_STEPS_STEP_S = 30.0
 DEFAULT_DURATION_S = 30.0
 MAX_STEPS = 1_000
+#: Sanity caps (every mode). A run longer than a day or faster than 100k rps is a typo.
+MAX_DURATION_S = 86_400.0
+MAX_RPS = 100_000.0
 
 
 class ScenarioError(ValueError):
@@ -172,7 +175,25 @@ class Profile:
         )
 
     # ------------------------------------------------------------------ plan
+    def step_count(self) -> int:
+        """How many steps :meth:`plan` yields, computed arithmetically (never builds it)."""
+        if self.mode == "constant":
+            return 1
+        if self.mode == "ramp":
+            total = float(self.duration_s or DEFAULT_DURATION_S)
+            step = float(self.step_duration_s or DEFAULT_RAMP_STEP_S)
+            return max(1, math.ceil(total / step - 1e-9))
+        assert self.start_rps is not None and self.end_rps is not None
+        step_rps = self.step_rps or self.start_rps
+        step = float(self.step_duration_s or DEFAULT_STEPS_STEP_S)
+        n = math.floor((self.end_rps - self.start_rps) / step_rps + 1e-9) + 1 if step_rps else 1
+        if self.duration_s is not None:
+            n = min(n, max(0, math.ceil(self.duration_s / step - 1e-9)))
+        return max(0, n)
+
     def plan(self) -> list[StepPlan]:
+        if self.step_count() > MAX_STEPS:
+            raise ScenarioError(f"produces more than {MAX_STEPS} steps", "profile")
         if self.mode == "constant":
             assert self.rps is not None and self.duration_s is not None
             return [StepPlan(1, self.rps, 0.0, self.duration_s)]
@@ -180,7 +201,7 @@ class Profile:
             assert self.start_rps is not None and self.end_rps is not None
             total = float(self.duration_s or DEFAULT_DURATION_S)
             step = float(self.step_duration_s or DEFAULT_RAMP_STEP_S)
-            n = max(1, math.ceil(total / step - 1e-9))
+            n = self.step_count()
             plans = []
             for i in range(n):
                 start = i * step
@@ -208,12 +229,36 @@ class Profile:
 
     @property
     def total_duration_s(self) -> float:
-        plans = self.plan()
-        return plans[-1].end_s if plans else 0.0
+        """Sum of the step durations, computed without building the plan."""
+        if self.mode == "constant":
+            return float(self.duration_s or 0.0)
+        if self.mode == "ramp":
+            return float(self.duration_s or DEFAULT_DURATION_S)
+        n = self.step_count()
+        total = n * float(self.step_duration_s or DEFAULT_STEPS_STEP_S)
+        return min(total, self.duration_s) if self.duration_s is not None else total
 
     @property
     def max_rps(self) -> float:
-        return max((p.target_rps for p in self.plan()), default=0.0)
+        """The highest target rate, computed without building the plan."""
+        if self.mode == "constant":
+            return float(self.rps or 0.0)
+        assert self.start_rps is not None and self.end_rps is not None
+        if self.mode == "ramp":
+            total = float(self.duration_s or DEFAULT_DURATION_S)
+            step = float(self.step_duration_s or DEFAULT_RAMP_STEP_S)
+            n = self.step_count()
+            first = self.start_rps + (self.end_rps - self.start_rps) * (
+                min(step, total) / 2 / total
+            )
+            last_start = (n - 1) * step
+            mid = last_start + min(step, total - last_start) / 2
+            last = self.start_rps + (self.end_rps - self.start_rps) * (mid / total)
+            return round(max(first, last), 6)
+        n = self.step_count()
+        if n <= 0:
+            return 0.0
+        return round(self.start_rps + (n - 1) * (self.step_rps or self.start_rps), 6)
 
     def describe(self) -> str:
         if self.mode == "constant":
@@ -354,11 +399,23 @@ def parse_profile(data: Any, path: str = "profile") -> Profile:
             stop_on=stop_on,
             poisson=poisson,
         )
-        if len(profile.plan()) >= MAX_STEPS:
-            raise ScenarioError(f"produces more than {MAX_STEPS} steps", f"{path}.step_rps")
+    _check_limits(profile, path)
+    return profile
+
+
+def _check_limits(profile: Profile, path: str) -> None:
+    """Reject absurd profiles before anything is planned (arithmetic only)."""
+    if profile.step_count() >= MAX_STEPS:
+        key = "step_rps" if profile.mode == "steps" else "step_duration_s"
+        raise ScenarioError(
+            f"produces {MAX_STEPS} or more steps (use a larger step)", f"{path}.{key}"
+        )
+    if profile.total_duration_s > MAX_DURATION_S:
+        raise ScenarioError(f"runs longer than {MAX_DURATION_S:g}s", f"{path}.duration_s")
+    if profile.max_rps > MAX_RPS:
+        raise ScenarioError(f"exceeds the {MAX_RPS:g} rps limit", f"{path}.rps")
     if profile.max_rps <= 0:
         raise ScenarioError("the profile never sends a request (all rates are 0)", path)
-    return profile
 
 
 def _fraction(value: Any, path: str) -> float | None:

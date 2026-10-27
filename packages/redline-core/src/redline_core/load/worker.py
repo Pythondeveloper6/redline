@@ -156,9 +156,20 @@ class _Worker:
             }
         )
 
+    def _parent_gone(self) -> bool:
+        """The process that spawned this worker died (it was killed): stop sending."""
+        parent = self.cfg.get("parent_pid")
+        if not parent:
+            return False
+        if os.name == "nt":  # pragma: no cover - there the pid does not change
+            from .control import _pid_alive
+
+            return not _pid_alive(int(parent))
+        return os.getppid() != parent
+
     async def _watch(self) -> None:
         while not self.stopping:
-            if self.stop_event.is_set():
+            if self.stop_event.is_set() or self._parent_gone():
                 self.stopping = True
                 return
             await asyncio.sleep(STOP_POLL_S)
@@ -196,7 +207,7 @@ class _Worker:
             self.q.put({"type": "ready", "worker": self.k, "pid": os.getpid()})
             loop = asyncio.get_running_loop()
             while not go.is_set():
-                if self.stop_event.is_set():
+                if self.stop_event.is_set() or self._parent_gone():
                     return
                 await loop.run_in_executor(None, go.wait, 0.1)
             # shared epoch start → this process's perf_counter timeline
