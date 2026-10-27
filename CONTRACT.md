@@ -532,3 +532,43 @@ Command palette (⌘K / Ctrl-K), Live mode (SSE) on Requests, open-in-editor lin
 Replay (modal for redacted values, optional profile), compare two traces (`#/compare/:a/:b`), Logs and Exception (with locals) tabs,
 snapshot download, new pages: **Database** (SQL search, index advisor, unused indexes), **Cache**, **External**, **History**
 (timeline with release markers, compare releases/periods, new/resolved issues) and **Load** (runs, RPS-vs-p95-vs-errors chart with knee, per-step bottlenecks, start form when `load_from_ui`).
+
+## 18. Configuration and access control (`redline_core.access`, `redline_core.config`)
+
+One configuration surface for every adapter, layered (later wins): built-in defaults → **preset** → config file →
+`REDLINE_*` environment variables → the framework's own settings (`REDLINE = {...}`, `app.config["REDLINE"]`, `install(settings=...)`).
+
+- **Presets** (`preset` setting): `"dev"` (default: capture everything, local-only access, badge auto), `"staging"`
+  (sample 0.25, token access, no locals), `"production"` (sample 0.05 + always keep slow/errors, no request/response bodies,
+  no locals, no logs below WARNING, `access="token"` required, `read_only=True`, badge off, `load_from_ui=False`).
+  A preset only sets defaults; any explicit setting overrides it.
+- **Config file**: `redline.toml` (or `[tool.redline]` in `pyproject.toml`) found in `project_root`, or `REDLINE_CONFIG=<path>`.
+  TOML needs Python ≥ 3.11 (`tomllib`) or `tomli`; otherwise the file is ignored with a warning.
+- **Environment**: `REDLINE_<SETTING>` for every setting (`REDLINE_ENABLED=0`, `REDLINE_SAMPLE_RATE=0.1`, `REDLINE_ACCESS=token`, `REDLINE_TOKEN=…`), parsed by type.
+
+Access settings (all adapters enforce the same policy through `redline_core.access.check(request_info) -> Decision`):
+
+| name | type | default | meaning |
+|---|---|---|---|
+| access | "local" \| "token" \| "basic" \| "framework" \| "custom" \| "open" | "local" (Django: "framework" = staff users) | who may open the UI/API |
+| allowed_ips | list[str] (IPs/CIDRs) | [] | extra client networks allowed in addition to the policy (e.g. a VPN range); `local` = loopback only unless listed |
+| allowed_hosts | list[str] | [] | extra `Host` values accepted by the DNS-rebinding check |
+| trusted_proxies | list[str] (CIDRs) | [] | only then is `X-Forwarded-For` honoured for the client IP |
+| token / token_file | str (secret) | None / None | `access="token"`: `Authorization: Bearer <token>` or the UI login (sets an HttpOnly, SameSite=Strict, path-scoped cookie); compared in constant time; never logged or shown |
+| basic_users | dict[user, password-hash] | {} | `access="basic"`; hashes made by `redline hash-password` (PBKDF2-SHA256) |
+| read_only | bool | False | refuse DELETE, `POST api/runs`, EXPLAIN ANALYZE (403 `read_only`) |
+| features | dict[str, bool] | all True | turn off `explain`, `profile`, `replay`, `snapshot`, `load`, `logs`, `locals`, `sse` individually |
+| ui_enabled | bool | True | capture without serving the UI (e.g. ship data elsewhere) |
+| mount_path | str | adapter default | where the UI/API are served |
+| session_ttl_s | int | 43200 | login-cookie lifetime |
+| max_login_attempts | int | 10 per 5 min per IP | rate limit for `POST api/login` (429 `too_many_requests`) |
+
+`access="open"` is refused unless `REDLINE_ALLOW_OPEN=1` is set too, and every request then logs a warning (it exposes captured data).
+`"framework"` uses the adapter's native hook (Django `is_staff` / `REDLINE["PERMISSION"]`, FastAPI `dependencies`, Flask `permission`, Litestar `guards`);
+`"custom"` takes `access_check=callable(request_info) -> bool`. CSRF (Origin / `Sec-Fetch-Site`) and `X-Frame-Options: DENY` always apply.
+
+API: `POST api/login` `{token}` or `{username, password}` → 204 + cookie; `POST api/logout`; `GET api/config` → the effective configuration
+(secrets replaced by `"***"`, with where each value came from: default/preset/file/env/framework) and warnings.
+CLI: `redline config` (print effective config + sources + warnings), `redline doctor` (checks: storage writable, UI bundle present,
+access policy safe for the preset, token strength, proxies), `redline hash-password`.
+UI: a login screen when the API answers 401 `login_required`, and a **Settings** page showing the effective config and warnings (read-only).

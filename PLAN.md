@@ -138,4 +138,5 @@ Scope agreed with the owner on 2026-10-27: every analysis/UX feature from the fo
 | 1 | store v2 + history + API routes (Opus) · flask-redline · async blocking + transactions + pool wait (Opus) · Server-Timing/badge/SSE/snapshot in adapters |
 | 2 | load tester `redline load` (Opus) · result-size/count/serializer/external detectors · workload index advisor + unused indexes (Opus) · GraphQL resolvers |
 | 3 | UI pages: History + Load · UI pages: Database/Cache/External/logs/exception/live · litestar-redline + Django Ninja · static N+1 scan |
+| 3b | **configuration and access control** (contract §18: presets dev/staging/production, `redline.toml` + `REDLINE_*` env, one access policy for all adapters — local/token/basic/framework/custom, IP allow-lists, trusted proxies, read-only mode, per-feature switches, login screen, Settings page, `redline config` / `doctor` / `hash-password`) (Opus) |
 | 4 | docs · examples + CI matrix · security/code review (Opus) · browser verification, version 0.2.0a1 |
