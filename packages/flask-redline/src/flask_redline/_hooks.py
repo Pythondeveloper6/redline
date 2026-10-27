@@ -68,7 +68,11 @@ def install_hooks(app: Flask, on_first_request: Any = None) -> None:
         rule = request.url_rule
         if builder is None or rule is None:
             return
-        builder.set_route(request.script_root + rule.rule, view_name(sender, rule.endpoint))
+        builder.set_route(
+            request.script_root + rule.rule,
+            view_name(sender, rule.endpoint),
+            request.view_args or None,
+        )
 
     def on_exception(sender: Flask, exception: BaseException, **extra: Any) -> None:
         request.environ[ERROR_KEY] = exception
