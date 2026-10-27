@@ -43,7 +43,7 @@ classifiers = [
 dependencies = [
     "redline-core==0.2.0a1",
     "litestar>=2.12,<3",
-    "sqlalchemy[asyncio]>=2.0,<3",
+    "sqlalchemy[asyncio]>=2.1.6,<3",
 ]
 
 [project.optional-dependencies]
