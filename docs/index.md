@@ -7,13 +7,13 @@ hide:
 
 <div class="rl-hero" markdown>
 
+![Redline](assets/logo-mark.svg){ .rl-hero-mark }
+
 # See inside every request
 
 <p class="rl-tagline">A self-hosted request profiler, backend analyzer and load tester for
-Django, FastAPI, Flask and Litestar. Every request becomes a trace: a span timeline, the SQL
-it ran, N+1 queries with a ready-to-apply fix diff, one-click EXPLAIN, logs, exception
-locals and optional flamegraphs, in a fast web UI served from your own app. Then push load at
-it and see exactly which query broke at which rate.</p>
+Django, FastAPI, Flask and Litestar. Find the slow query, get the fix as a diff, then push
+load at it and see what breaks first.</p>
 
 [Get started](getting-started.md){ .md-button .md-button--primary }
 [View on GitHub](https://github.com/Pythondeveloper6/redline){ .md-button }
@@ -32,7 +32,7 @@ it and see exactly which query broke at which rate.</p>
     Use it in development and staging first, and read [Production](production.md) before
     pointing it at real traffic.
 
-## Sixty seconds
+## Install in a minute
 
 === "Django"
 
@@ -137,37 +137,26 @@ Both packages are named in each command because Redline is not on PyPI: the adap
 
 <div class="grid cards" markdown>
 
--   :material-timeline-clock-outline:{ .lg .middle } **A trace for every request**
+-   :material-timeline-clock-outline:{ .lg .middle } **Profile every request**
 
     ---
 
-    Method, route template, view, status, headers, redacted bodies and a waterfall of
-    spans: middleware, view, SQL, cache, template, serializer, transaction, outbound HTTP
-    and your own code. Logs and exception locals ride along.
+    A waterfall of spans for middleware, view, SQL, cache, templates, serializers,
+    transactions and outbound HTTP, with logs, exception locals and opt-in flamegraphs.
 
     [:octicons-arrow-right-24: How it works](how-it-works.md)
 
--   :material-database-search-outline:{ .lg .middle } **N+1 with the fix attached**
+-   :material-database-search-outline:{ .lg .middle } **Analyze, with the fix attached**
 
     ---
 
-    The repeated query is mapped back to your models and the queryset in your source, and
-    written out as a unified diff: `prefetch_related`, `select_related`, `selectinload`,
-    `joinedload`. Over GraphQL it names the resolver field.
+    N+1 queries mapped back to your source line and written as a diff
+    (`prefetch_related`, `selectinload`...). One-click EXPLAIN, an index advisor, event-loop
+    blocking, long transactions, huge results, slow serializers and external calls.
 
-    [:octicons-arrow-right-24: N+1 detection](n-plus-one.md) · [GraphQL](graphql.md)
+    [:octicons-arrow-right-24: N+1](n-plus-one.md) · [Detectors](detectors.md)
 
--   :material-radar:{ .lg .middle } **Ten more detectors**
-
-    ---
-
-    Event-loop blocking, long transactions, an HTTP call inside a transaction, huge and
-    unbounded results, `len(qs)` instead of `.exists()`, slow serializers, slow, duplicated
-    and retried external calls.
-
-    [:octicons-arrow-right-24: Detectors overview](detectors.md)
-
--   :material-speedometer:{ .lg .middle } **Load testing that explains itself**
+-   :material-speedometer:{ .lg .middle } **Load test and find the knee**
 
     ---
 
@@ -176,17 +165,7 @@ Both packages are named in each command because Redline is not on PyPI: the adap
 
     [:octicons-arrow-right-24: Load testing](load-testing.md)
 
--   :material-magnify-scan:{ .lg .middle } **One-click EXPLAIN and an index advisor**
-
-    ---
-
-    On any captured `SELECT`, inside a rolled-back, read-only transaction. Plans are analysed
-    for scans and spills; the Database page ranks index suggestions across your whole
-    workload and lists unused ones.
-
-    [:octicons-arrow-right-24: EXPLAIN](explain.md) · [Database](database.md)
-
--   :material-chart-timeline-variant:{ .lg .middle } **History across releases**
+-   :material-chart-timeline-variant:{ .lg .middle } **Compare releases**
 
     ---
 
@@ -195,55 +174,28 @@ Both packages are named in each command because Redline is not on PyPI: the adap
 
     [:octicons-arrow-right-24: History](history.md)
 
--   :material-fire:{ .lg .middle } **Opt-in flamegraphs**
+-   :material-puzzle-outline:{ .lg .middle } **Five integrations**
 
     ---
 
-    Add `?_redline=profile` to a URL. pyinstrument samples that one request, async-safe, and
-    the UI draws it. Export speedscope JSON.
-
-    [:octicons-arrow-right-24: Flamegraphs](flamegraphs.md)
-
--   :material-keyboard-outline:{ .lg .middle } **A fast, friendly UI**
-
-    ---
-
-    Command palette, live mode, open-in-editor links, copy as cURL or HTTPie, replay,
-    compare two requests, offline snapshots, a floating badge and a `Server-Timing` header.
-
-    [:octicons-arrow-right-24: The UI](the-ui.md)
-
--   :material-shield-lock-outline:{ .lg .middle } **Redacted, and locked down by default**
-
-    ---
-
-    `Authorization`, cookies and password, token and card keys are masked before anything is
-    stored. One access policy for every framework: local, token, basic, your own, plus IP
-    allow-lists, read-only mode and a production preset.
-
-    [:octicons-arrow-right-24: Security](security.md) · [Access control](access-control.md)
-
--   :material-flash-outline:{ .lg .middle } **Async-correct**
-
-    ---
-
-    State lives in `contextvars`: concurrent requests on one event loop, `sync_to_async` and
-    Starlette's threadpool all attribute to the right request.
-
-    [:octicons-arrow-right-24: How it works](how-it-works.md#why-contextvars)
-
--   :material-puzzle-outline:{ .lg .middle } **Integrations and extension points**
-
-    ---
-
+    Django (with Ninja and DRF), FastAPI, Flask, Litestar and a framework-free core, plus
     `requests`, httpx, Redis, asyncpg, psycopg, Marshmallow, Strawberry and Graphene hooks.
-    Plug in your own `FixSuggester` or a custom `Store`.
 
     [:octicons-arrow-right-24: Integrations](integrations.md) · [Extending](extending.md)
 
+-   :material-shield-lock-outline:{ .lg .middle } **Redacted and locked down**
+
+    ---
+
+    Secrets are masked before anything is stored. One access policy for every framework,
+    read-only mode and a production preset. State lives in `contextvars`, so async is
+    attributed correctly.
+
+    [:octicons-arrow-right-24: Security](security.md) · [Access control](access-control.md)
+
 </div>
 
-## Five frameworks, one tool
+## Five integrations, one tool
 
 | Framework | Package | Read |
 |---|---|---|
@@ -350,71 +302,73 @@ tools change: check theirs.
 Flamegraphs need the `profile` extra (pyinstrument); the load tester needs the `load` extra
 (httpx). There is no Node.js requirement: the web UI ships prebuilt inside `redline-core`.
 
-## Map of the documentation
+## All pages
 
-**Get started and guide**
+??? abstract "Every page, with what is in it"
 
-| Page | What is in it |
-|---|---|
-| [Getting started](getting-started.md) | Install, mount, first look, for all four frameworks |
-| [How it works](how-it-works.md) | Recording, `contextvars`, sampling, storage and the overhead model |
-| [The UI](the-ui.md) | A tour of every page, filter, shortcut and action |
-| [Server-Timing and the badge](server-timing-badge.md) | The header and the floating pill |
-| [N+1 detection](n-plus-one.md) | Detection rules, thresholds, fix suggestions with real diffs |
-| [EXPLAIN](explain.md) | Vendors, safety, findings, index suggestions |
-| [Flamegraphs](flamegraphs.md) | Opt-in profiling, modes, speedscope export |
-| [Custom spans](custom-spans.md) | Timing your own code with `redline_core.span` |
-| [Issues and endpoints](issues-and-endpoints.md) | Aggregates, percentiles, issue deduplication |
+    **Get started and guide**
 
-**Analysis**
+    | Page | What is in it |
+    |---|---|
+    | [Getting started](getting-started.md) | Install, mount, first look, for all four frameworks |
+    | [How it works](how-it-works.md) | Recording, `contextvars`, sampling, storage and the overhead model |
+    | [The UI](the-ui.md) | A tour of every page, filter, shortcut and action |
+    | [Server-Timing and the badge](server-timing-badge.md) | The header and the floating pill |
+    | [N+1 detection](n-plus-one.md) | Detection rules, thresholds, fix suggestions with real diffs |
+    | [EXPLAIN](explain.md) | Vendors, safety, findings, index suggestions |
+    | [Flamegraphs](flamegraphs.md) | Opt-in profiling, modes, speedscope export |
+    | [Custom spans](custom-spans.md) | Timing your own code with `redline_core.span` |
+    | [Issues and endpoints](issues-and-endpoints.md) | Aggregates, percentiles, issue deduplication |
 
-| Page | What is in it |
-|---|---|
-| [Detectors overview](detectors.md) | Every issue kind, threshold and span kind |
-| [Blocking in async](async-blocking.md) | The event-loop lag monitor |
-| [Transactions and locks](transactions.md) | Long transactions, HTTP in a transaction, pool waits |
-| [Large and unbounded results](result-size.md) | Rows, missing `LIMIT`, `len(qs)` vs `.exists()` |
-| [Slow serializers](serializers.md) | DRF, Pydantic and Marshmallow |
-| [External calls](external-calls.md) | Slow, duplicated and retried outbound HTTP |
-| [Cache efficiency](cache-efficiency.md) | Hit rate, unread writes, stampedes |
-| [Logs and exceptions](logs-and-exceptions.md) | Logs per request, locals in exceptions |
-| [Database](database.md) | SQL search, index advisor, unused indexes |
-| [Static N+1 scan](static-scan.md) | Find N+1s in templates and serializers without running code |
-| [GraphQL](graphql.md) | Resolver spans and N+1 over GraphQL |
+    **Analysis**
 
-**Load and history**
+    | Page | What is in it |
+    |---|---|
+    | [Detectors overview](detectors.md) | Every issue kind, threshold and span kind |
+    | [Blocking in async](async-blocking.md) | The event-loop lag monitor |
+    | [Transactions and locks](transactions.md) | Long transactions, HTTP in a transaction, pool waits |
+    | [Large and unbounded results](result-size.md) | Rows, missing `LIMIT`, `len(qs)` vs `.exists()` |
+    | [Slow serializers](serializers.md) | DRF, Pydantic and Marshmallow |
+    | [External calls](external-calls.md) | Slow, duplicated and retried outbound HTTP |
+    | [Cache efficiency](cache-efficiency.md) | Hit rate, unread writes, stampedes |
+    | [Logs and exceptions](logs-and-exceptions.md) | Logs per request, locals in exceptions |
+    | [Database](database.md) | SQL search, index advisor, unused indexes |
+    | [Static N+1 scan](static-scan.md) | Find N+1s in templates and serializers without running code |
+    | [GraphQL](graphql.md) | Resolver spans and N+1 over GraphQL |
 
-| Page | What is in it |
-|---|---|
-| [Load testing](load-testing.md) | Open model, the knee, scenarios, CLI, CI, bottlenecks |
-| [History and releases](history.md) | Rollups, release compare, regressions, retention |
+    **Load and history**
 
-**Integrations**
+    | Page | What is in it |
+    |---|---|
+    | [Load testing](load-testing.md) | Open model, the knee, scenarios, CLI, CI, bottlenecks |
+    | [History and releases](history.md) | Rollups, release compare, regressions, retention |
 
-| Page | What is in it |
-|---|---|
-| [Django](django.md), [Django Ninja](django-ninja.md) | Middleware, URLs, settings, permission, CSRF, hooks, checks, commands, DRF |
-| [FastAPI](fastapi.md) | `install()`, engines, auth dependencies, CSRF, lifespan |
-| [Flask](flask.md) | `Redline(app)`, Flask-SQLAlchemy, factories, `flask redline` |
-| [Litestar](litestar.md) | `RedlinePlugin`, engines, guards |
-| [Integrations](integrations.md) | requests, httpx, Redis, asyncpg, psycopg, Marshmallow |
-| [Extending](extending.md) | `FixSuggester` and the `Store` protocol |
+    **Integrations**
 
-**Operations and reference**
+    | Page | What is in it |
+    |---|---|
+    | [Django](django.md), [Django Ninja](django-ninja.md) | Middleware, URLs, settings, permission, CSRF, hooks, checks, commands, DRF |
+    | [FastAPI](fastapi.md) | `install()`, engines, auth dependencies, CSRF, lifespan |
+    | [Flask](flask.md) | `Redline(app)`, Flask-SQLAlchemy, factories, `flask redline` |
+    | [Litestar](litestar.md) | `RedlinePlugin`, engines, guards |
+    | [Integrations](integrations.md) | requests, httpx, Redis, asyncpg, psycopg, Marshmallow |
+    | [Extending](extending.md) | `FixSuggester` and the `Store` protocol |
 
-| Page | What is in it |
-|---|---|
-| [Configuration](configuration.md) | Presets, `redline.toml`, environment variables, precedence |
-| [Access control](access-control.md) | Policies and recipes for VPNs, proxies, Kubernetes |
-| [Production](production.md) | The production preset, sampling, retention, what not to do |
-| [Security](security.md) | Redaction, what is stored, exposure, load-from-UI safety |
-| [Storage](storage.md) | The SQLite store, schema v2, the writer thread, retention |
-| [Performance and overhead](performance.md) | The cost model and the measured overhead |
-| [Settings reference](settings.md) | Every setting, its type, default and effect |
-| [The HTTP API](http-api.md) | Every endpoint with examples |
-| [Command line](cli.md) | `redline` and the framework commands |
-| [Roadmap](roadmap.md) | What shipped in 0.2 and what comes next |
-| [FAQ](faq.md) | How finished it is, how it differs from other tools |
+    **Operations and reference**
+
+    | Page | What is in it |
+    |---|---|
+    | [Configuration](configuration.md) | Presets, `redline.toml`, environment variables, precedence |
+    | [Access control](access-control.md) | Policies and recipes for VPNs, proxies, Kubernetes |
+    | [Production](production.md) | The production preset, sampling, retention, what not to do |
+    | [Security](security.md) | Redaction, what is stored, exposure, load-from-UI safety |
+    | [Storage](storage.md) | The SQLite store, schema v2, the writer thread, retention |
+    | [Performance and overhead](performance.md) | The cost model and the measured overhead |
+    | [Settings reference](settings.md) | Every setting, its type, default and effect |
+    | [The HTTP API](http-api.md) | Every endpoint with examples |
+    | [Command line](cli.md) | `redline` and the framework commands |
+    | [Roadmap](roadmap.md) | What shipped in 0.2 and what comes next |
+    | [FAQ](faq.md) | How finished it is, how it differs from other tools |
 
 ## Licence
 
