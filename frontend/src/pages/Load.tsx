@@ -4,7 +4,8 @@ import { api } from '../api'
 import { apiLoad } from '../apiLoad'
 import { ago, ms, pct } from '../lib/format'
 import { useNow } from '../lib/hooks'
-import type { Bottleneck, Meta, RunItem } from '../types'
+import { feature, isReadOnly } from '../lib/meta'
+import type { Bottleneck, RunItem } from '../types'
 import NewRunForm, { CliHint } from '../components/NewRunForm'
 import RunChart from '../components/RunChart'
 import Sparkline from '../components/Sparkline'
@@ -33,8 +34,7 @@ const Verdict = ({ v }: { v: string | null | undefined }) => (v ? <Pill tone={ve
 /** True when the server lets the UI start runs (`meta.features.load_from_ui`). */
 function useLoadFromUi() {
   const m = useAsync(() => api.meta(), [])
-  const f = (m.data as (Meta & { features?: { load_from_ui?: boolean } }) | undefined)?.features
-  return { ready: !m.loading, enabled: !!f?.load_from_ui }
+  return { ready: !m.loading, enabled: feature(m.data, 'load_from_ui') && !isReadOnly(m.data), readOnly: isReadOnly(m.data), loadOff: m.data ? !feature(m.data, 'load') : false }
 }
 
 /** Calls `fn` every `interval` ms while `active`. */
@@ -50,6 +50,8 @@ function usePolling(fn: () => void, active: boolean, interval = POLL_MS) {
 
 export default function Load() {
   const { id } = useParams()
+  const feat = useLoadFromUi()
+  if (feat.loadOff) return <div className="card"><Empty title="Load testing is disabled"><p>The <span className="mono">load</span> feature is switched off on this server. Enable it in the Redline configuration to use this page.</p></Empty></div>
   return id ? <RunDetail id={id} /> : <RunList />
 }
 
@@ -69,7 +71,7 @@ function RunList() {
         {feat.enabled && !form && <button className="btn btn-accent" onClick={() => setForm(true)}><Icon d={I.play} size={12} />New run</button>}
       </div>
       {form && feat.enabled && <NewRunForm onCancel={() => setForm(false)} onStarted={rid => { setForm(false); if (rid) nav(`/load/${rid}`); else d.reload() }} />}
-      {feat.ready && !feat.enabled && <CliHint />}
+      {feat.ready && !feat.enabled && !feat.readOnly && <CliHint />}
       {d.error ? <LoadError error={d.error} what="load testing" onRetry={d.reload} /> : d.loading && !d.data ? <Spinner /> : items.length === 0 ? (
         <div className="card"><Empty title="No load runs yet"><p>Runs started from the CLI or (when enabled) this page are stored here with a per-step chart and bottleneck analysis.</p></Empty></div>
       ) : (
@@ -127,7 +129,7 @@ function RunDetail({ id }: { id: string }) {
         <span className="text-muted text-[12px]" title={new Date(run.created_at * 1000).toLocaleString()}>started {ago(run.created_at, now)}</span>
         <span className="flex-1" />
         {running && feat.enabled && <button className="btn" disabled={busy} onClick={() => act(() => apiLoad.stopRun(id), d.reload)}><Icon d={I.pause} size={12} />Stop</button>}
-        {!running && <button className="btn" disabled={busy} onClick={() => setConfirm(true)}><Icon d={I.trash} size={12} />Delete</button>}
+        {!running && !feat.readOnly && <button className="btn" disabled={busy} onClick={() => setConfirm(true)}><Icon d={I.trash} size={12} />Delete</button>}
       </div>
       {actErr && <div className="text-bad text-[12px]" role="alert">{actErr}</div>}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">

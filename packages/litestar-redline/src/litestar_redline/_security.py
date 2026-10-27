@@ -1,9 +1,13 @@
 """Access control for the Redline UI and API.
 
-* :func:`local_only` – the default when ``RedlinePlugin(guards=None)``: only loopback
-  clients, addressing the server by a loopback **name** (see the function), get in.
-  :func:`loopback_guard` builds a variant that also accepts other ``Host`` names.
-* :func:`csrf_guard` – always on for the API's mutating methods (see the function).
+Every Redline route runs :func:`redline_guard` first: the core access gate
+(:class:`redline_core.access.Access`, ``CONTRACT.md`` §18) with the policy of the
+``access`` setting (``local`` by default). ``RedlinePlugin(guards=[...])`` implies
+``access="framework"``: your guards decide (Litestar runs them after this one).
+
+* :func:`local_only` / :func:`loopback_guard` – loopback clients addressing a loopback
+  ``Host`` (against DNS rebinding), for explicit use as guards.
+* :func:`csrf_guard` – the Origin / ``Sec-Fetch-Site`` check (the gate applies it anyway).
 * :class:`RedlineHTTPError` – what the guards raise; the Redline router renders it (and
   any ``HTTPException`` from your own auth dependencies) in the API's error shape,
   ``{"error": {"code": ..., "message": ...}}``.
@@ -11,13 +15,21 @@
 
 from __future__ import annotations
 
-import ipaddress
 from collections.abc import Awaitable, Callable, Iterable
 from urllib.parse import urlsplit
 
 from litestar.connection import ASGIConnection
 from litestar.exceptions import HTTPException
 from litestar.handlers.base import BaseRouteHandler
+
+from redline_core.access import (
+    LOCAL_HOST_NAMES,
+    Access,
+    Decision,
+    RequestInfo,
+    is_local_host,
+    is_loopback,
+)
 
 __all__ = [
     "LOCAL_HOST_NAMES",
@@ -26,13 +38,12 @@ __all__ = [
     "is_local_host_header",
     "local_only",
     "loopback_guard",
+    "redline_guard",
+    "request_info",
 ]
 
 _Guard = Callable[[ASGIConnection, BaseRouteHandler], Awaitable[None]]
 _SAFE = {"GET", "HEAD", "OPTIONS"}
-#: ``Host`` names the loopback default accepts (besides loopback IP literals and
-#: ``*.localhost``, which RFC 6761 reserves for loopback).
-LOCAL_HOST_NAMES = frozenset({"localhost"})
 _TESTCLIENT = "testclient"  # Litestar's TestClient reports this as the client address
 
 
@@ -40,62 +51,68 @@ class RedlineHTTPError(HTTPException):
     """An ``HTTPException`` with a machine-readable ``code`` for the error shape."""
 
     def __init__(
-        self, status_code: int, code: str, message: str, headers: dict[str, str] | None = None
+        self,
+        status_code: int,
+        code: str,
+        message: str,
+        headers: dict[str, str] | None = None,
+        extra: dict | None = None,
     ) -> None:
         super().__init__(status_code=status_code, detail=message, headers=headers)
         self.code = code
         self.message = message
+        self.extra = dict(extra or {})
+
+    @classmethod
+    def from_decision(cls, decision: Decision) -> RedlineHTTPError:
+        return cls(
+            decision.status,
+            decision.code,
+            decision.message,
+            dict(decision.headers) or None,
+            dict(decision.extra),
+        )
 
 
 def _is_loopback(host: str | None) -> bool:
     """Whether a *client address* is loopback (``None`` is a unix socket)."""
-    if host is None:
-        return True
-    if host in ("localhost", _TESTCLIENT):
-        return True
-    try:
-        addr = ipaddress.ip_address(host)
-    except ValueError:
-        return False
-    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
-        addr = addr.ipv4_mapped
-    return addr.is_loopback
-
-
-def _host_name(header: str) -> str:
-    """``Host`` header -> lower-cased host without port (``[::1]:8000`` -> ``::1``)."""
-    host = header.strip().lower()
-    if host.startswith("["):
-        end = host.find("]")
-        return host[1:end] if end != -1 else host
-    if host.count(":") == 1:
-        host = host.rsplit(":", 1)[0]
-    return host.rstrip(".")
+    return host == _TESTCLIENT or is_loopback(host)
 
 
 def is_local_host_header(header: str | None, extra: Iterable[str] = ()) -> bool:
-    """Whether a ``Host`` header names this machine's loopback interface.
+    """Whether a ``Host`` header names this machine's loopback interface (see
+    :func:`redline_core.access.is_local_host`)."""
+    return is_local_host(header, extra)
 
-    Accepted: ``localhost`` and ``*.localhost``, loopback IP literals (``127.0.0.1``,
-    ``[::1]``), with any port – plus the names in ``extra``. A missing ``Host`` (HTTP/1.0,
-    raw ASGI) is accepted, since a browser always sends one.
-    """
-    if header is None:
-        return True
-    name = _host_name(header)
-    if not name:
-        return True
-    if name in LOCAL_HOST_NAMES or name.endswith(".localhost"):
-        return True
-    if name in {e.strip().lower() for e in extra}:
-        return True
-    try:
-        addr = ipaddress.ip_address(name)
-    except ValueError:
-        return False
-    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
-        addr = addr.ipv4_mapped
-    return addr.is_loopback
+
+def request_info(connection: ASGIConnection, mount: str) -> RequestInfo:
+    """The framework-neutral description of a request under ``mount`` (e.g. ``/_redline``)."""
+    scope = connection.scope
+    root = scope.get("root_path", "") or ""
+    path = scope.get("path", "")
+    if root and path.startswith(root + "/"):
+        path = path[len(root) :]
+    rel = path[len(mount) :] if path.startswith(mount) else path
+    host = connection.client.host if connection.client else None
+    return RequestInfo.build(
+        method=scope.get("method", "GET"),
+        path=rel.lstrip("/"),
+        client_ip="127.0.0.1" if host == _TESTCLIENT else host,
+        headers=scope.get("headers", []),
+        scheme=connection.url.scheme,
+        mount=f"{root.rstrip('/')}{mount}",
+    )
+
+
+def redline_guard(access: Access, mount: str) -> _Guard:
+    """The guard every Redline route runs first: the core access check."""
+
+    async def guard(connection: ASGIConnection, _handler: BaseRouteHandler) -> None:
+        decision = access.check(request_info(connection, mount), framework_ok=lambda: True)
+        if not decision.allowed:
+            raise RedlineHTTPError.from_decision(decision)
+
+    return guard
 
 
 def loopback_guard(*, allowed_hosts: Iterable[str] = ()) -> _Guard:
@@ -150,7 +167,7 @@ async def csrf_guard(request: ASGIConnection, _handler: BaseRouteHandler) -> Non
     """
     if request.scope["method"] in _SAFE:
         return
-    if request.headers.get("sec-fetch-site") == "cross-site":
+    if request.headers.get("sec-fetch-site") in ("cross-site", "same-site"):
         raise RedlineHTTPError(403, "csrf_failed", "Cross-site request blocked.")
     origin = request.headers.get("origin")
     if origin is None:

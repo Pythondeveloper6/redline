@@ -61,7 +61,7 @@ def _badge(text: str) -> dict | None:
 
 
 def test_server_timing_header(make_env, tmp_path):
-    env = make_env()
+    env = make_env(settings={"server_timing": True})
     _add_pages(env.app, tmp_path)
     with TestClient(env.app) as c:
         r = c.get("/orders/1")
@@ -76,6 +76,14 @@ def test_server_timing_off(make_env):
     env = make_env(settings={"server_timing": False})
     with TestClient(env.app) as c:
         assert "server-timing" not in c.get("/orders/1").headers
+
+
+def test_server_timing_auto_follows_app_debug(make_env):
+    env = make_env()  # "auto": only in debug mode (it is a side channel)
+    with TestClient(env.app) as c:
+        assert "server-timing" not in c.get("/orders/1").headers
+        env.app.debug = True
+        assert "server-timing" in c.get("/orders/1").headers
 
 
 def test_badge_injected_in_html(make_env, tmp_path):

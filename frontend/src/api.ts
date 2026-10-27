@@ -1,14 +1,34 @@
-import type { CacheStat, CompareResult, EndpointStats, ExplainResult, ExternalStat, IndexAdvice, IssueGroup, Meta, Page, Speedscope, SqlStat, Trace, TraceFilters } from './types'
+import type { CacheStat, ConfigResponse, LoginBody, CompareResult, EndpointStats, ExplainResult, ExternalStat, IndexAdvice, IssueGroup, Meta, Page, Speedscope, SqlStat, Trace, TraceFilters } from './types'
 import { getSnapshot } from './lib/snapshot'
 
 export class ApiError extends Error {
   status: number
   code: string
-  constructor(status: number, code: string, message: string) {
+  /** Seconds to wait before retrying (429 `Retry-After`). */
+  retryAfter?: number
+  constructor(status: number, code: string, message: string, retryAfter?: number) {
     super(message)
     this.status = status
     this.code = code
+    this.retryAfter = retryAfter
   }
+}
+
+// ---- Login gate -------------------------------------------------------------
+// Any API call answering 401 `login_required` flips this store; App.tsx subscribes
+// (useSyncExternalStore) and renders the full-page Login screen instead of the Shell.
+export type LoginKind = 'token' | 'basic'
+let loginKind: LoginKind | null = null
+const loginListeners = new Set<() => void>()
+export function getLoginRequired(): LoginKind | null { return loginKind }
+export function subscribeLoginRequired(cb: () => void) {
+  loginListeners.add(cb)
+  return () => { loginListeners.delete(cb) }
+}
+function setLoginRequired(kind: LoginKind) {
+  if (loginKind === kind) return
+  loginKind = kind
+  loginListeners.forEach(cb => cb())
 }
 
 type Mock = (method: string, url: string, body: unknown) => Promise<{ status: number; json: unknown }>
@@ -66,7 +86,7 @@ function fromSnapshot(method: string, url: string): { status: number; json: any 
   return err(404, 'snapshot', 'Not available in an offline snapshot.')
 }
 
-async function raw(method: string, url: string, body?: unknown): Promise<{ status: number; json: any }> {
+async function raw(method: string, url: string, body?: unknown): Promise<{ status: number; json: any; retryAfter?: number }> {
   if (getSnapshot()) return fromSnapshot(method, url)
   if (import.meta.env.DEV) {
     if (!mockReady) mockReady = wantsMock() ? initMock(true) : Promise.resolve()
@@ -77,7 +97,7 @@ async function raw(method: string, url: string, body?: unknown): Promise<{ statu
   try {
     res = await fetch(url, {
       method,
-      headers: { ...(body ? { 'Content-Type': 'application/json' } : {}), ...csrfHeaders(method) },
+      headers: { 'X-Redline-UI': '1', ...(body ? { 'Content-Type': 'application/json' } : {}), ...csrfHeaders(method) },
       credentials: 'same-origin',
       body: body ? JSON.stringify(body) : undefined,
     })
@@ -90,17 +110,19 @@ async function raw(method: string, url: string, body?: unknown): Promise<{ statu
     if (import.meta.env.DEV) { await initMock(false); return mock!(method, url, body) }
     throw new ApiError(res.status, 'bad_response', 'Unexpected response from the Redline API.')
   }
-  return { status: res.status, json: await res.json() }
+  const ra = Number(res.headers.get('retry-after'))
+  return { status: res.status, json: await res.json(), retryAfter: Number.isFinite(ra) && ra > 0 ? ra : undefined }
 }
 
 export async function call<T>(method: string, url: string, body?: unknown): Promise<T> {
-  const { status, json } = await raw(method, url, body)
+  const { status, json, retryAfter } = await raw(method, url, body)
   if (status >= 400) {
     const e = json?.error
+    if (status === 401 && e?.code === 'login_required') setLoginRequired(e.login === 'basic' ? 'basic' : 'token')
     // Redline answers {"error": {code, message}}; anything else (a proxy, a foreign
     // framework error) may use {"detail": "..."}.
     const detail = typeof json?.detail === 'string' ? json.detail : undefined
-    throw new ApiError(status, e?.code ?? (status === 401 ? 'unauthorized' : status === 403 ? 'forbidden' : 'error'), e?.message ?? detail ?? `Request failed (${status})`)
+    throw new ApiError(status, e?.code ?? (status === 401 ? 'unauthorized' : status === 403 ? 'forbidden' : 'error'), e?.message ?? detail ?? `Request failed (${status})`, retryAfter)
   }
   return json as T
 }
@@ -125,6 +147,9 @@ export const api = {
   compare: (a: string, b: string) => call<CompareResult>('GET', './api/compare' + qs({ a, b })),
   explain: (trace_id: string, span_id: string, analyze = false) =>
     call<ExplainResult>('POST', './api/explain', { trace_id, span_id, analyze }),
+  config: () => call<ConfigResponse>('GET', './api/config'),
+  login: (body: LoginBody) => call<{ ok: boolean; expires_at: number }>('POST', './api/login', body),
+  logout: () => call<{ ok: boolean }>('POST', './api/logout', {}),
   clear: () => call<{ deleted: number }>('DELETE', './api/traces'),
   sql: (p: { q?: string; window: string; limit?: number }) => call<{ items: SqlStat[] }>('GET', './api/sql' + qs(p)),
   indexes: (window: string) => call<IndexAdvice>('GET', './api/indexes' + qs({ window })),

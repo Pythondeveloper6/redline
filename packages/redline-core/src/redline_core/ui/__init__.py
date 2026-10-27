@@ -37,6 +37,7 @@ __all__ = [
     "index_html",
     "inject_badge",
     "is_built",
+    "server_timing_enabled",
     "static_dir",
 ]
 
@@ -110,6 +111,16 @@ def badge_enabled(settings: Settings, debug: bool) -> bool:
     if settings.badge == "auto":
         return bool(debug)
     return bool(settings.badge)
+
+
+def server_timing_enabled(settings: Settings, debug: bool) -> bool:
+    """Whether recorded responses get ``Server-Timing``: ``True``/``False`` as given,
+    ``"auto"`` = ``debug`` (it tells any client the trace id and query count/time)."""
+    if not settings.enabled:
+        return False
+    if settings.server_timing == "auto":
+        return bool(debug)
+    return bool(settings.server_timing)
 
 
 def csp_allows_badge(csp: str | None) -> bool:

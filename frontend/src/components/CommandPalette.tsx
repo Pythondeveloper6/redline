@@ -4,12 +4,13 @@ import { api } from '../api'
 import { ago, ms } from '../lib/format'
 import { fuzzyScore } from '../lib/fuzzy'
 import { getRoutes } from '../lib/routes'
-import type { EndpointStats, IssueGroup, TraceSummary } from '../types'
+import { feature, logout } from '../lib/meta'
+import type { EndpointStats, IssueGroup, Meta, TraceSummary } from '../types'
 import { Modal } from './Modal'
 import { I, Icon, Kbd, Status } from './ui'
 
-type Group = 'Pages' | 'Requests' | 'Endpoints' | 'Issues'
-interface Item { id: string; group: Group; label: string; hint?: string; extra?: string; to: string; status?: number }
+type Group = 'Pages' | 'Actions' | 'Requests' | 'Endpoints' | 'Issues'
+interface Item { id: string; group: Group; label: string; hint?: string; extra?: string; to: string; status?: number; run?: () => void }
 
 interface Data { traces: TraceSummary[]; endpoints: EndpointStats[]; issues: IssueGroup[] }
 let cache: { at: number; data: Data } | null = null
@@ -26,10 +27,10 @@ async function loadData(): Promise<Data> {
   return data
 }
 
-const GROUP_ORDER: Group[] = ['Pages', 'Requests', 'Endpoints', 'Issues']
+const GROUP_ORDER: Group[] = ['Pages', 'Actions', 'Requests', 'Endpoints', 'Issues']
 const PER_GROUP = 8
 
-export default function CommandPalette({ open, onClose }: { open: boolean; onClose: () => void }) {
+export default function CommandPalette({ open, onClose, meta }: { open: boolean; onClose: () => void; meta?: Meta }) {
   const nav = useNavigate()
   const [q, setQ] = useState('')
   const [data, setData] = useState<Data | null>(cache?.data ?? null)
@@ -45,7 +46,8 @@ export default function CommandPalette({ open, onClose }: { open: boolean; onClo
   }, [open])
 
   const all = useMemo<Item[]>(() => {
-    const items: Item[] = getRoutes().map(r => ({ id: 'p' + r.path, group: 'Pages', label: r.label, hint: r.hint, extra: r.keywords, to: r.path }))
+    const items: Item[] = getRoutes().filter(r => r.path !== '/load' || feature(meta, 'load')).map(r => ({ id: 'p' + r.path, group: 'Pages', label: r.label, hint: r.hint, extra: r.keywords, to: r.path }))
+    if (meta?.access?.login) items.push({ id: 'a-logout', group: 'Actions', label: 'Log out', hint: 'End this session', extra: 'sign out logout', to: '', run: logout })
     for (const t of data?.traces ?? []) items.push({
       id: 't' + t.id, group: 'Requests', label: `${t.method} ${t.path}`, status: t.status,
       hint: `${ms(t.duration_ms)} · ${t.query_count} queries · ${ago(t.started_at)}`, extra: `${t.route ?? ''} ${t.view ?? ''} ${t.status}`, to: '/requests/' + t.id,
@@ -59,7 +61,7 @@ export default function CommandPalette({ open, onClose }: { open: boolean; onClo
       extra: g.routes.join(' '), to: `/requests/${g.sample_trace_id}?tab=issues`,
     })
     return items
-  }, [data])
+  }, [data, meta])
 
   const results = useMemo<Item[]>(() => {
     const query = q.trim()
@@ -81,7 +83,7 @@ export default function CommandPalette({ open, onClose }: { open: boolean; onClo
   useEffect(() => { setActive(0) }, [q])
   useEffect(() => { listRef.current?.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: 'nearest' }) }, [active, results])
 
-  const go = (it: Item | undefined) => { if (!it) return; onClose(); nav(it.to) }
+  const go = (it: Item | undefined) => { if (!it) return; onClose(); if (it.run) it.run(); else nav(it.to) }
   const onKey = (e: React.KeyboardEvent) => {
     if (e.key === 'ArrowDown') { e.preventDefault(); setActive(a => Math.min(results.length - 1, a + 1)) }
     else if (e.key === 'ArrowUp') { e.preventDefault(); setActive(a => Math.max(0, a - 1)) }
@@ -112,7 +114,7 @@ export default function CommandPalette({ open, onClose }: { open: boolean; onClo
               <div id={'pal-' + it.id} role="option" aria-selected={i === active} onMouseMove={() => i !== active && setActive(i)} onClick={() => go(it)}
                 className={`mx-1 px-2.5 py-1.5 rounded-md cursor-pointer flex items-center gap-2 ${i === active ? 'bg-accent/10 text-ink' : 'text-ink'}`}>
                 {it.status != null && <Status code={it.status} />}
-                <span className={`flex-1 min-w-0 truncate ${it.group === 'Pages' ? 'font-medium' : 'mono text-[12px]'}`}>{it.label}</span>
+                <span className={`flex-1 min-w-0 truncate ${it.group === 'Pages' || it.group === 'Actions' ? 'font-medium' : 'mono text-[12px]'}`}>{it.label}</span>
                 {it.hint && <span className="hidden sm:block text-[11px] text-muted truncate max-w-[45%] num">{it.hint}</span>}
               </div>
             </div>

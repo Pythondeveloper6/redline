@@ -35,9 +35,11 @@ from collections import defaultdict
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlsplit
 
 from . import __version__, ui
-from .conf import Settings, editor_url_template, resolve_release
+from .access import is_local_host, route_policy
+from .conf import FEATURES, Settings, editor_url_template, resolve_release
 from .explain import ExplainError, ExplainExecutor, run_explain
 from .index_advisor import advise
 from .model import ISSUE_KINDS, Trace
@@ -116,9 +118,15 @@ class RedlineAPI:
         explain_executor: ExecutorFactory | None = None,
         run_launcher: RunLauncher | None = None,
         run_stopper: RunStopper | None = None,
+        config: Any = None,
+        access: Any = None,
     ) -> None:
         self.store = store
         self.settings = settings or Settings()
+        #: :class:`~redline_core.config.ResolvedConfig` behind ``GET api/config``.
+        self.config = config
+        #: :class:`~redline_core.access.Access` (meta's ``access`` block, runtime warnings).
+        self.access = access
         self.framework = framework
         self.explain_executor = explain_executor
         self.run_launcher = run_launcher
@@ -143,6 +151,9 @@ class RedlineAPI:
         method = method.upper()
         path = path.strip("/")
         params = params or {}
+        refusal = route_policy(method, path, self.settings)
+        if refusal is not None:  # also enforced by the adapters' access check
+            return refusal.status, refusal.body()
         try:
             return self._route(method, path, params, body, base_url)
         except (_NotSupported, NotImplementedError) as exc:
@@ -200,6 +211,8 @@ class RedlineAPI:
     ) -> Response:
         if path == "api/meta":
             return self.meta() if method == "GET" else _not_allowed()
+        if path == "api/config":
+            return self.effective_config() if method == "GET" else _not_allowed()
         if path == "api/traces":
             if method == "GET":
                 return self.list_traces(params)
@@ -233,7 +246,8 @@ class RedlineAPI:
             "editor": self.settings.editor,
             "editor_url_template": editor_url_template(self.settings),
             "release": resolve_release(self.settings),
-            "features": {"load_from_ui": self.settings.load_from_ui, "sse": True, "snapshot": True},
+            "features": self._features(),
+            "access": self._access_meta(),
             "settings": settings,
             "storage": {
                 "rows": self.store.count(),
@@ -241,6 +255,50 @@ class RedlineAPI:
                 "dropped": getattr(self.store, "dropped", 0),
             },
         }
+
+    def _features(self) -> dict[str, bool]:
+        s = self.settings
+        features = {name: s.feature(name) for name in FEATURES}
+        features["load_from_ui"] = s.load_from_ui and s.feature("load") and not s.read_only
+        return features
+
+    def _access_meta(self) -> dict[str, Any]:
+        if self.access is not None:
+            return self.access.meta()
+        s = self.settings
+        login = s.access if s.access in ("token", "basic") else None
+        return {"policy": s.access, "login": login, "read_only": s.read_only, "preset": s.preset}
+
+    def effective_config(self) -> Response:
+        """``GET api/config``: effective settings (secrets as ``"***"``), sources, warnings."""
+        if self.config is None:
+            from .config import ResolvedConfig, config_warnings
+
+            sources = dict.fromkeys(Settings.field_names(), "framework")
+            config = ResolvedConfig(
+                self.settings, sources, warnings=tuple(config_warnings(self.settings))
+            )
+        else:
+            config = self.config
+        extra = self.access.runtime_warnings() if self.access is not None else []
+        return 200, config.public(extra)
+
+    def _visible(self, data: dict[str, Any]) -> dict[str, Any]:
+        """Drop logs/locals from a trace dict when those features are switched off."""
+        if not self.settings.feature("logs"):
+            data["logs"] = []
+            data["logs_dropped"] = 0
+        if not self.settings.feature("locals") and isinstance(data.get("error"), dict):
+            frames = data["error"].get("frames")
+            if isinstance(frames, list):
+                data["error"] = {
+                    **data["error"],
+                    "frames": [
+                        {k: v for k, v in f.items() if k != "locals"} if isinstance(f, dict) else f
+                        for f in frames
+                    ],
+                }
+        return data
 
     def list_traces(self, params: Mapping[str, Any]) -> Response:
         try:
@@ -256,7 +314,7 @@ class RedlineAPI:
         trace = self.store.get(trace_id, include_profile=False)
         if trace is None:
             return error(404, "trace_not_found", f"No trace {trace_id!r}.")
-        data = trace.to_dict(include_profile=False)
+        data = self._visible(trace.to_dict(include_profile=False))
         data["has_profile"] = self.store.has_profile(trace_id)
         return 200, data
 
@@ -301,6 +359,8 @@ class RedlineAPI:
         if not isinstance(trace_id, str) or not isinstance(span_id, str):
             return error(400, "invalid_body", "trace_id and span_id are required strings.")
         analyze = bool(body.get("analyze", False))
+        if analyze and self.settings.read_only:
+            return error(403, "read_only", "This Redline instance is read-only (no ANALYZE).")
         if analyze and not self.settings.explain_analyze:
             return error(
                 403,
@@ -381,9 +441,10 @@ class RedlineAPI:
         trace = self.store.get(trace_id, include_profile=True)
         if trace is None:
             return error(404, "trace_not_found", f"No trace {trace_id!r}.")
-        data = trace.to_dict(include_profile=False)
-        data["has_profile"] = trace.profile is not None
-        page = snapshot_html({"trace": data, "profile": trace.profile})
+        data = self._visible(trace.to_dict(include_profile=False))
+        profile = trace.profile if self.settings.feature("profile") else None
+        data["has_profile"] = profile is not None
+        page = snapshot_html({"trace": data, "profile": profile})
         return RawResponse(
             200,
             "text/html; charset=utf-8",
@@ -579,11 +640,35 @@ class RedlineAPI:
             return error(400, "invalid_body", problem)
         if self.run_launcher is None:
             return error(501, "not_supported", "This adapter cannot start load runs.")
+        target = self._run_target(base_url)
+        if target is None:
+            return error(
+                400,
+                "invalid_body",
+                "Cannot tell where to send the load run: the request's Host is not a "
+                "loopback name or one in allowed_hosts. Set the base_url setting (e.g. "
+                "'http://127.0.0.1:8000') to the application's own URL.",
+            )
         try:
-            run_id = self.run_launcher(config, base_url)
+            run_id = self.run_launcher(config, target)
         except ValueError as exc:
             return error(400, "invalid_body", str(exc))
         return 202, {"id": run_id, "name": config["name"], "status": "running"}
+
+    def _run_target(self, derived: str | None) -> str | None:
+        """Where a UI-started run goes: the ``base_url`` setting, else the URL the adapter
+        derived from the request – only when its host is loopback or in ``allowed_hosts``
+        (a ``Host`` header must never aim a load test at another machine)."""
+        if self.settings.base_url:
+            return self.settings.base_url.rstrip("/")
+        if not derived:
+            return None
+        parts = urlsplit(derived)
+        if parts.scheme not in ("http", "https") or not parts.netloc:
+            return None
+        if "@" in parts.netloc or not is_local_host(parts.netloc, self.settings.allowed_hosts):
+            return None
+        return derived.rstrip("/")
 
     def stop_run(self, run_id: str) -> Response:
         get_run = getattr(self.store, "get_run", None)

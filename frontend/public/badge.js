@@ -45,7 +45,7 @@
   // The trace is stored just after the response is sent: retry a few times.
   var started = 0;
   function load(i) {
-    fetch(mount + '/api/traces/' + encodeURIComponent(id), { credentials: 'same-origin' })
+    fetch(mount + '/api/traces/' + encodeURIComponent(id), { credentials: 'same-origin', headers: { 'X-Redline-UI': '1' } })
       .then(function (r) { if (r.status == 404 && i < 3) { setTimeout(load, 700 * (i + 1), i + 1); return; } return r.ok && r.json(); })
       .then(function (t) {
         if (!t) return;

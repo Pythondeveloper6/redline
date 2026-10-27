@@ -46,9 +46,43 @@ export async function mockFetch(method: string, url: string, body: unknown): Pro
       settings: { thresholds: { n_plus_one: 5, slow_query_ms: 100, too_many_queries: 50 }, sampling: { sample_rate: 1 }, profiling_enabled: true, explain_analyze_enabled: false },
       storage: { rows: traces.length, path: '.redline/redline.db' },
       project_root: '/Users/dev/shop', editor: 'vscode', editor_url_template: 'vscode://file/{file}:{line}', release: 'mock-1',
-      features: { load_from_ui: true, sse: true, snapshot: true },
+      features: { load_from_ui: true, sse: true, snapshot: true, explain: true, profile: true, replay: true, load: true, logs: true, locals: true },
+      access: { policy: 'token', login: 'token', read_only: false, preset: 'dev' },
     })
   }
+  if (path === 'api/config') {
+    return ok({
+      preset: 'dev', file: '/Users/dev/shop/redline.toml',
+      settings: {
+        capture_request_body: true, capture_response_body: false, max_body_bytes: 8192, redact_headers: ['authorization', 'cookie'], capture_locals: false,
+        sample_rate: 1, slow_request_ms: 500,
+        n_plus_one_threshold: 5, slow_query_ms: 100, too_many_queries: 50,
+        storage_path: '.redline/redline.db', retention_days: 7,
+        access: 'token', token: '***', basic_users: { admin: '***' }, read_only: false, allowed_hosts: [],
+        features: { explain: true, profile: true, replay: true, load: true, logs: true, locals: true, snapshot: true, sse: true },
+        editor: 'vscode', release: null,
+      },
+      sources: {
+        capture_request_body: 'preset', max_body_bytes: 'default', redact_headers: 'adapter', sample_rate: 'env', slow_request_ms: 'file', n_plus_one_threshold: 'default',
+        slow_query_ms: 'file', storage_path: 'adapter', access: 'env', token: 'file', basic_users: 'default', features: 'preset', editor: 'framework',
+      },
+      groups: {
+        capture: ['capture_request_body', 'capture_response_body', 'max_body_bytes', 'redact_headers', 'capture_locals'],
+        sampling: ['sample_rate', 'slow_request_ms'],
+        detectors: ['n_plus_one_threshold', 'slow_query_ms', 'too_many_queries'],
+        storage: ['storage_path', 'retention_days'],
+        access: ['access', 'token', 'basic_users', 'read_only', 'allowed_hosts'],
+        features: ['features'],
+        other: ['editor', 'release'],
+      },
+      warnings: ["access='local' but the request came through a proxy (X-Forwarded-For present); use token or basic access when exposing Redline."],
+    })
+  }
+  if (path === 'api/login' && method === 'POST') {
+    const b = body as { token?: string }
+    return b?.token === 'redline' ? ok({ ok: true, expires_at: Math.floor(Date.now() / 1000) + 86400 }) : err(401, 'invalid_credentials', 'Invalid access token.')
+  }
+  if (path === 'api/logout' && method === 'POST') return ok({ ok: true })
   if (path === 'api/traces' && method === 'GET') {
     const list = filtered(u.searchParams)
     const limit = Number(u.searchParams.get('limit') ?? 50)

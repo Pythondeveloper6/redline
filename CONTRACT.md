@@ -170,11 +170,12 @@ Implementation: `redline_core.api.RedlineAPI(store, settings, framework=..., exp
 - `factory(db_alias, vendor) -> executor | None`. The `executor(sql, params) -> rows` must run inside a transaction that it **always rolls back**, and must handle its own driver's paramstyle.
 - Error codes (core API unless marked *adapter*):
   - 400: `invalid_filter`, `invalid_window`, `invalid_kind`, `invalid_json`, `invalid_body`, `not_explainable`, `unsupported_vendor` (EXPLAIN on a database that is not PostgreSQL/MySQL/SQLite), `analyze_unsupported` (MySQL)
-  - 401: `unauthorized` (*adapter*, FastAPI: an auth dependency raised 401)
-  - 403: `analyze_disabled`; `forbidden` (*adapter*: Django `PERMISSION` refused, FastAPI `local_only` refused the client address or the `Host` header, or an auth dependency raised 403); `csrf_failed` (*adapter*: Django's CSRF check, FastAPI's Origin / `Sec-Fetch-Site` check on DELETE/POST)
-  - 404: `not_found` (also a missing UI asset), `trace_not_found`, `span_not_found`, `profile_not_found`
+  - 401: `unauthorized` (*adapter*, FastAPI: an auth dependency raised 401); `login_required` (access gate, §18: `token`/`basic` policy and no valid credentials; the error object also has `"login": "token"|"basic"`); `invalid_credentials` (a wrong Bearer token, Basic password or `POST api/login`)
+  - 403: `analyze_disabled`; `forbidden` (access gate: network rules, `framework`/`custom` refusal, `allowed_ips`; or an auth dependency raised 403); `csrf_failed` (access gate's Origin / `Sec-Fetch-Site` check on every state-changing method; Django's own CSRF check too); `read_only` (§18); `open_refused` (`access="open"` without `REDLINE_ALLOW_OPEN=1`)
+  - 404: `not_found` (also a missing UI asset, every URL when `ui_enabled` is off, `POST api/login` without a login policy), `trace_not_found`, `span_not_found`, `profile_not_found`, `feature_disabled` (§18)
   - 405: `method_not_allowed`
   - 422: `explain_failed`
+  - 429: `too_many_requests` (login rate limit; `Retry-After` header)
   - 500: `internal_error`
   - 501: `explain_unavailable`
   - FastAPI maps any other `HTTPException` status from a user dependency to `bad_request` (400), `not_found` (404), `too_many_requests` (429) or `http_error`.
@@ -355,7 +356,7 @@ is set and the title reads `N+1: 24 queries on shop_customer from resolver order
 | max_logs_per_trace | int | 200 |
 | capture_locals | bool | True (redacted by `redact_keys`) |
 | editor | str | "vscode" – one of vscode, cursor, pycharm, idea, sublime, none, or a template containing `{file}` and `{line}` (`{file}` is absolute) |
-| server_timing | bool | True – add a `Server-Timing` header to recorded responses |
+| server_timing | "auto" \| bool | "auto" – add a `Server-Timing` header to recorded responses; `auto` = only in the framework's debug mode (it tells any client the trace id and query count/time, a side channel); the `production` preset sets False. Helper `redline_core.ui.server_timing_enabled(settings, debug)` |
 | badge | "auto" \| bool | "auto" – inject the floating badge into HTML responses; `auto` = on when the framework is in debug mode |
 | release | str \| None | None → auto: env `REDLINE_RELEASE`, else `GIT_SHA`/`SOURCE_VERSION`/`RENDER_GIT_COMMIT`/`HEROKU_SLUG_COMMIT`, else `git rev-parse --short HEAD` in `project_root` (once, 1 s timeout), else None |
 | history_retention_days | int \| None | 90 (rollups/issue index/runs; independent of `max_age_days`) |
@@ -463,8 +464,9 @@ Concrete decisions (v0.2 implementation):
 
 | Method & path | Returns |
 |---|---|
-| `GET api/meta` | adds `project_root`, `editor`, `editor_url_template` (str\|null, with `{file}`/`{line}`), `release`, `features: {load_from_ui, sse, snapshot}` |
+| `GET api/meta` | adds `project_root`, `editor`, `editor_url_template` (str\|null, with `{file}`/`{line}`), `release`, `features: {load_from_ui, sse, snapshot, explain, profile, replay, load, logs, locals}` (§18), `access: {policy, login, read_only, preset}` (§18) |
 | `GET api/traces` | adds filters `sql=<substring>` and `since=<epoch>`, `replay_of=<id>` |
+| `GET api/config` | effective configuration, sources and warnings (§18) |
 | `GET api/stream?since=<epoch>[&after=<seq>]` | **SSE** (adapter-served): `event: trace` with a TraceSummary (plus `seq`) per newly saved trace, in save order; the SSE `id:` is the `seq`. `since` is only the initial position; `after=<seq>` or the `Last-Event-ID` header resumes after that `seq` (and wins over `since`). `: ping` every 15 s, closes after 5 min. Core helper `api.poll(since, last_id, limit=100, after_seq=None) -> list[TraceSummary]` |
 | `GET api/traces/{id}/snapshot` | `text/html` standalone page (bundle inlined, `window.__REDLINE_SNAPSHOT__ = {trace, profile}`). `dispatch` returns a `RawResponse(status, content_type, body: bytes, headers)` for it; adapters send it as-is |
 | `GET api/compare?a=<id>&b=<id>` | `{a: TraceSummary, b: TraceSummary, delta: {duration_ms, query_count, query_ms}, by_kind: {kind: {a_ms, b_ms, a_count, b_count}}, sql: [{fingerprint, sql, a_count, b_count, a_ms, b_ms}], issues: {only_a, only_b, both}}` |
@@ -625,7 +627,7 @@ Concrete decisions (v0.2 implementation):
   body is the app's own (without the badge) in Django/FastAPI/Litestar; Flask records the served body.
 - **badge.js access:** Django serves top-level bundle files without the `PERMISSION` check (the file holds no
   data; the API the badge calls stays guarded); Flask/FastAPI/Litestar serve them behind the same guard as the
-  UI, so a visitor the guard refuses simply gets no badge.
+  UI, so a visitor the guard refuses simply gets no badge. With `token`/`basic` (§18) they are public everywhere.
 - **Server-Timing:** added to every *recorded* response when `server_timing` is on, value
   `TraceBuilder.server_timing()` computed when the response starts; appended (`, `) to an existing
   `Server-Timing` header.
@@ -646,8 +648,8 @@ Concrete decisions (v0.2 implementation):
 - **base_url** (for `POST api/runs`): the app's own origin as seen by the request: `scheme://host[:port]` +
   script root / ASGI `root_path`, no trailing slash (Django `request.scheme` + `get_host()` (`ALLOWED_HOSTS`
   checked) + `SCRIPT_NAME`; Flask `request.root_url`; FastAPI/Litestar `request.base_url`). A `base_url` (and
-  `workers`) in the body is dropped by the core; the run always targets the adapter's `base_url`, and the
-  request already passed the access guard + CSRF check (with the default loopback guard the Host is loopback).
+  `workers`) in the body is dropped by the core; the run targets the `base_url` *setting* when set, else the
+  adapter's `base_url` only when its host is loopback or in `allowed_hosts` (else 400 `invalid_body`, §18).
 - **Run hooks:** `redline_core.load.control.run_hooks(store, settings) -> (launcher, stopper)`; `(None, None)`
   (→ 501) unless `load_from_ui` is on and the store is a `SQLiteStore` on a real file. The launcher calls
   `launch_background(config, base_url, store.path)` and pre-inserts a `running` `Run` row (the child upserts it),
@@ -665,7 +667,7 @@ Concrete decisions (v0.2 implementation):
 | flask-redline (`flask_redline`) | ≥ 3.10 | Flask ≥ 3.0, < 4 | `Redline(app=None, *, engine=None, settings=None, url_prefix="/_redline", permission=None, store=None)` + `init_app(app)`; Flask-SQLAlchemy engines auto-detected; `flask redline clear\|prune\|scan\|scenario` |
 | litestar-redline (`litestar_redline`) | ≥ 3.10 | Litestar ≥ 2.12, < 3 | `RedlinePlugin(settings=None, engine=None, path="/_redline", guards=None, store=None)` |
 
-Flask and Litestar default to the same `local_only` policy as FastAPI (loopback client **and** loopback Host) and the same Origin / `Sec-Fetch-Site` CSRF check; a `permission` / `guards` hook replaces it. Django Ninja is served by django-redline (route templates resolved from Ninja's operations).
+Every adapter routes every Redline request (UI, assets, top-level files, API, SSE, snapshot, login) through the core access gate (§18). FastAPI, Flask and Litestar default to `access="local"`; Django to `access="framework"` (staff / `PERMISSION`). A `dependencies` / `permission` / `guards` hook implies `access="framework"` unless `access` is set explicitly. Django Ninja is served by django-redline (route templates resolved from Ninja's operations).
 Every adapter: Server-Timing, badge injection (HTML, non-streaming, 200–299, `badge` on), SSE `api/stream`, `RawResponse` passthrough, `X-Frame-Options: DENY` on Redline's own responses.
 Every adapter also serves top-level bundle files (`<mount>/badge.js`, `favicon.svg`, …) from `redline_core.ui`'s
 static directory (through `asset_path`, so traversal is refused), not only `assets/`, and passes `base_url` +
@@ -689,42 +691,189 @@ Replay (modal for redacted values, optional profile), compare two traces (`#/com
 snapshot download, new pages: **Database** (SQL search, index advisor, unused indexes), **Cache**, **External**, **History**
 (timeline with release markers, compare releases/periods, new/resolved issues) and **Load** (runs, RPS-vs-p95-vs-errors chart with knee, per-step bottlenecks, start form when `load_from_ui`).
 
-## 18. Configuration and access control (`redline_core.access`, `redline_core.config`)
+## 18. Configuration and access control (`redline_core.config`, `redline_core.access`)
 
-One configuration surface for every adapter, layered (later wins): built-in defaults → **preset** → config file →
-`REDLINE_*` environment variables → the framework's own settings (`REDLINE = {...}`, `app.config["REDLINE"]`, `install(settings=...)`).
+### Layered configuration
 
-- **Presets** (`preset` setting): `"dev"` (default: capture everything, local-only access, badge auto), `"staging"`
-  (sample 0.25, token access, no locals), `"production"` (sample 0.05 + always keep slow/errors, no request/response bodies,
-  no locals, no logs below WARNING, `access="token"` required, `read_only=True`, badge off, `load_from_ui=False`).
-  A preset only sets defaults; any explicit setting overrides it.
-- **Config file**: `redline.toml` (or `[tool.redline]` in `pyproject.toml`) found in `project_root`, or `REDLINE_CONFIG=<path>`.
-  TOML needs Python ≥ 3.11 (`tomllib`) or `tomli`; otherwise the file is ignored with a warning.
-- **Environment**: `REDLINE_<SETTING>` for every setting (`REDLINE_ENABLED=0`, `REDLINE_SAMPLE_RATE=0.1`, `REDLINE_ACCESS=token`, `REDLINE_TOKEN=…`), parsed by type.
+`redline_core.config.resolve_settings(framework, *, adapter_defaults=None, native_hook=False, environ=None,
+project_root=None, read_file=True) -> ResolvedConfig` is the only way adapters build `Settings` (none calls
+`Settings.from_mapping` directly any more). Layers, later wins; each value's **source** is recorded:
 
-Access settings (all adapters enforce the same policy through `redline_core.access.check(request_info) -> Decision`):
+| source | what |
+|---|---|
+| `default` | `Settings` field defaults |
+| `adapter` | adapter defaults (Django: `sample_rate` 0.1 without `DEBUG`, `storage_path`/`project_root` from `BASE_DIR`) and the native-hook rule below |
+| `preset` | `PRESETS[preset]` |
+| `file` | `REDLINE_CONFIG=<path>` (must exist), else `redline.toml`, else `pyproject.toml` with a `[tool.redline]` table – looked up in `project_root` (framework > env > adapter default > cwd), never in parent directories. `redline.toml` may be flat or nest under `[redline]`/`[tool.redline]`. TOML needs 3.11+ or `tomli` (3.10 without it: the file is ignored with a warning) |
+| `env` | `REDLINE_<SETTING>` |
+| `framework` | `REDLINE = {...}`, `app.config["REDLINE"]` + `Redline(settings=)`, `install(settings=)`, `RedlinePlugin(settings=)`. A `Settings` instance counts only its non-default fields as explicit |
+
+- `preset` is read from the highest layer that sets it (framework > env > file > adapter), default `dev`. A preset only
+  sets defaults; file/env/framework values win. `features` dicts merge per key across layers.
+- **Native hook rule:** Django always (staff check / `PERMISSION`), FastAPI `dependencies=` (not `None`), Flask
+  `permission=`, Litestar `guards=` → `access="framework"` (source `adapter`) unless `access` came from the file,
+  env or framework layer (a preset does not count). So Django + `production` preset keeps the staff check.
+  With an explicit other policy, FastAPI dependencies / Litestar guards still run (after the gate); a Flask
+  `permission` is then unused.
+- **Env parsing** by field type: bool `1/0 true/false yes/no on/off`; int/float; `""`/`none`/`null` → None for
+  optional fields; lists: JSON array or comma-separated; dicts (`features`, `basic_users`): JSON object or
+  `k=v,k=v` (feature values parsed as bool); `badge`/`server_timing`: `auto` or bool; `token`/`secret_key` kept
+  verbatim. Every variable matching `^REDLINE_[A-Z][A-Z0-9_]*$` must name a setting (→ `SettingsError` with a "did you
+  mean REDLINE_…" hint) except `REDLINE_CONFIG`, `REDLINE_ALLOW_OPEN`, `REDLINE_RELEASE` (still read by
+  `resolve_release`) and `REDLINE_TEST_*`. Unknown file keys also raise (with the file path). Validation errors name
+  the layer the bad value came from.
+- `ResolvedConfig(settings, sources, file, warnings, env_names)`; `.public(extra_warnings)` is `GET api/config`.
+  `config_warnings(settings, sources)` lists risky-but-valid combinations (open, local outside dev, wide/public
+  `allowed_ips` with local, short token, no `secret_key` with token/basic, no `trusted_proxies` outside dev, bodies or
+  locals explicitly on with production, `server_timing=True` outside dev, `explain_analyze` outside dev,
+  `load_from_ui` with a non-local policy, retention off).
+
+**Presets** (`redline_core.conf.PRESETS`): `dev` = the defaults (capture everything, `local`, badge/server-timing
+auto). `staging` = `sample_rate` 0.25, `access="token"`, `capture_locals` False. `production` = `sample_rate` 0.05,
+`always_keep_errors` True, no request/response bodies, no locals, `log_level` WARNING, `access="token"`,
+`read_only` True, `badge` False, `server_timing` False, `load_from_ui` False, `explain_analyze` False. Outside `dev`
+a token must be ≥ 24 characters (`SettingsError` with a generation hint); `access="token"` without a token is
+always an error.
+
+### Settings (added to `Settings`, validated like §6)
 
 | name | type | default | meaning |
 |---|---|---|---|
-| access | "local" \| "token" \| "basic" \| "framework" \| "custom" \| "open" | "local" (Django: "framework" = staff users) | who may open the UI/API |
-| allowed_ips | list[str] (IPs/CIDRs) | [] | extra client networks allowed in addition to the policy (e.g. a VPN range); `local` = loopback only unless listed |
-| allowed_hosts | list[str] | [] | extra `Host` values accepted by the DNS-rebinding check |
-| trusted_proxies | list[str] (CIDRs) | [] | only then is `X-Forwarded-For` honoured for the client IP |
-| token / token_file | str (secret) | None / None | `access="token"`: `Authorization: Bearer <token>` or the UI login (sets an HttpOnly, SameSite=Strict, path-scoped cookie); compared in constant time; never logged or shown |
-| basic_users | dict[user, password-hash] | {} | `access="basic"`; hashes made by `redline hash-password` (PBKDF2-SHA256) |
-| read_only | bool | False | refuse DELETE, `POST api/runs`, EXPLAIN ANALYZE (403 `read_only`) |
-| features | dict[str, bool] | all True | turn off `explain`, `profile`, `replay`, `snapshot`, `load`, `logs`, `locals`, `sse` individually |
-| ui_enabled | bool | True | capture without serving the UI (e.g. ship data elsewhere) |
-| mount_path | str | adapter default | where the UI/API are served |
-| session_ttl_s | int | 43200 | login-cookie lifetime |
-| max_login_attempts | int | 10 per 5 min per IP | rate limit for `POST api/login` (429 `too_many_requests`) |
+| preset | "dev" \| "staging" \| "production" | "dev" | see above |
+| access | "local" \| "token" \| "basic" \| "framework" \| "custom" \| "open" | "local" (Django: "framework") | policy |
+| access_check | callable(RequestInfo) -> bool \| dotted path (`pkg.mod:fn` or `pkg.mod.fn`) | None | `custom` |
+| allowed_ips | list[str] IPs/CIDRs (v4/v6) | [] | `local`: allowed besides loopback. Other policies: when non-empty the client **must also** be in it (loopback not implicit) |
+| allowed_hosts | list[str] | [] | extra `Host` names for `local`'s DNS-rebinding check (ports ignored); also accepted as run targets (below) |
+| trusted_proxies | list[str] IPs/CIDRs | [] | only from these peers are `X-Forwarded-For/-Proto/-Host` believed |
+| token / token_file | str \| None (secret) | None | `token`: one non-whitespace token; `token_file` read once at startup (stripped). Not both |
+| basic_users | dict[user, hash] (secret) | {} | `basic`; hashes `pbkdf2_sha256$<iter>$<salt b64url>$<hash b64url>` (≥ 1000 iterations accepted, default 600 000) |
+| secret_key | str ≥ 16 \| None (secret) | None | signs login cookies; unset = random per-process key (single process only) |
+| read_only | bool | False | 403 `read_only` for every non-GET/HEAD/OPTIONS `api/` call except `api/explain`, `api/login`, `api/logout`; `POST api/explain` with `analyze` → 403 `read_only` (from the API) |
+| features | dict[str, bool] | all True | `explain`, `profile`, `replay`, `snapshot`, `load`, `logs`, `locals`, `sse` (unknown keys → error) |
+| ui_enabled | bool | True | False: every Redline URL answers 404 (capture continues) |
+| mount_path | str \| None | None | FastAPI `prefix` / Flask `url_prefix` / Litestar `path` when that argument is not given (they now default to `None`); Django ignores it (the URLconf decides) |
+| session_ttl_s | int ≥ 1 | 43200 | login-cookie lifetime |
+| max_login_attempts | int ≥ 1 | 10 | failed credentials per client IP per 300 s |
+| base_url | http(s) URL \| None | None | target of UI-started load runs (see below) |
 
-`access="open"` is refused unless `REDLINE_ALLOW_OPEN=1` is set too, and every request then logs a warning (it exposes captured data).
-`"framework"` uses the adapter's native hook (Django `is_staff` / `REDLINE["PERMISSION"]`, FastAPI `dependencies`, Flask `permission`, Litestar `guards`);
-`"custom"` takes `access_check=callable(request_info) -> bool`. CSRF (Origin / `Sec-Fetch-Site`) and `X-Frame-Options: DENY` always apply.
+Secrets (`SECRET_SETTINGS = token, secret_key, basic_users`) are shown as `"***"` (`basic_users` as `{user: "***"}`;
+unset stays `null`) by `api/config` and `redline config`, and never logged.
 
-API: `POST api/login` `{token}` or `{username, password}` → 204 + cookie; `POST api/logout`; `GET api/config` → the effective configuration
-(secrets replaced by `"***"`, with where each value came from: default/preset/file/env/framework) and warnings.
-CLI: `redline config` (print effective config + sources + warnings), `redline doctor` (checks: storage writable, UI bundle present,
-access policy safe for the preset, token strength, proxies), `redline hash-password`.
-UI: a login screen when the API answers 401 `login_required`, and a **Settings** page showing the effective config and warnings (read-only).
+### The gate (`redline_core.access`)
+
+`RequestInfo(method, path, client_ip, headers, cookies, host, scheme, mount)` – `path` relative to the mount and
+exactly what the adapter routes on; `headers` lower-cased (repeats joined `", "`); `mount` = mount path as the
+browser sees it (script root / `root_path` + prefix). `RequestInfo.build(...)` normalises and parses the `Cookie`
+header (repeated cookie names are all kept). `Decision(allowed, status, code, message, headers, payload, principal,
+extra)`; `.body()` = the payload, or `{"error": {code, message, **extra}}`.
+
+`Access(settings, *, framework_ok=None, environ=None, clock=time.time)` – one per adapter instance; raises
+`SettingsError` at startup for a missing/unreadable/whitespace `token_file`, a weak token outside dev, an invalid
+password hash, an un-importable `access_check`. Module helpers: `check(info, settings, *, framework_ok=None)`
+(process-wide gate per settings object), `get_access`, `route_policy(method, path, settings)`, `hash_password`,
+`verify_password`, `is_loopback`, `is_local_host`, `host_name`, `parse_cookies`.
+
+`Access.check(info, *, framework_ok=None)` (`framework_ok` is zero-argument; exceptions from it propagate so the
+adapter renders its framework's own HTTP errors), in order:
+
+1. `ui_enabled` off → 404 `not_found`.
+2. Effective client: if the TCP peer is in `trusted_proxies`, `X-Forwarded-For` is walked right-to-left skipping
+   trusted hops (the first untrusted entry is the client; all trusted → leftmost; an unparsable entry is taken as the
+   client and matches nothing); `X-Forwarded-Proto` (rightmost, http/https only) and `X-Forwarded-Host` (rightmost)
+   replace scheme/host. From any other peer these headers are ignored. IPv6 zone ids and `::ffff:` mapping are
+   normalised. `RFC 7239 Forwarded` is not parsed (only treated as a "proxied" marker).
+3. Network: **local** – client loopback (or unix socket) or in `allowed_ips`, and `Host` loopback (`localhost`,
+   `*.localhost`, loopback IPs, any port; missing Host accepted) or in `allowed_hosts`; and a loopback peer carrying
+   `X-Forwarded-For`/`X-Real-IP`/`Forwarded` without being a trusted proxy is refused (403 `forbidden`, plus a runtime
+   warning in `api/config`) – a reverse proxy on the same host would otherwise make every visitor "local". Other
+   policies: `allowed_ips` as an extra requirement.
+4. Policy. `open`: 403 `open_refused` unless `REDLINE_ALLOW_OPEN=1` was set when the gate was built (error logged at
+   startup); otherwise allowed with a warning logged at startup and at most once a minute. `api/login` and
+   `api/logout` pass to `handle()`. `token`/`basic`: the SPA shell (`""`, `assets/…`, top-level files such as
+   `badge.js`) is public – it holds no data – every `api/…` needs a valid session cookie (checked first) or an
+   `Authorization: Bearer <token>` / `Basic <b64>` header (scheme case-insensitive, other schemes ignored).
+   Missing → 401 `login_required` (`extra.login`), wrong → 401 `invalid_credentials`; both carry `WWW-Authenticate:
+   Bearer realm="Redline"` / `Basic realm="Redline", charset="UTF-8"` **unless** the request has `X-Redline-UI: 1`
+   (sent by the UI and badge.js so browsers do not pop their own dialog). Tokens are compared as SHA-256 digests with
+   `hmac.compare_digest`; Basic passwords with PBKDF2 (successful verifications cached 5 min under an HMAC of the
+   process key; unknown users run a dummy hash). `framework`: `framework_ok()` truthy, else 403 `forbidden` (no hook
+   → refused). `custom`: `access_check(info)` truthy; an exception is logged and refuses.
+5. `route_policy`: a disabled feature's routes → 404 `feature_disabled` (`explain`: `api/explain`; `sse`:
+   `api/stream`; `profile`: `api/traces/{id}/profile`; `snapshot`: `api/traces/{id}/snapshot`; `load`: `api/runs`
+   and everything under it); `read_only` → 403 `read_only`. `RedlineAPI.dispatch` applies `route_policy` itself too.
+6. CSRF, for every method but GET/HEAD/OPTIONS on every Redline URL (login and logout included):
+   `Sec-Fetch-Site: cross-site` or `same-site` → 403 `csrf_failed`; an `Origin` (`null` included) whose
+   `host[:port]` (default ports dropped) differs from the effective host or the `Host` header → 403 `csrf_failed`; no
+   `Origin` → not a browser, allowed. It runs after the policy, so outsiders get the policy's refusal.
+
+Rate limit: failed credentials (login body, Bearer, Basic) are counted per effective client IP in a 300 s sliding
+window (in memory, per process, at most 10 000 IPs); at `max_login_attempts` further credential attempts from that IP
+get 429 `too_many_requests` with `Retry-After`, until the window passes (a success resets it). Cookie-authenticated
+requests are never limited. Behind a proxy without `trusted_proxies` all clients share one bucket.
+
+Sessions: cookie `redline_session=v1.<expiry>.<b64url subject>.<b64url HMAC-SHA256>`; key = HMAC(secret_key,
+"redline-session-v1") or 32 random bytes per process; the MAC covers version, expiry, subject and a binding
+`sha256(policy, subject, token | user's hash)` – rotating the token or a password, or switching policy, revokes
+sessions. Expired, malformed, wrongly-signed cookies or ones with an expiry beyond `now + session_ttl_s + 60` are
+ignored (→ `login_required`). Attributes: `Path=<mount>` (falls back to `/` if the mount has unsafe characters),
+`Max-Age=session_ttl_s`, `HttpOnly`, `SameSite=Strict`, `Secure` when the effective scheme is https. There is no
+server-side session store (logout clears the cookie in that browser only; rotating `secret_key`/token revokes all).
+
+### API (§5 rules apply)
+
+| Method & path | Returns |
+|---|---|
+| `POST api/login` | body `{"token"}` (token) or `{"username", "password"}` (basic), ≤ 4 KiB → 200 `{"ok": true, "expires_at": epoch}` + `Set-Cookie`. 400 `invalid_json`/`invalid_body`, 401 `invalid_credentials`, 429 `too_many_requests`, 404 `not_found` for other policies, 405 for non-POST. Never redirects |
+| `POST api/logout` | 200 `{"ok": true}` + an expiring `Set-Cookie` (any policy) |
+| `GET api/config` | `{preset, file, settings: {name: value (secrets "***", callables as dotted names)}, sources: {name: source}, groups: {capture, sampling, detectors, storage, access, features, other: [names]}, warnings: [str]}` – warnings = config warnings + runtime notes of the gate |
+| `GET api/meta` | `features: {explain, profile, replay, snapshot, load, logs, locals, sse, load_from_ui}` (`load_from_ui` = setting and `load` and not `read_only`), `access: {policy, login: "token"\|"basic"\|null, read_only, preset}` |
+
+(Contract change: login/logout answer 200 JSON instead of 204, so the UI's JSON client handles them uniformly.)
+
+`RedlineAPI(..., config=ResolvedConfig | None, access=Access | None)`. With `logs` off a trace's `logs` is `[]`
+(and capture stops: the recorder installs no log handler); with `locals` off `error.frames[*].locals` is dropped
+(and not captured); with `profile` off the snapshot has no profile. `replay` has no server route (UI only).
+
+**UI-started load runs:** the target is `settings.base_url` when set; otherwise the URL the adapter derived from the
+request (`Host` header) is accepted only when its host is loopback or in `allowed_hosts` (no userinfo); else
+`POST api/runs` → 400 `invalid_body` asking for `base_url`. A `Host` header can no longer aim a run at another
+machine.
+
+### Adapters
+
+All four build a `RequestInfo` per request and call the gate before any Redline handler (UI, assets, top-level
+files, API, SSE, snapshot); login/logout go to `Access.handle(info, body)`; refusals use the §5 error shape with the
+decision's headers (and `X-Frame-Options: DENY`). TestClient peers named `testclient` (Starlette/Litestar) count as
+`127.0.0.1`.
+
+- **FastAPI** `install(..., prefix=None, dependencies=None)`: router dependency `redline_guard(access, prefix)` first,
+  then the user's dependencies. `local_only`, `loopback_guard`, `csrf_guard` remain exported for explicit use.
+- **Flask** `Redline(..., url_prefix=None, permission=None)`: blueprint `before_request`; `permission(request)` is the
+  framework hook (an `HTTPException` it raises is rendered as before; a False keeps the old message or the guard's
+  `refusal()`).
+- **Litestar** `RedlinePlugin(..., path=None, guards=None)`: router guard `redline_guard` first, then the user's guards.
+- **Django**: `ALLOWED_HOSTS` check, then the gate with `PERMISSION` as the framework hook (anonymous → login
+  redirect on the page, as before); top-level files (`badge.js`) skip `PERMISSION` but not the network rules. Django's
+  own CSRF check still applies to API mutations (login/logout included), except requests authenticated with an
+  `Authorization: Bearer` header under `access="token"`. `Set-Cookie` decisions go through `response.cookies`.
+
+### CLI
+
+- `redline config [--json] [--project-root DIR]` – effective config (file + env layers only; code-level settings are
+  not visible), source per value (`env REDLINE_X` for env), warnings. Exit 2 on invalid configuration.
+- `redline doctor [--json] [--project-root DIR]` – `ok`/`warn`/`fail` checks: storage writable, UI bundle present,
+  access (open → fail, or warn with `REDLINE_ALLOW_OPEN`; local outside dev → warn), token length / `token_file`
+  readable by others, basic hash strength (< 100 000 iterations → warn), `secret_key` missing with token/basic,
+  `trusted_proxies` empty outside dev, production capturing bodies/locals, retention off, `load_from_ui` without
+  `httpx`. Exit 1 if any check fails or the config does not load.
+- `redline hash-password [--iterations N]` – prompts twice (mismatch → exit 2); reads one line from stdin when it is
+  not a TTY; prints the hash.
+
+### UI
+
+Login screen on 401 `login_required` (token field, or username/password for basic; POSTs `./api/login` with the CSRF
+header logic of `api.ts`, then reloads), "Log out" (header + command palette) when `meta.access.login` is set,
+**Settings** page `#/settings` (More menu + palette) rendering `api/config` grouped with provenance chips and
+warnings. `meta.features` hides Explain, Profile tab, Replay, snapshot download, Load page/new-run form, Logs tab,
+locals, live SSE; `meta.access.read_only` hides Clear all, ANALYZE, run stop/delete/new. Every UI fetch (and
+badge.js) sends `X-Redline-UI: 1`.

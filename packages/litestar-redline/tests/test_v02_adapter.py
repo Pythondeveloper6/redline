@@ -122,6 +122,15 @@ def test_server_timing_off(make_app):
         assert "server-timing" not in c.get("/json").headers
 
 
+def test_server_timing_auto_needs_debug(make_app):
+    app, _ = make_app(debug=False)  # "auto" (the default) is a side channel: debug only
+    with _client(app) as c:
+        assert "server-timing" not in c.get("/json").headers
+    app, _ = make_app(debug=False, settings={"server_timing": True})
+    with _client(app) as c:
+        assert "server-timing" in c.get("/json").headers
+
+
 # ---------------------------------------------------------------------------- badge
 def test_badge_injected_into_html(make_app):
     app, plugin = make_app()

@@ -15,13 +15,15 @@ from litestar.middleware import DefineMiddleware
 from litestar.plugins import InitPluginProtocol
 
 from redline_core import Recorder, Settings, configure
+from redline_core.access import Access
 from redline_core.api import RedlineAPI
+from redline_core.config import resolve_settings
 from redline_core.explain import ExplainExecutor
 from redline_core.load.control import run_hooks
 from redline_core.storage import SQLiteStore, Store
 
 from ._middleware import EXCEPTION_KEY, RedlineMiddleware
-from ._security import local_only
+from ._security import redline_guard
 from ._sqlalchemy import (
     EngineLike,
     alias_for,
@@ -67,19 +69,21 @@ class RedlinePlugin(InitPluginProtocol):
     """Litestar plugin: ``Litestar(plugins=[RedlinePlugin(engine=engine)])``.
 
     ``settings``
-        A ``Settings`` or a dict of settings (case-insensitive keys).
+        A ``Settings`` or a dict of settings (case-insensitive keys): the top layer over
+        ``redline.toml`` / ``[tool.redline]`` and ``REDLINE_*`` variables.
     ``engine``
         A sync ``Engine``, an ``AsyncEngine``, a list of them, or ``{alias: engine}``.
         The first of a list is the ``"default"`` db alias (used by EXPLAIN). When omitted
         and the app has Litestar's ``SQLAlchemyPlugin``, its engine(s) are instrumented.
     ``path``
-        Where the UI and API live (``/_redline``). Never recorded.
+        Where the UI and API live (default: the ``mount_path`` setting, else
+        ``/_redline``). Never recorded.
     ``guards``
-        Litestar guards protecting the UI and API, e.g. ``[require_admin]``. When omitted,
-        :func:`~litestar_redline.local_only` applies (loopback clients addressing
-        ``localhost``/``127.0.0.1``/``[::1]``) and a warning is logged; pass ``[]`` to
-        deliberately leave it open. ``HTTPException`` raised by guards is answered in the
-        API's error shape.
+        Litestar guards protecting the UI and API, e.g. ``[require_admin]``; giving them
+        implies ``access="framework"`` unless the ``access`` setting is set explicitly.
+        When omitted, the ``access`` setting decides (default ``local``: loopback clients
+        addressing ``localhost``/``127.0.0.1``/``[::1]``); ``[]`` deliberately leaves it
+        open. ``HTTPException`` raised by guards is answered in the API's error shape.
     ``store``
         A custom ``Store``; default is the SQLite file at ``storage_path``.
 
@@ -91,19 +95,22 @@ class RedlinePlugin(InitPluginProtocol):
         self,
         settings: Mapping[str, Any] | Settings | None = None,
         engine: Any = None,
-        path: str = "/_redline",
+        path: str | None = None,
         guards: Sequence[Any] | None = None,
         store: Store | None = None,
     ) -> None:
+        self.config = resolve_settings(settings, native_hook=guards is not None)
+        cfg = self.config.settings
+        path = path if path is not None else (cfg.mount_path or "/_redline")
         path = "/" + path.strip("/")
         if path == "/":
             raise ValueError("path must be a sub-path such as '/_redline'.")
-        cfg = settings if isinstance(settings, Settings) else Settings.from_mapping(settings)
         own = rf"^{re.escape(path)}(/|$)"
         if own not in cfg.ignore_paths:
             cfg = cfg.replace(ignore_paths=[*cfg.ignore_paths, own])
         self.path = path
         self.settings = cfg
+        self.access = Access(cfg)
         self.guards = guards
         self._engine_arg = engine
         self.engines: dict[str, EngineLike] = {}
@@ -120,6 +127,8 @@ class RedlinePlugin(InitPluginProtocol):
             explain_executor=self._executor_for,
             run_launcher=launcher,
             run_stopper=stopper,
+            config=self.config,
+            access=self.access,
         )
         self._installed = False
 
@@ -165,12 +174,12 @@ class RedlinePlugin(InitPluginProtocol):
         for alias, eng in name_engines(engine).items():
             self.add_engine(eng, alias)
 
-        guards = self.guards
-        if guards is None:
-            guards = [local_only]
+        guards = [redline_guard(self.access, self.path), *(self.guards or [])]
+        if self.settings.access == "local":
             logger.warning(
-                "Redline is mounted at %s with no guards: only loopback clients are "
-                "allowed. Pass RedlinePlugin(guards=[...]) before exposing it.",
+                "Redline is mounted at %s with no guards (access='local'): only loopback "
+                "clients are allowed. Set access='token' or 'basic', or pass "
+                "RedlinePlugin(guards=[...]) before exposing it.",
                 self.path,
             )
         app_config.route_handlers.append(build_router(self, self.path, guards))

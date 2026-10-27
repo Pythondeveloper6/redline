@@ -22,6 +22,7 @@ def _redline(**extra):
 
 
 # ---------------------------------------------------------------------------- Server-Timing
+@_redline(SERVER_TIMING=True)
 def test_server_timing_on_recorded_response(client, shop):
     response = client.get("/n1/reverse-fk/")
     value = response["Server-Timing"]
@@ -29,6 +30,7 @@ def test_server_timing_on_recorded_response(client, shop):
     assert "db;dur=" in value and 'redline;desc="' in value
 
 
+@_redline(SERVER_TIMING=True)
 def test_server_timing_appends_to_existing(client):
     value = client.get("/html/?timing=1")["Server-Timing"]
     assert value.startswith("app;dur=1, total;dur=")
@@ -37,6 +39,13 @@ def test_server_timing_appends_to_existing(client):
 @_redline(SERVER_TIMING=False)
 def test_server_timing_off(client):
     assert "Server-Timing" not in client.get("/plain/")
+
+
+def test_server_timing_auto_follows_debug(client, settings):
+    settings.DEBUG = False  # "auto" (the default): a side channel, so only in DEBUG
+    assert "Server-Timing" not in client.get("/plain/")
+    settings.DEBUG = True
+    assert "Server-Timing" in client.get("/plain/")
 
 
 def test_no_server_timing_on_redline_urls(staff_client):
@@ -219,7 +228,7 @@ def test_runs_post_launches_against_own_origin(client, staff, tmp_path, monkeypa
 
     monkeypatch.setattr(control, "launch_background", fake_launch)
     db = tmp_path / "r.db"
-    with _redline(STORAGE_PATH=str(db), LOAD_FROM_UI=True):
+    with _redline(STORAGE_PATH=str(db), LOAD_FROM_UI=True, ALLOWED_HOSTS=["testserver"]):
         response = _post_run(client, staff)
         assert response.status_code == 202, response.content
         assert response.json() == {"id": "run42", "name": "ui", "status": "running"}

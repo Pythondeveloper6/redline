@@ -178,7 +178,8 @@ class RedlineMiddleware:
                 return
             headers, body, size = _response_parts(response)
             rs = builder.recorder.settings
-            timing = builder.server_timing() if rs.server_timing else ""
+            on = ui.server_timing_enabled(rs, settings.DEBUG)
+            timing = builder.server_timing() if on else ""
             snippet = _badge_snippet(builder, response)
             trace = builder.recorder.finish_trace(
                 builder,

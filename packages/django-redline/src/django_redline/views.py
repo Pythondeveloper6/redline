@@ -1,15 +1,21 @@
 """The UI and the JSON API, mounted with ``path("redline/", include("django_redline.urls"))``.
 
 Access
-    Every view first checks ``REDLINE["PERMISSION"]`` (default: active staff users). The
-    page redirects anonymous visitors to the admin login (or ``LOGIN_URL``) and answers
-    403 to signed-in users without access; the API answers ``403`` JSON
-    ``{"error": {"code": "forbidden", ...}}``.
+    Every view asks the core access gate (``redline_core.access``, ``CONTRACT.md`` §18).
+    The default policy is ``access="framework"``: ``REDLINE["PERMISSION"]`` (default:
+    active staff users). Then the page redirects anonymous visitors to the admin login
+    (or ``LOGIN_URL``) and answers 403 to signed-in users without access; the API answers
+    ``403`` JSON ``{"error": {"code": "forbidden", ...}}``. ``ACCESS = "token"``/``"basic"``
+    /``"local"``/``"custom"`` switch to the core policies (with ``token``/``basic`` the
+    page is served to anyone so the UI can show its login screen; the API answers 401
+    ``login_required``).
 
 CSRF
     The API runs Django's own CSRF check on every request, whether or not
-    ``CsrfViewMiddleware`` is installed: ``GET`` is free, mutating requests (``DELETE``
-    of traces, ``POST api/explain``) need the token in the CSRF header
+    ``CsrfViewMiddleware`` is installed (except requests authenticated by an
+    ``Authorization: Bearer`` header, which a browser never sends on its own): ``GET`` is
+    free, mutating requests (``DELETE`` of traces, ``POST api/explain``, ``POST
+    api/login``) need the token in the CSRF header
     (``X-CSRFToken`` by default) – plus Django's Origin/Referer checks on HTTPS. A
     failure is a JSON ``403`` with code ``csrf_failed``. The page
     embeds a fresh token in ``<meta name="redline-csrf">`` (so it works with
@@ -22,8 +28,9 @@ Live tail
 
 Badge
     Top-level bundle files (``badge.js``, ``favicon.svg``) are served without the
-    permission check: they hold no data, and the badge is injected into the app's own
-    pages for whoever is browsing them in ``DEBUG``. The API the badge calls is guarded.
+    ``PERMISSION`` check (the network rules of the gate still apply): they hold no data,
+    and the badge is injected into the app's own pages for whoever is browsing them in
+    ``DEBUG``. The API the badge calls is guarded.
 """
 
 from __future__ import annotations
@@ -44,6 +51,7 @@ from django.http import (
     HttpResponseBase,
     HttpResponseForbidden,
     JsonResponse,
+    RawPostDataException,
     StreamingHttpResponse,
 )
 from django.middleware.csrf import CsrfViewMiddleware, get_token
@@ -51,6 +59,7 @@ from django.urls import NoReverseMatch, get_script_prefix, reverse
 from django.views.decorators.csrf import csrf_exempt, ensure_csrf_cookie
 
 from redline_core import stream, ui
+from redline_core.access import Decision, RequestInfo
 from redline_core.api import RawResponse
 from redline_core.storage import FilterError
 
@@ -62,11 +71,41 @@ _HASHED = re.compile(r"-[A-Za-z0-9_-]{8,}\.(?:js|css|mjs)$")
 _API_METHODS = ("GET", "POST", "DELETE")
 
 
-def _allowed(request: HttpRequest) -> bool:
+def _permission(request: HttpRequest) -> bool:
     try:
         return bool(get_runtime().options.permission(request))
     except Exception:
         return False
+
+
+def _info(request: HttpRequest, rel: str) -> RequestInfo:
+    """The framework-neutral request for the gate; ``rel`` is the mount-relative path."""
+    full = request.path
+    mount = full[: len(full) - len(rel)] if rel and full.endswith(rel) else full
+    return RequestInfo.build(
+        method=request.method or "GET",
+        path=rel,
+        client_ip=request.META.get("REMOTE_ADDR"),
+        headers=list(request.headers.items()),
+        host=request.META.get("HTTP_HOST"),
+        scheme=request.scheme or "http",
+        mount=mount.rstrip("/") or "/",
+    )
+
+
+def _decide(request: HttpRequest, rel: str, *, permission: bool = True) -> Decision:
+    hook = (lambda: _permission(request)) if permission else (lambda: True)
+    return get_runtime().access.check(_info(request, rel), framework_ok=hook)
+
+
+def _refusal(decision: Decision) -> JsonResponse:
+    response = _json(decision.status, decision.body())
+    for key, value in decision.headers.items():
+        if key.lower() == "set-cookie":  # Django keeps cookies apart from the headers
+            response.cookies.load(value)
+        else:
+            response[key] = value
+    return response
 
 
 def _check_host(request: HttpRequest) -> None:
@@ -89,8 +128,12 @@ def _login_url() -> str:
 def _page_guard(view: Callable[..., HttpResponseBase]) -> Callable[..., HttpResponseBase]:
     def guarded(request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponseBase:
         _check_host(request)
-        if _allowed(request):
+        rel = f"assets/{kwargs['path']}" if "path" in kwargs else ""
+        decision = _decide(request, rel)
+        if decision.allowed:
             return view(request, *args, **kwargs)
+        if decision.code != "forbidden" or get_runtime().access.policy != "framework":
+            return _refusal(decision)
         user = getattr(request, "user", None)
         if user is None or not user.is_authenticated:
             return redirect_to_login(request.get_full_path(), _login_url())
@@ -143,6 +186,9 @@ def asset(request: HttpRequest, path: str) -> FileResponse:
 def top_level(request: HttpRequest, name: str) -> HttpResponseBase:
     """A top-level file of the bundle (``badge.js``, ``favicon.svg``); never an HTML page."""
     _check_host(request)
+    decision = _decide(request, name, permission=False)
+    if not decision.allowed:
+        return _refusal(decision)
     file = None if name.endswith((".html", ".htm")) else ui.asset_path(name)
     if file is None:
         raise Http404("No such Redline file.")
@@ -212,9 +258,21 @@ class _JsonCsrf(CsrfViewMiddleware):
 
 
 def _csrf_rejection(request: HttpRequest) -> HttpResponseBase | None:
+    access = get_runtime().access
+    auth = request.headers.get("Authorization", "")
+    if access.policy == "token" and auth[:7].lower() == "bearer ":
+        return None  # a browser never attaches a Bearer token by itself: not forgeable
     check = _JsonCsrf(_no_response)
     request.csrf_processing_done = False  # type: ignore[attr-defined]
     return check.process_request(request) or check.process_view(request, _dispatch, (), {})
+
+
+def _body(request: HttpRequest) -> bytes:
+    """The raw body; empty when the CSRF check already consumed a form-encoded stream."""
+    try:
+        return request.body
+    except RawPostDataException:
+        return b""
 
 
 def _no_response(request: HttpRequest) -> HttpResponse:  # pragma: no cover - never called
@@ -229,15 +287,19 @@ def _no_response(request: HttpRequest) -> HttpResponse:  # pragma: no cover - ne
 def api(request: HttpRequest, path: str = "") -> HttpResponseBase:
     """Route ``api/<path>`` to the core :class:`~redline_core.api.RedlineAPI`."""
     _check_host(request)
-    if not _allowed(request):
-        return _json(
-            403, {"error": {"code": "forbidden", "message": "You do not have access to Redline."}}
-        )
+    info = _info(request, f"api/{path}")
+    decision = get_runtime().access.check(info, framework_ok=lambda: _permission(request))
+    if not decision.allowed:
+        return _refusal(decision)
     if request.method not in _API_METHODS:
         return _json(405, {"error": {"code": "method_not_allowed", "message": "Not allowed."}})
     rejection = _csrf_rejection(request)
     if rejection is not None:
         return rejection
+    if path.strip("/") in ("login", "logout"):
+        handled = get_runtime().access.handle(info, _body(request))
+        if handled is not None:
+            return _refusal(handled)  # status, JSON body and Set-Cookie
     if path.strip("/") == "stream":
         return _stream(request)
     return _dispatch(request, path)
@@ -245,7 +307,7 @@ def api(request: HttpRequest, path: str = "") -> HttpResponseBase:
 
 def _dispatch(request: HttpRequest, path: str) -> HttpResponseBase:
     params = {key: request.GET.getlist(key) for key in request.GET}
-    body = request.body if request.method == "POST" else None
+    body = _body(request) if request.method == "POST" else None
     result = get_runtime().api.dispatch(
         request.method or "GET",
         f"api/{path}",
