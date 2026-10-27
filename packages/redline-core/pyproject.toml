@@ -53,6 +53,10 @@ asyncpg = ["asyncpg>=0.29"]
 psycopg = ["psycopg>=3.1"]
 strawberry = ["strawberry-graphql>=0.240"]
 graphene = ["graphene>=3.3"]
+load = ["httpx>=0.27"]
+
+[project.scripts]
+redline = "redline_core.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/Pythondeveloper6/redline"
@@ -93,6 +97,9 @@ testpaths = ["tests"]
 addopts = "--strict-markers -q"
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+markers = [
+    "slow: spawns load-test worker processes (a few seconds each)",
+]
 
 [tool.ruff]
 extend = "../../pyproject.toml"
