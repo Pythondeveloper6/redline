@@ -29,6 +29,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 from collections import defaultdict
 from collections.abc import Callable, Iterator, Mapping
@@ -38,6 +39,7 @@ from typing import Any
 from . import __version__, ui
 from .conf import Settings, editor_url_template, resolve_release
 from .explain import ExplainError, ExplainExecutor, run_explain
+from .index_advisor import advise
 from .model import ISSUE_KINDS, Trace
 from .profiler import is_available as profiler_available
 from .storage.base import FilterError, Filters, Store, parse_period, parse_window
@@ -74,6 +76,8 @@ _RUN_STOP = re.compile(rf"^api/runs/{_ID}/stop$")
 _ISSUE_KINDS = ISSUE_KINDS
 _BUCKETS = {"1h": 3_600.0, "1d": 86_400.0}
 _LOAD_MODES = ("constant", "ramp", "steps")
+#: ``GET api/indexes`` answers are cached this long per ``(window, db)``.
+INDEX_CACHE_S = 30.0
 
 
 class _NotSupported(Exception):
@@ -119,6 +123,8 @@ class RedlineAPI:
         self.explain_executor = explain_executor
         self.run_launcher = run_launcher
         self.run_stopper = run_stopper
+        self._index_cache: dict[tuple[float, str], tuple[float, dict[str, Any]]] = {}
+        self._index_lock = threading.Lock()
 
     # routing ---------------------------------------------------------------
     def dispatch(
@@ -453,7 +459,29 @@ class RedlineAPI:
         return 200, {"items": [s.to_dict() for s in items]}
 
     def indexes(self, params: Mapping[str, Any]) -> Response:
-        return error(501, "not_supported", "The index advisor is not available in this build.")
+        try:
+            window = parse_window(_str_param(params, "window"))
+        except FilterError as exc:
+            return error(400, "invalid_window", str(exc))
+        db = _str_param(params, "db") or "default"
+        key = (window, db)
+        now = time.monotonic()
+        with self._index_lock:
+            hit = self._index_cache.get(key)
+        if hit is not None and hit[0] > now and _str_param(params, "refresh") not in ("1", "true"):
+            return 200, {**hit[1], "cached": True}
+        workload = self._ext("sql_workload")(window)
+        payload = advise(
+            workload,
+            get_trace=lambda tid: self.store.get(tid, include_profile=False),
+            db=db,
+            executor_factory=self.explain_executor,
+        )
+        payload["window"] = window
+        with self._index_lock:
+            self._index_cache = {k: v for k, v in self._index_cache.items() if v[0] > now}
+            self._index_cache[key] = (now + INDEX_CACHE_S, payload)
+        return 200, {**payload, "cached": False}
 
     def cache(self, params: Mapping[str, Any]) -> Response:
         try:
