@@ -75,7 +75,7 @@ export interface Meta {
   features?: Partial<Record<FeatureName, boolean>>
   access?: Access
 }
-export type FeatureName = 'load_from_ui' | 'sse' | 'snapshot' | 'explain' | 'profile' | 'replay' | 'load' | 'logs' | 'locals'
+export type FeatureName = 'load_from_ui' | 'sse' | 'snapshot' | 'explain' | 'profile' | 'replay' | 'load' | 'logs' | 'locals' | 'checks' | 'checks_from_ui'
 export interface Access {
   policy: 'local' | 'token' | 'basic' | 'framework' | 'custom' | 'open'
   login: 'token' | 'basic' | null
@@ -179,3 +179,88 @@ export interface ExternalStat {
   errors: number; error_rate: number; duplicates: number; retries: number
 }
 export interface SnapshotData { trace: Trace; profile: Speedscope | null }
+
+// ---- v0.3 refactor check (CONTRACT §19) ----
+export type CheckMethod = 'GET' | 'HEAD' | 'OPTIONS'
+export interface CheckRequestDef {
+  name: string; method: CheckMethod; path: string
+  headers?: Record<string, string>
+  perf?: boolean; response?: boolean
+  ignore?: string[]; ignore_headers?: string[]
+  expect_status?: number | null
+}
+export interface CheckThresholds { slower_pct: number; slower_ms: number; max_query_increase: number }
+/** The suite object of §19.1 (JSON form of the TOML). */
+export interface CheckSuite {
+  name: string; base_url?: string | null
+  headers?: Record<string, string>
+  timeout_s?: number; repeat?: number; warmup?: number
+  thresholds?: Partial<CheckThresholds>
+  requests: CheckRequestDef[]
+}
+export interface CheckGit { sha?: string | null; branch?: string | null; dirty?: boolean | null }
+export type CheckRunKind = 'baseline' | 'compare'
+export type CheckRunStatus = 'running' | 'done' | 'failed' | 'stopped'
+/** Per-verdict counts of a finished compare (flat or under `counts`; the UI accepts both). */
+export interface CheckSummary {
+  counts?: Partial<Record<PerfVerdict | ResponseVerdict | 'passed', number>>
+  faster?: number; slower?: number; same?: number; noisy?: number; changed?: number; broken?: number; passed?: number
+  speed_change_pct?: number | null; queries_change?: number | null
+}
+/** Baseline summary: the fields of a baseline run needed to pick or describe it. */
+export interface CheckBaselineSummary { id: string; label: string | null; git?: CheckGit | null; created_at: number }
+export interface CheckRunItem {
+  id: string; suite_id: string | null; kind: CheckRunKind; baseline_id: string | null; status: CheckRunStatus
+  label: string | null; git?: CheckGit | null; created_at: number; finished_at: number | null
+  summary?: CheckSummary | null; error?: string | null
+  /** Optional live progress while running (calls done of total). */
+  progress?: { done: number; total: number; current?: string | null } | null
+}
+export interface CheckSuiteItem {
+  id: string; name: string; requests: number; updated_at: number
+  last_baseline: CheckBaselineSummary | null
+  last_compare: (Pick<CheckRunItem, 'id' | 'status' | 'created_at'> & { summary?: CheckSummary | null }) | null
+}
+export interface CheckSuiteDoc { id: string; name: string; suite: CheckSuite; created_at?: number; updated_at?: number }
+
+export type PerfVerdict = 'faster' | 'slower' | 'same' | 'noisy' | 'n/a'
+export type ResponseVerdict = 'same' | 'changed' | 'broken' | 'n/a'
+export interface PerfStats { samples_ms: number[]; median: number; p95: number; mean: number; stdev: number; failed: number }
+export interface ServerStats {
+  duration_median_ms?: number | null; queries_median: number; queries_max?: number | null; query_ms?: number | null
+  sql?: { fingerprint: string; count: number; sql?: string }[]
+  issues?: { kind: IssueKind; title?: string; fingerprint?: string }[]
+}
+export interface JsonDiffEntry { path: string; kind: 'added' | 'removed' | 'changed' | 'type'; before: unknown; after: unknown }
+export interface ReportIssue { kind: IssueKind; title?: string; fingerprint?: string; sample_trace_id?: string | null }
+export interface ReportSql { fingerprint: string; sql: string; count?: number; sample_trace_id?: string | null }
+export interface ReportRequest {
+  name: string; method: string; path: string
+  perf: { verdict: PerfVerdict; before: PerfStats | null; after: PerfStats | null; change_ms: number | null; change_pct: number | null; p_value: number | null; reason: string | null }
+  server: { before: ServerStats | null; after: ServerStats | null; queries_change: number | null; new_issues: ReportIssue[]; fixed_issues: ReportIssue[]; new_sql: ReportSql[]; gone_sql: ReportSql[] } | null
+  response: { verdict: ResponseVerdict; status: [number | null, number | null]; diff: JsonDiffEntry[]; diff_total?: number; text_diff: string | null; ignored: string[] }
+}
+export interface CheckReport {
+  format: 'redline-check-report'; version: number
+  suite: CheckSuite
+  baseline: { id?: string | null; file?: string | null; label: string | null; git?: CheckGit | null; created_at: number }
+  run: { id: string; git?: CheckGit | null; created_at: number; base_url: string }
+  summary?: CheckSummary
+  requests: ReportRequest[]
+}
+/** One recorded request of a baseline (§19.3). */
+export interface BaselineRequest {
+  name: string; method: string; path: string
+  perf: PerfStats | null
+  server: ServerStats | null
+  response: { status: number | null; content_type: string | null; headers?: Record<string, string>; body_kind: 'json' | 'text' | 'hash'; sha256?: string; size: number } | null
+  volatile: string[]
+}
+/** `GET api/checks/runs/{id}`: the run plus its results (`report` for compares, `requests` for baselines). */
+export interface CheckRunDetail extends CheckRunItem {
+  suite?: CheckSuite | null
+  report?: CheckReport | null
+  requests?: BaselineRequest[] | null
+}
+export interface CheckDraftBody { routes?: string[]; limit?: number }
+export type CheckStartBody = { suite_id: string; kind: CheckRunKind; baseline_id?: string; label?: string }

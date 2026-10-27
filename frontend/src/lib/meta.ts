@@ -34,10 +34,10 @@ export function editorUrl(meta: Pick<Meta, 'editor_url_template' | 'project_root
   return tpl.replace(/\{file\}/g, () => file).replace(/\{line\}/g, () => String(cs.line))
 }
 
-/** Feature switch from `meta.features`. A missing key means enabled (older backends), except `load_from_ui`. */
+/** Feature switch from `meta.features`. A missing key means enabled (older backends), except `load_from_ui` and `checks_from_ui`. */
 export function feature(meta: Pick<Meta, 'features'> | null | undefined, name: FeatureName): boolean {
   const v = meta?.features?.[name]
-  return v === undefined ? name !== 'load_from_ui' : !!v
+  return v === undefined ? name !== 'load_from_ui' && name !== 'checks_from_ui' : !!v
 }
 /** True when the instance is read-only (`meta.access.read_only`): hide every mutating action. */
 export function isReadOnly(meta: Pick<Meta, 'access'> | null | undefined): boolean {

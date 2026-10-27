@@ -9,6 +9,10 @@ import Issues from './pages/Issues'
 import Compare from './pages/Compare'
 import History from './pages/History'
 import Load from './pages/Load'
+import Checks from './pages/Checks'
+import CheckBuilder from './pages/CheckBuilder'
+import CheckSuite from './pages/CheckSuite'
+import CheckRun from './pages/CheckRun'
 import Database from './pages/Database'
 import Cache from './pages/Cache'
 import External from './pages/External'
@@ -37,6 +41,11 @@ export default function App() {
         <Route path="/history" element={<History />} />
         <Route path="/load" element={<Load />} />
         <Route path="/load/:id" element={<Load />} />
+        <Route path="/checks" element={<Checks />} />
+        <Route path="/checks/new" element={<CheckBuilder />} />
+        <Route path="/checks/suites/:id" element={<CheckSuite />} />
+        <Route path="/checks/suites/:id/edit" element={<CheckBuilder />} />
+        <Route path="/checks/runs/:id" element={<CheckRun />} />
         <Route path="*" element={<Navigate to="/requests" replace />} />
       </Route>
     </Routes>
