@@ -9,7 +9,14 @@ propagation for sync endpoints and buffers streaming responses. This one:
 * finishes the trace right after the last body chunk is sent, so background tasks do not
   count towards latency;
 * resolves the route template (``/orders/{order_id:int}``) from ``scope["path_template"]``
-  once routing ran.
+  once routing ran;
+* adds a ``Server-Timing`` header (``settings.server_timing``) to ``http.response.start``,
+  appended to one the app already set;
+* injects the floating badge into small, non-streamed ``text/html`` 2xx pages when
+  :func:`redline_core.ui.badge_enabled` (``auto`` = ``app.debug``): the start message is
+  held back only when ``content-length`` is known and at most ``BADGE_MAX_BYTES``, or when
+  the first body message is the whole body; anything else passes through untouched;
+* runs the app inside :func:`redline_core.blocking.track_request` (event-loop lag monitor).
 
 It is installed as a Litestar *route-level* middleware, which sits outside the per-route
 exception handler: an exception is already a response when it gets here, so the plugin's
@@ -21,7 +28,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from redline_core import Recorder, get_recorder
+from redline_core import Recorder, get_recorder, ui
+from redline_core.blocking import track_request
 from redline_core.sampling import profile_requested
 
 __all__ = ["EXCEPTION_KEY", "RedlineMiddleware"]
@@ -91,10 +99,45 @@ class _Capture:
         return data
 
 
+def _with_header(headers: list[tuple[bytes, bytes]], name: bytes, value: str) -> None:
+    """Set ``name`` to ``value``, appending (``, ``) to an existing value."""
+    for i, (key, old) in enumerate(headers):
+        if key.lower() == name:
+            headers[i] = (key, old + b", " + value.encode("latin-1"))
+            return
+    headers.append((name, value.encode("latin-1")))
+
+
+def _set_length(headers: list[tuple[bytes, bytes]], length: int) -> list[tuple[bytes, bytes]]:
+    out = [(k, v) for k, v in headers if k.lower() != b"content-length"]
+    out.append((b"content-length", str(length).encode("latin-1")))
+    return out
+
+
+def _badge_candidate(status: int, headers: list[tuple[bytes, bytes]]) -> bool:
+    if not ui.badge_allowed(
+        status,
+        _header(headers, b"content-type"),
+        content_encoding=_header(headers, b"content-encoding"),
+        csp=_header(headers, b"content-security-policy"),
+    ):
+        return False
+    if _header(headers, b"content-disposition") is not None:
+        return False  # a file / download, not a page being viewed
+    length = _header(headers, b"content-length")
+    if length is None:
+        return True  # decided on the first body message (a single message only)
+    try:
+        return 0 < int(length) <= ui.BADGE_MAX_BYTES
+    except ValueError:
+        return False
+
+
 class RedlineMiddleware:
-    def __init__(self, app: Any, recorder: Recorder | None = None) -> None:
+    def __init__(self, app: Any, recorder: Recorder | None = None, mount: str = "") -> None:
         self.app = app
         self.recorder = recorder
+        self.mount = mount
 
     async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
         if scope["type"] != "http":
@@ -111,7 +154,7 @@ class RedlineMiddleware:
         query = scope.get("query_string", b"")
         client = scope.get("client")
         builder = recorder.start_trace(
-            framework="other",
+            framework="litestar",
             method=scope["method"],
             path=path,
             headers=headers,
@@ -124,6 +167,8 @@ class RedlineMiddleware:
         res = _Capture(limit)
         capture_res = settings.capture_response_body
         state: dict[str, Any] = {"status": None, "headers": [], "done": False}
+        badge_on = ui.badge_enabled(settings, bool(getattr(scope.get("app"), "debug", False)))
+        held: dict[str, Any] = {}  # badge: the held start message and the buffered body
 
         def finalize(status: int | None = None, error: BaseException | None = None) -> None:
             if state["done"]:
@@ -166,12 +211,9 @@ class RedlineMiddleware:
                     req.add(chunk)
             return message
 
-        async def send_wrapper(message: Any) -> None:
+        async def forward(message: Any) -> None:
             kind = message["type"]
-            if kind == "http.response.start":
-                state["status"] = message["status"]
-                state["headers"] = list(message.get("headers") or [])
-            elif kind == "http.response.body":
+            if kind == "http.response.body":
                 chunk = message.get("body", b"")
                 if capture_res:
                     res.add(chunk)
@@ -181,8 +223,56 @@ class RedlineMiddleware:
             if kind == "http.response.body" and not message.get("more_body", False):
                 finalize()
 
+        async def release(body: bytes) -> None:
+            start = held.pop("start")
+            held.clear()
+            snippet = ui.badge_snippet(
+                builder.id,
+                f"{scope.get('root_path', '')}{self.mount}",
+                ui.badge_summary(builder, state["status"]),
+            )
+            new_body = ui.inject_badge(body, snippet)
+            if new_body is not None:
+                body = new_body
+                start = {**start, "headers": _set_length(start["headers"], len(body))}
+            await forward(start)
+            await forward({"type": "http.response.body", "body": body, "more_body": False})
+
+        async def send_wrapper(message: Any) -> None:
+            kind = message["type"]
+            if kind == "http.response.start":
+                state["status"] = message["status"]
+                resp_headers = list(message.get("headers") or [])
+                if settings.server_timing:
+                    timing = builder.server_timing()
+                    if timing:
+                        _with_header(resp_headers, b"server-timing", timing)
+                        message = {**message, "headers": resp_headers}
+                state["headers"] = resp_headers
+                if badge_on and _badge_candidate(message["status"], resp_headers):
+                    held["start"] = message
+                    held["body"] = bytearray()
+                    held["known"] = _header(resp_headers, b"content-length") is not None
+                    return
+            elif kind == "http.response.body" and "start" in held:
+                chunk = message.get("body", b"")
+                if not message.get("more_body", False):
+                    await release(bytes(held["body"]) + chunk)
+                    return
+                if held["known"] and len(held["body"]) + len(chunk) <= ui.BADGE_MAX_BYTES:
+                    held["body"] += chunk
+                    return
+                # streamed without a length: give up and send everything untouched
+                start, buffered = held.pop("start"), bytes(held["body"])
+                held.clear()
+                await forward(start)
+                await forward({**message, "body": buffered + chunk})
+                return
+            await forward(message)
+
         try:
-            await self.app(scope, recv, send_wrapper)
+            async with track_request(builder):  # event-loop lag monitor (blocking spans)
+                await self.app(scope, recv, send_wrapper)
         except Exception as exc:
             finalize(error=exc)
             raise

@@ -12,9 +12,10 @@ from typing import Any
 
 from flask import Flask, current_app, has_app_context
 
-from redline_core import Recorder, Settings, configure
+from redline_core import Recorder, Settings, configure, ui
 from redline_core.api import RedlineAPI
 from redline_core.explain import ExplainExecutor
+from redline_core.load.control import run_hooks
 from redline_core.storage import SQLiteStore, Store
 
 from ._hooks import install_hooks
@@ -65,9 +66,19 @@ class _Runtime:
         self.engines: dict[str, EngineLike] = {}
         self._discover = not explicit_engines
         self._lock = threading.Lock()
+        launcher, stopper = run_hooks(store, settings)  # (None, None) unless load_from_ui
         self.api = RedlineAPI(
-            store, settings, framework="flask", explain_executor=self._executor_for
+            store,
+            settings,
+            framework="flask",
+            explain_executor=self._executor_for,
+            run_launcher=launcher,
+            run_stopper=stopper,
         )
+
+    def badge_on(self) -> bool:
+        """The floating badge: ``Settings.badge``, where ``"auto"`` follows ``app.debug``."""
+        return ui.badge_enabled(self.settings, self.app.debug)
 
     def add_engine(self, engine: EngineLike, alias: str | None = None) -> str:
         """Instrument another engine; returns its ``db_alias``."""
@@ -252,7 +263,9 @@ class Redline:
         app.register_blueprint(build_blueprint(runtime, prefix))
         app.cli.add_command(redline_cli)
         if cfg.enabled:  # disabled: no middleware, hooks or SQLAlchemy listeners at all
-            app.wsgi_app = RedlineMiddleware(app.wsgi_app, recorder, prefix)  # type: ignore[method-assign]
+            app.wsgi_app = RedlineMiddleware(  # type: ignore[method-assign]
+                app.wsgi_app, recorder, prefix, badge=runtime.badge_on
+            )
             install_hooks(app, runtime.discover_engines)
             runtime.discover_engines()
         atexit.register(runtime.close)

@@ -1,4 +1,4 @@
-# Redline internal contract (v0.1)
+# Redline internal contract (v0.1 + v0.2)
 
 This is the single source of truth shared by `redline-core`, the two adapters and the frontend.
 If you need to change it, change this file in the same commit and say so in your report.
@@ -506,7 +506,72 @@ adding `X-Redline-Replay-Of: <trace id>`; the recorder turns that header into th
 - `contrib.strawberry` (`RedlineExtension`) and `contrib.graphene` (`RedlineMiddleware`) → `resolver` spans.
 - `contrib.asgi`: async helpers shared by ASGI adapters (event-loop lag monitor, Server-Timing/badge body injection).
   The lag monitor itself is zero-dependency core: `redline_core.blocking.track_request(builder)` (sync + async context manager, re-exported by `contrib.asgi`) watches the running loop while the request is in flight (no-op without a running loop, for an inert builder or with `detect_blocking` off); stalls still in progress are flushed through `TraceBuilder.on_finish` callbacks, which `finish_trace` runs first. SQL hooks of *sync* drivers call `redline_core.blocking.note_sync_call(span, call)` after recording. `redline_core.transactions.begin_transaction(builder, callsite)` / `end_transaction(state, db_alias=, outcome=)` build `transaction` spans (empty transactions and control statements such as `SAVEPOINT` are not counted/recorded).
-- Core helpers used by every adapter: `TraceBuilder.server_timing() -> str` (`total;dur=…, db;dur=…;desc="12 queries", cache;dur=…, http;dur=…, tpl;dur=…, redline;desc="<trace id>"`) and `redline_core.ui.badge_snippet(trace_id, mount_url, summary) -> str` (a `<script src=".../assets/badge.js" data-…>` tag; badge.js is a dependency-free script shipped in the bundle).
+- Core helpers used by every adapter: `TraceBuilder.server_timing() -> str` (`total;dur=…, db;dur=…;desc="12 queries", cache;dur=…, http;dur=…, tpl;dur=…, redline;desc="<trace id>"`) and `redline_core.ui.badge_snippet(trace_id, mount_url, summary) -> str` (a `<script src="<mount>/badge.js" data-…>` tag; badge.js is a dependency-free script shipped at the **root** of the bundle, from `frontend/public/`).
+
+Concrete decisions (v0.2 implementation):
+
+- **Badge helpers** (`redline_core.ui`): `badge_enabled(settings, debug)` (`badge` True/False as given, `"auto"` =
+  the framework's debug flag: Django `DEBUG`, Flask/FastAPI/Litestar `app.debug`; always off when `enabled` is
+  off); `badge_allowed(status, content_type, *, content_encoding=None, csp=None)` (2xx, `text/html`, not
+  compressed, `csp_allows_badge`); `csp_allows_badge(csp)` (no policy or no `script-src`/`default-src` → yes;
+  otherwise the effective `script-src` (else `default-src`) of **every** policy must contain `'self'` or `*` –
+  nonce/hash-only policies skip the injection rather than cause a CSP violation); `badge_summary(builder,
+  status)`; `badge_snippet(...)`; `inject_badge(body: bytes, snippet) -> bytes | None` (inserted before the
+  **last** `</body>`, case-insensitive; `None` when there is none – the response is left as is);
+  `BADGE_MAX_BYTES = 2 MiB` (never buffered beyond it).
+- **Badge tag** (the UI's contract):
+  `<script src="{mount}/badge.js" defer data-redline-trace="{trace id}" data-redline-mount="{mount}"
+  data-redline-summary='{json}'></script>`, every attribute HTML-escaped. `mount` is Redline's mount as the
+  browser sees it, no trailing slash (script root / ASGI `root_path` + prefix, e.g. `/_redline`,
+  `/app/_redline`). `summary = {duration_ms, query_count, query_ms, issue_count: null, issue_kinds: [],
+  status}` measured when the response starts: issues are only detected in `finish_trace`, so `issue_count` is
+  always `null` in the tag and the badge fetches `{mount}/api/traces/{id}` (same origin, the viewer's cookies)
+  when it is hovered/opened, retrying a 404 briefly (the trace is saved a moment after the response; a trace
+  dropped by sampling stays 404 – show the summary only). Clicking opens `{mount}/#/requests/{id}`.
+- **Where it is injected:** recorded requests only (never Redline's own URLs), status 200–299, `text/html`,
+  no `Content-Encoding`, CSP permitting, not a file (Django `FileResponse`, Flask `send_file`/streamed
+  responses, ASGI responses with `Content-Disposition` (both ASGI adapters) or `Last-Modified` (FastAPI), i.e.
+  `FileResponse`/`StaticFiles`/`File`), not streamed (Django `StreamingHttpResponse`; Flask: only responses
+  with a numeric `Content-Length` ≤ 2 MiB, never `HEAD` or the legacy `write()` API; ASGI: the start message is
+  held back only when it announces such a body with `Content-Length` ≤ 2 MiB or none, and the body must be
+  complete within that limit – otherwise everything passes through untouched). `Content-Length` is rewritten
+  when present. Django injects only into traces that sampling kept (it finishes the trace before returning);
+  the other adapters inject before the sampling decision, so the badge must tolerate a 404. The stored trace
+  body is the app's own (without the badge) in Django/FastAPI/Litestar; Flask records the served body.
+- **badge.js access:** Django serves top-level bundle files without the `PERMISSION` check (the file holds no
+  data; the API the badge calls stays guarded); Flask/FastAPI/Litestar serve them behind the same guard as the
+  UI, so a visitor the guard refuses simply gets no badge.
+- **Server-Timing:** added to every *recorded* response when `server_timing` is on, value
+  `TraceBuilder.server_timing()` computed when the response starts; appended (`, `) to an existing
+  `Server-Timing` header.
+- **SSE** (`redline_core.stream`): `parse_since(params)` (default now; invalid → 400 `invalid_filter`),
+  `sync_events(api, since)` (WSGI: generator with `time.sleep`) and `async_events(api, since,
+  is_disconnected=None)` (ASGI: store polls in `asyncio.to_thread`, never blocking the loop). Headers
+  `Content-Type: text/event-stream; charset=utf-8`, `Cache-Control: no-cache`, `X-Accel-Buffering: no`,
+  `X-Frame-Options: DENY` (`SSE_HEADERS`). Frames: first `retry: 3000\n: connected\n\n`, then per new trace
+  `event: trace\nid: <trace id>\ndata: <TraceSummary JSON>\n\n` (oldest first; the cursor advances past every
+  trace sent), `: ping\n\n` every `PING_INTERVAL = 15` s, polled every `POLL_INTERVAL = 1` s, closed after
+  `MAX_DURATION = 300` s (module constants, read at call time). The UI reconnects with `since` = the newest
+  `started_at` it has. The stream lives under the mount, so it is never recorded and sits behind the same
+  access guard as the API; between polls it holds no store lock and no app DB connection. Django picks
+  `async_events` for an `ASGIRequest`, `sync_events` otherwise (a WSGI stream occupies a worker thread for up
+  to 5 min); Flask uses `sync_events` **without** `stream_with_context` (the generator only reads Redline's
+  store, so the app/request context – and e.g. a Flask-SQLAlchemy session – is torn down at once);
+  FastAPI/Litestar stream `async_events` and stop on client disconnect.
+- **base_url** (for `POST api/runs`): the app's own origin as seen by the request: `scheme://host[:port]` +
+  script root / ASGI `root_path`, no trailing slash (Django `request.scheme` + `get_host()` (`ALLOWED_HOSTS`
+  checked) + `SCRIPT_NAME`; Flask `request.root_url`; FastAPI/Litestar `request.base_url`). A `base_url` (and
+  `workers`) in the body is dropped by the core; the run always targets the adapter's `base_url`, and the
+  request already passed the access guard + CSRF check (with the default loopback guard the Host is loopback).
+- **Run hooks:** `redline_core.load.control.run_hooks(store, settings) -> (launcher, stopper)`; `(None, None)`
+  (→ 501) unless `load_from_ui` is on and the store is a `SQLiteStore` on a real file. The launcher calls
+  `launch_background(config, base_url, store.path)` and pre-inserts a `running` `Run` row (the child upserts it),
+  so the UI never sees a transient 404; no `base_url` → 400 `invalid_body`.
+- **Route scenarios:** `redline_core.load.generate.from_routes(routes, *, store=None, base_url=None, name=,
+  mount_prefix="/_redline")` over `(method, template, path | None)` triples (template = the adapter's
+  `Trace.route` string): a concrete path → weight 1; a parameterised route is filled from a recent 2xx/3xx
+  trace of that route when the store has one (weight 1), else left out. `generate.dump(scenario, out)` writes
+  JSON for `*.json`, TOML otherwise (and to stdout).
 
 ## 15. Adapters
 
@@ -517,6 +582,12 @@ adding `X-Redline-Replay-Of: <trace id>`; the recorder turns that header into th
 
 Flask and Litestar default to the same `local_only` policy as FastAPI (loopback client **and** loopback Host) and the same Origin / `Sec-Fetch-Site` CSRF check; a `permission` / `guards` hook replaces it. Django Ninja is served by django-redline (route templates resolved from Ninja's operations).
 Every adapter: Server-Timing, badge injection (HTML, non-streaming, 200–299, `badge` on), SSE `api/stream`, `RawResponse` passthrough, `X-Frame-Options: DENY` on Redline's own responses.
+Every adapter also serves top-level bundle files (`<mount>/badge.js`, `favicon.svg`, …) from `redline_core.ui`'s
+static directory (through `asset_path`, so traversal is refused), not only `assets/`, and passes `base_url` +
+the `run_hooks` launcher/stopper to the API (§14). Async views are wrapped in `track_request` (FastAPI and
+Litestar around the app call; Flask inside the coroutine that asgiref runs). CLI: `manage.py redline_scenario
+[-o FILE]` (URLconf walk incl. Ninja/DRF routers) and `flask redline scenario [-o FILE]` (`app.url_map`), both
+GET-only through `from_routes`; `flask redline scan [--json] [--fail]` (Jinja loader + blueprints).
 
 ## 16. Static N+1 scan (`redline_core.scan`)
 
