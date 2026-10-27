@@ -13,6 +13,7 @@ graphene = pytest.importorskip("graphene")
 strawberry = pytest.importorskip("strawberry")
 
 from redline_core.conf import Settings  # noqa: E402
+from redline_core.contrib import _resolver  # noqa: E402
 from redline_core.contrib.graphene import RedlineMiddleware  # noqa: E402
 from redline_core.contrib.strawberry import RedlineExtension  # noqa: E402
 from redline_core.model import Issue  # noqa: E402
@@ -31,6 +32,14 @@ def make_db() -> sqlite3.Connection:
         db.execute("INSERT INTO shop_customer VALUES (?, ?)", (i, f"c{i}"))
         db.execute("INSERT INTO shop_order VALUES (?, ?, ?)", (i, i, i * 1.5))
     return db
+
+
+@pytest.fixture(autouse=True)
+def _only_resolvers_with_children(monkeypatch):
+    # The duration rule keeps any resolver slower than MIN_KEPT_MS; on a busy CI machine
+    # even a trivial attribute resolver can cross it. These tests check the children rule,
+    # so the duration rule is taken out of the picture.
+    monkeypatch.setattr(_resolver, "MIN_KEPT_MS", 1e9)
 
 
 def run_sql(db, sql, params=()):
@@ -255,7 +264,8 @@ def test_no_trace_is_a_passthrough_and_trivial_resolvers_are_dropped():
     assert [s for s in trace.spans if s.kind == "resolver"] == []
 
 
-def test_slow_resolver_is_kept_and_errors_recorded():
+def test_slow_resolver_is_kept_and_errors_recorded(monkeypatch):
+    monkeypatch.setattr(_resolver, "MIN_KEPT_MS", 0.5)  # this one checks the duration rule
     schema = strawberry.Schema(Slow, extensions=[RedlineExtension])
     trace = traced(recorder(), lambda: schema.execute_sync("{ slow boom }"))
     by = {s.data["path"]: s for s in trace.spans if s.kind == "resolver"}
