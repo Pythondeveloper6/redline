@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "django-redline"
-version = "0.1.0a1"
+version = "0.2.0a1"
 description = "A modern request profiler for Django: SQL timelines, N+1 detection with fix diffs, one-click EXPLAIN, flamegraphs and a fast web UI. Async-correct."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -44,10 +44,10 @@ classifiers = [
 # Lockstep: the adapter pins the exact core release it was tested with. Django is
 # upper-bounded on purpose: the bound moves only in the commit that adds the next
 # Django to the CI matrix.
-dependencies = ["redline-core==0.1.0a1", "Django>=5.2,<6.2"]
+dependencies = ["redline-core==0.2.0a1", "Django>=5.2,<6.2"]
 
 [project.optional-dependencies]
-profile = ["redline-core[profile]==0.1.0a1"]
+profile = ["redline-core[profile]==0.2.0a1"]
 
 [project.urls]
 Homepage = "https://github.com/Pythondeveloper6/redline"

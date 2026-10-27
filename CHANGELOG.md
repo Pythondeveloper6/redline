@@ -8,7 +8,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). While the
 version is below `1.0` the public API may change between minor versions.
 
-## Unreleased: 0.2.0a1
+## 0.2.0a1 (2026-10-27)
 
 Frameworks, analysis, load testing and history. Everything in 0.1 keeps working: a 0.1
 store is migrated in place when 0.2 first opens it, and every new field has a default.
