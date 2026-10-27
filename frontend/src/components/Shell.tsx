@@ -10,9 +10,17 @@ import { ConfirmDialog, I, Icon, Kbd, useAsync } from './ui'
 export function Logo() {
   return (
     <span className="inline-flex items-center gap-2">
-      <svg width="22" height="22" viewBox="0 0 32 32" aria-hidden>
-        <rect width="32" height="32" rx="7" fill="rgb(var(--accent))" />
-        <path d="M6 21h5l3-10 4 14 3-9 2 5h3" fill="none" stroke="#fff" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" />
+      <svg width="22" height="22" viewBox="0 0 64 64" aria-hidden>
+        <defs>
+          <linearGradient id="rl-logo-bg" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0" stopColor="#f87171" />
+            <stop offset="1" stopColor="#dc2626" />
+          </linearGradient>
+        </defs>
+        <rect width="64" height="64" rx="15" fill="url(#rl-logo-bg)" />
+        <path d="M12 26 H52" stroke="#fff" strokeOpacity=".55" strokeWidth="3" strokeLinecap="round" strokeDasharray="2 6" />
+        <path d="M10 42 H19 L25 33 L32 47 L40 17 L46 37 H54" fill="none" stroke="#fff" strokeWidth="5" strokeLinecap="round" strokeLinejoin="round" />
+        <circle cx="40" cy="17" r="5.5" fill="#fff" />
       </svg>
       <span className="text-[15px] font-bold tracking-tight">Redline</span>
     </span>
