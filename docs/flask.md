@@ -69,8 +69,8 @@ Redline(
     *,
     engine=None,          # Engine | [engines] | {"alias": engine}
     settings=None,        # dict | redline_core.Settings
-    url_prefix="/_redline",
-    permission=None,      # callable(request) -> bool
+    url_prefix=None,      # default: the mount_path setting, else "/_redline"
+    permission=None,      # callable(request) -> bool; implies access="framework"
     store=None,           # a custom Store; default is the SQLite file
 )
 ```
@@ -79,8 +79,8 @@ Redline(
 |---|---|
 | `engine` | One engine, a list (the first is the `"default"` alias used by EXPLAIN) or a dict of aliases. Omit it with Flask-SQLAlchemy |
 | `settings` | A dict of [settings](settings.md) (case-insensitive keys) or a `Settings`. `app.config["REDLINE"]` (a dict) is merged underneath a dict passed here |
-| `url_prefix` | Where the UI and API live. Requests under it are never recorded |
-| `permission` | Your own access check. See [Access control](#access-control) |
+| `url_prefix` | Where the UI and API live (default: the `mount_path` setting, else `/_redline`). Requests under it are never recorded |
+| `permission` | Your own access check; implies `access = "framework"`. See [Access control](#access-control) |
 | `store` | A custom [Store](extending.md#the-store-protocol) |
 
 Settings can live in `app.config` too, which is handy with config classes:
@@ -90,9 +90,9 @@ app.config["REDLINE"] = {"sample_rate": 0.1, "slow_query_ms": 50}
 Redline(app, engine=engine)
 ```
 
-<!-- verify: configuration -->
 The layered configuration (presets, `redline.toml`, `REDLINE_*` environment variables)
-applies to Flask too. See [Configuration](configuration.md).
+applies to Flask too; `app.config["REDLINE"]` and `settings=` are the top layer. See
+[Configuration](configuration.md).
 
 ### Several engines
 
@@ -169,23 +169,33 @@ works with Flask-SQLAlchemy's `db.session` and `db.Model`. See
 
 ## Server-Timing, the badge and live mode
 
-<!-- verify: adapter wiring (Server-Timing, badge, SSE, snapshot) -->
-Every recorded response carries a `Server-Timing` header, HTML pages get the floating
-badge in debug mode, `api/stream` feeds [Live mode](the-ui.md#live-mode) and the snapshot
-download is served as-is. See [Server-Timing and the badge](server-timing-badge.md).
+Every recorded response carries a `Server-Timing` header when `server_timing` is on (`"auto"`
+by default: on in debug mode, off otherwise), HTML pages get the floating badge when
+`badge` is on (`"auto"`: debug mode), `api/stream` feeds [Live mode](the-ui.md#live-mode)
+and the snapshot download is served as-is. All of them sit behind the same
+[access control](access-control.md) and can be switched off with the `sse` and `snapshot`
+feature switches. See [Server-Timing and the badge](server-timing-badge.md).
+
+"Debug mode" is `app.debug`, read per request. `api/stream` holds a worker thread for as
+long as it is open, so on WSGI servers it closes after about 25 seconds and the UI
+reconnects with the last `seq`; use a threaded or async worker class if you want live mode
+under gunicorn.
 
 ## Access control
 
 The UI exposes your SQL, request bodies and EXPLAIN, so treat it like an admin tool.
 
-**Default.** With no `permission`, only loopback clients (`127.0.0.0/8`, `::1`, unix
-sockets) that address the server by a loopback name (`Host: localhost`, `127.0.0.1`,
-`[::1]`, any port; this blocks DNS rebinding) are served, and a warning is logged at
-startup. Refusals are JSON: `{"error": {"code": "forbidden", "message": "..."}}`.
+**Default.** With no `permission`, the [`access` policy](access-control.md) decides, and
+the default is `local`: only loopback clients (`127.0.0.0/8`, `::1`, unix sockets) that
+address the server by a loopback name (`Host: localhost`, `127.0.0.1`, `[::1]`, any port;
+this blocks DNS rebinding) are served, and a warning is logged at startup. Refusals are
+JSON: `{"error": {"code": "forbidden", "message": "..."}}`.
 
 **Your own check.** `permission` is any `callable(request) -> bool`, called with Flask's
-`request`. It **replaces** the loopback default entirely, so the `Host` check becomes
-yours.
+`request`. Passing it implies `access = "framework"` (unless you set `access` yourself),
+so it **replaces** the loopback default and the `Host` check becomes yours. The core
+access check still runs first for `allowed_ips`, `trusted_proxies`, `read_only`, features
+and CSRF. With an explicit policy such as `token`, `permission` is not used.
 
 ```python
 from flask_login import current_user
@@ -197,18 +207,17 @@ Raise `werkzeug.exceptions.abort(401)` (or any `HTTPException`) inside it to ans
 that status. It is rendered as `{"error": {"code": "unauthorized", ...}}`, keeping a
 `WWW-Authenticate` header.
 
-`loopback_guard(allowed_hosts=["devbox"])` builds the default check with extra accepted
-host names.
+The `allowed_hosts` setting adds accepted host names to the default check
+(`loopback_guard(allowed_hosts=["devbox"])` is the older spelling).
 
-<!-- verify: access control -->
 For tokens, basic auth, IP allow-lists, trusted proxies and read-only mode, use the
 `access` family of settings instead. They behave the same on every framework: see
 [Access control](access-control.md).
 
-**CSRF.** The mutating endpoints (`DELETE`, `POST`) reject browser requests whose `Origin`
-does not match the request host, `Origin: null`, and `Sec-Fetch-Site: cross-site`
-(`403 csrf_failed`). Non-browser clients send no `Origin` and are subject only to
-`permission`. Redline's own responses carry `X-Frame-Options: DENY`.
+**CSRF.** Every non-`GET` request (login and logout included) is refused with
+`403 csrf_failed` when it carries `Sec-Fetch-Site: cross-site` or `same-site`, or an
+`Origin` (including `null`) that does not match the request host. Non-browser clients send
+no `Origin` and are subject only to the access policy. Redline's own responses carry `X-Frame-Options: DENY`.
 
 ## EXPLAIN
 
@@ -222,11 +231,10 @@ from, inside a transaction that is always rolled back (and `READ ONLY` on Postgr
 ```bash
 flask redline clear [--yes]                              # delete every recorded trace
 flask redline prune [--max-age-days N] [--max-rows N]    # apply retention now
-flask redline scan                                       # static N+1 scan of Jinja templates
-flask redline scenario                                   # write a load-test scenario
+flask redline scan [--json] [--fail]                     # static N+1 scan of Jinja templates
+flask redline scenario [-o FILE] [--base-url URL]        # write a load-test scenario
 ```
 
-<!-- verify: flask redline scan / scenario -->
 `scan` runs the Jinja dialect of the [static scan](static-scan.md); `scenario` generates a
 file for [`redline load`](load-testing.md#generating-scenarios) from your `url_map`.
 

@@ -2,8 +2,6 @@
 
 [← Index](index.md)
 
-<!-- verify: configuration (presets, redline.toml, REDLINE_* env, redline config) -->
-
 Redline has one configuration surface for every framework. The same settings, the same
 names, the same validation: only the place you write the framework-specific part differs.
 This page is about *how settings are combined*. The settings themselves are in the
@@ -17,18 +15,27 @@ Settings are layered. Each layer overrides the one before it:
 | # | Layer | Where | Example |
 |---|---|---|---|
 | 1 | **Built-in defaults** | `redline_core.conf.Settings` | `sample_rate = 1.0` |
-| 2 | **Preset** | the `preset` setting | `preset = "production"` |
-| 3 | **Config file** | `redline.toml` or `[tool.redline]` in `pyproject.toml` | `sample_rate = 0.2` |
-| 4 | **Environment** | `REDLINE_<SETTING>` variables | `REDLINE_SAMPLE_RATE=0.1` |
-| 5 | **Framework settings** | `REDLINE = {...}`, `app.config["REDLINE"]`, `install(settings=...)`, `RedlinePlugin(settings=...)` | `"SAMPLE_RATE": 0.05` |
+| 2 | **Adapter defaults** | the framework adapter | Django: `sample_rate = 0.1` without `DEBUG`, `storage_path` and `project_root` from `BASE_DIR`; `access = "framework"` when the adapter has a native access hook |
+| 3 | **Preset** | the `preset` setting | `preset = "production"` |
+| 4 | **Config file** | `redline.toml` or `[tool.redline]` in `pyproject.toml` | `sample_rate = 0.2` |
+| 5 | **Environment** | `REDLINE_<SETTING>` variables | `REDLINE_SAMPLE_RATE=0.1` |
+| 6 | **Framework settings** | `REDLINE = {...}`, `app.config["REDLINE"]`, `install(settings=...)`, `RedlinePlugin(settings=...)` | `"SAMPLE_RATE": 0.05` |
 
 The last one wins. This lets you keep sensible defaults in a committed file, override them
 per environment with variables (no code change, no rebuild of the image), and still have
 the application code say the final word where it must.
 
-A **preset** only changes *defaults*: any value set in layers 3 to 5 overrides it. Setting
+A **preset** only changes *defaults*: any value set in layers 4 to 6 overrides it. Setting
 `preset = "production"` and `sample_rate = 0.5` gives you production behaviour with 50%
-sampling.
+sampling. The `preset` itself is read from the highest layer that sets it (framework, then
+env, then file, then adapter) and is `dev` if none does. The `features` table is merged key
+by key across layers rather than replaced.
+
+A **native access hook** (Django's staff check or `PERMISSION`, FastAPI `dependencies=`,
+Flask `permission=`, Litestar `guards=`) sets `access = "framework"` at the adapter layer,
+so any file, env or framework value for `access` wins, but a preset does not: Django with
+the `production` preset keeps its staff check. See
+[Access control](access-control.md#framework).
 
 !!! tip "See what is in effect"
 
@@ -36,9 +43,12 @@ sampling.
     redline config
     ```
 
-    prints the effective configuration, **where each value came from** (default, preset,
-    file, env or framework) and any warnings. Secrets are shown as `***`. The same view is
-    in the UI's **Settings** page and at `GET api/config`.
+    prints the effective configuration, **where each value came from** (default, adapter,
+    preset, file or `env REDLINE_X`) and any warnings. Secrets are shown as `***`. It sees
+    the file and environment layers only: settings you pass in code (`REDLINE = {...}`,
+    `install(settings=...)`) are not visible to a separate command. The running app's
+    complete view, including the framework layer, is the UI's **Settings** page and
+    `GET api/config`.
 
 ## Presets
 
@@ -46,14 +56,20 @@ Presets are named bundles of defaults for the three situations most people are i
 
 | Setting | `dev` (default) | `staging` | `production` |
 |---|---|---|---|
-| Sampling | keep everything | `sample_rate = 0.25` | `sample_rate = 0.05`, plus always keep slow requests and errors |
+| `sample_rate` | `1.0` (keep everything) | `0.25` | `0.05` |
+| `always_keep_errors` | `True` | `True` | `True` (slow requests are always kept too) |
 | Request and response bodies | captured | captured | **not** captured |
-| Exception locals | captured | **not** captured | **not** captured |
-| Log capture | `INFO` and above | `INFO` and above | `WARNING` and above |
-| Access | `local` (Django: staff) | `token` | `token`, **required** |
-| Read-only | no | no | **yes** |
-| Badge | `auto` (on in debug) | `auto` | **off** |
-| Load tests from the UI | off | off | off |
+| `capture_locals` | on | **off** | **off** |
+| `log_level` | `INFO` | `INFO` | `WARNING` |
+| `access` | `local` (Django: staff) | `token` | `token`, **required** |
+| `read_only` | no | no | **yes** |
+| `badge` | `auto` (on in debug) | `auto` | **off** |
+| `server_timing` | `auto` (on in debug) | `auto` | **off** |
+| `load_from_ui` | off | off | off |
+| `explain_analyze` | off | off | off |
+
+Outside `dev` the token must be at least 24 characters, or Redline refuses to start with a
+message that includes a one-line way to generate one.
 
 Choose one:
 
@@ -89,15 +105,21 @@ Choose one:
     REDLINE_PRESET=production
     ```
 
-The `production` preset requires an access token (`access="token"` with `REDLINE_TOKEN` or
-`token_file`). Without one, `redline doctor` and the startup log warn that the UI is
-locked: see [Access control](access-control.md#production-read-only). The details and
+The `staging` and `production` presets use `access="token"`, which needs a token
+(`REDLINE_TOKEN` or `token_file`). Without one Redline raises a `SettingsError` at startup
+that says how to generate one. See [Access control](access-control.md#production-read-only). The details and
 reasoning are in [Production](production.md#the-production-preset).
 
 ## The config file
 
 Redline looks for `redline.toml` in `project_root`, then for a `[tool.redline]` table in
-`pyproject.toml` there. Set `REDLINE_CONFIG=/path/to/file.toml` to use another file.
+`pyproject.toml` there. It never searches parent directories. `project_root` is the
+framework setting if given, else `REDLINE_PROJECT_ROOT`, else the adapter default (Django:
+`BASE_DIR`), else the working directory. Set `REDLINE_CONFIG=/path/to/file.toml` to use
+another file; it must exist. `redline.toml` can be flat, as below, or nest the keys under
+`[redline]` or `[tool.redline]`.
+
+An unknown key in the file is an error naming the file, with a "did you mean" hint.
 
 Keys are the setting names, in lower case:
 
@@ -149,9 +171,11 @@ parsed by the setting's type.
 |---|---|---|
 | bool | `1`, `true`, `yes`, `on` / `0`, `false`, `no`, `off` | `REDLINE_ENABLED=0` |
 | int, float | a number | `REDLINE_SAMPLE_RATE=0.1` |
-| string | the text | `REDLINE_ACCESS=token` |
-| list | comma-separated | `REDLINE_ALLOWED_IPS=10.0.0.0/8,192.168.0.0/16` |
-| table | JSON | `REDLINE_FEATURES={"replay": false}` |
+| string | the text, as is (`token` and `secret_key` are kept verbatim) | `REDLINE_ACCESS=token` |
+| optional (`str`, number or URL) | an empty value, `none` or `null` means unset | `REDLINE_MAX_ROWS=none` |
+| `badge`, `server_timing` | `auto` or a bool | `REDLINE_BADGE=auto` |
+| list | a JSON array or comma-separated | `REDLINE_ALLOWED_IPS=10.0.0.0/8,192.168.0.0/16` |
+| table (`features`, `basic_users`) | a JSON object or `key=value` pairs separated by commas (feature values are bools) | `REDLINE_FEATURES=replay=false,load=false` |
 
 Some useful ones:
 
@@ -160,15 +184,19 @@ REDLINE_ENABLED=0                      # switch recording off without a deploy
 REDLINE_PRESET=production
 REDLINE_ACCESS=token
 REDLINE_TOKEN=...                      # from your secret manager
+REDLINE_SECRET_KEY=...                 # signs login cookies; needed with several workers
 REDLINE_RELEASE=$GIT_SHA
 REDLINE_STORAGE_PATH=/var/lib/myapp/redline.db
 REDLINE_CONFIG=/etc/myapp/redline.toml
 REDLINE_ALLOW_OPEN=1                   # needed (with access=open) to expose the UI openly
 ```
 
-<!-- verify: env value parsing formats (lists, tables, unknown variables) -->
-An unknown key in the **file** or the framework dict is an error with a "did you mean"
-hint, exactly as in [Settings](settings.md#rules-that-apply-to-every-setting).
+Every `REDLINE_<NAME>` variable must name a setting. A typo such as `REDLINE_SAMPEL_RATE`
+is a startup error with a "did you mean `REDLINE_SAMPLE_RATE`" hint, never a silent
+default. The exceptions are `REDLINE_CONFIG`, `REDLINE_ALLOW_OPEN`, `REDLINE_RELEASE` and
+`REDLINE_TEST_*`. A bad value is reported with the layer it came from. The same "did you
+mean" error applies to unknown keys in the file and in the framework dict, exactly as in
+[Settings](settings.md#rules-that-apply-to-every-setting).
 
 ## A complete example per framework
 
@@ -228,7 +256,7 @@ the environment.
 
 ```bash
 redline config        # the effective configuration, its sources and any warnings
-redline doctor        # checks: storage writable, UI bundle present, access policy safe, token strength, proxies
+redline doctor        # checks: storage writable, UI bundle present, access policy, token, sessions, proxies, retention
 ```
 
 Run `redline doctor` as a deploy-time check. See the [CLI reference](cli.md).

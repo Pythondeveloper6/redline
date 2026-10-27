@@ -103,9 +103,10 @@ and tag the requests with `X-Redline-Run` so Redline can still correlate.
 
 ## Does it slow my application down?
 
-It adds work: on an Apple M2 Pro, about **0.04 to 0.06 ms per request plus 12 to 44 µs
-per SQL query** while recording (a few µs in total when disabled), measured on 0.1. The 0.2
-features add small per-span or per-batch costs and are idle when unused. See
+It adds work: on an Apple M2 Pro, about **0.04 to 0.09 ms per request plus 28 to 51 µs
+per SQL query** while recording every request (a few µs in total when disabled), measured
+on v0.2 (v0.1: 0.05 to 0.06 ms and 22 to 44 µs). The 0.2 features add small per-span or
+per-batch costs and are idle when unused. See
 [Performance and overhead](performance.md) for the measurements, the cost model and what
 each setting controls. The headline facts are that disk I/O is off the request path, the
 cost when nothing is recording is a `ContextVar.get()`, and **`sample_rate` reduces analysis

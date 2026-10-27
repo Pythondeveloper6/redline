@@ -8,10 +8,12 @@ goes and what you can do about it) and the [measured numbers](#measured-numbers)
 
 !!! abstract "In one line"
 
-    Measured on an Apple M2 Pro (Python 3.13, 2026-10-26, on `0.1.0a1`): recording costs about
-    **0.04 to 0.06 ms per request plus 12 to 44 µs per SQL query**, depending on the
-    framework and on whether the trace is kept; disabled, it is a few µs. Details and how
-    to reproduce are [below](#measured-numbers).
+    Measured on an Apple M2 Pro (Python 3.14, 2026-10-27, v0.2 development tree): recording
+    every request costs about **0.04 to 0.09 ms per request plus 28 to 51 µs per SQL
+    query**, depending on the framework; disabled, it is a few µs per request and under
+    1 µs per query. The v0.1 figures (0.05 to 0.06 ms and 22 to 44 µs) are kept
+    [below](#v01-numbers) for comparison. Details and how to reproduce are
+    [below](#measured-numbers).
 
 ## Where the cost is
 
@@ -67,9 +69,10 @@ The 0.2 features were designed to cost nothing when idle. Their cost, by where i
 | The aggregate pages and History | when a page is opened | queries over small summary tables, not over trace bodies |
 | Load testing | while a run is going | the generator runs in separate **processes**; run it from another machine if you want its CPU kept off the app under test |
 
-The per-request and per-query figures below were measured on 0.1; the additions above are
-small per-span or per-batch costs that follow the same shape, and **have not been separately
-benchmarked yet**. If you need a number for your app, use [Measure it yourself](#measure-it-yourself).
+The [measured numbers](#measured-numbers) below include v0.2 with all of the above active
+(the harness exercises the recorder end to end). The individual additions are small
+per-span or per-batch costs that were **not benchmarked one by one**. If you need a number
+for your app, use [Measure it yourself](#measure-it-yourself).
 
 ### Plus, on demand
 
@@ -78,7 +81,7 @@ benchmarked yet**. If you need a number for your app, use [Measure it yourself](
 | Profiling a request | pyinstrument sampling every millisecond while the request runs; only for profiled requests |
 | EXPLAIN | one query on your database, once, when someone clicks. `ANALYZE` runs the query for real |
 | The UI polling | one `COUNT(*)` plus a page query every two seconds while a Requests page is open and Live mode is on polling (Live mode normally uses one open SSE connection instead) |
-| `api/stream` | one open connection per viewer, closed after five minutes (the client reconnects) |
+| `api/stream` | one open connection per viewer, closed after five minutes on ASGI servers and about 25 seconds on WSGI servers, where it holds a worker thread (the client reconnects and resumes by `seq`) |
 | A snapshot download | building one HTML file (the UI bundle, inlined) |
 
 ## What the design avoids
@@ -119,6 +122,63 @@ benchmarked yet**. If you need a number for your app, use [Measure it yourself](
 
 ## Measured numbers
 
+### v0.2 numbers
+
+From `benchmarks/RESULTS.md`, measured on **2026-10-27** against the v0.2 development tree
+(`redline-core 0.1.0a1` version string), Apple M2 Pro, Python 3.14.7 (CPython, macOS
+arm64), Django 6.1.2, FastAPI 0.162.0, Flask 3.1.3, Litestar 2.25.0, SQLAlchemy 2.1.6,
+pyinstrument 5.1.3. Method as in v0.1: 1500 timed requests per cell, three interleaved
+rounds pooled, a fresh subprocess per cell, an in-process client, in-memory SQLite. The
+`off` baseline is a bare view, so Redline's *share* looks larger than it would next to a
+real database. The run was repeated back to back; the two runs agree within 2 to 4%, and
+the table shows run 1 with run 2 where they differ visibly.
+
+**Added time per request** (median, 0 queries) and **per SQL query**, recording with
+`sample_rate = 1` (every trace kept), against Redline not installed:
+
+| Framework | Per request (v0.2) | v0.1 | Per query (v0.2) | v0.1 | Disabled, per request / query |
+|---|---|---|---|---|---|
+| Django | +0.071 ms | +0.063 ms | +28.0 µs | +22.4 µs | +0.004 ms / +0.4 µs |
+| FastAPI | +0.089 ms | +0.048 ms | +50.1 µs | +44.1 µs | +0.007 ms / +0.4 µs |
+| Flask | +0.038 ms | new | +28.2 µs | new | +0.001 ms / +0.2 µs |
+| Litestar | +0.058 ms | new | +50.9 µs | new | about 0 / +0.3 µs |
+
+Other modes (run 1): with `sample_rate = 0` (nothing kept) the per-request / per-query cost
+is +0.042 ms / 14.8 µs (Django), +0.061 ms / 28.2 µs (FastAPI), +0.037 ms / 27.3 µs (Flask)
+and +0.036 ms / 31.3 µs (Litestar). Profiling every request (`profile: "all"`) costs
++0.222 / +0.342 / +0.217 / +0.237 ms per request and +65 / +119 / +68 / +116 µs per query,
+in that order.
+
+Read the comparison with care. Django and FastAPI are somewhat more expensive than in v0.1
+(FastAPI's fixed cost +0.089 vs +0.048 ms is the largest move). Part of it may be Python
+3.14 against 3.13 and a shared machine (the `off` baselines drifted by a few microseconds),
+but it is consistent across both runs, so treat it as a candidate regression until it has
+been re-measured on 3.13. Flask is the cheapest adapter per request; Litestar and FastAPI
+share the ASGI path and cost about the same.
+
+Storage (`benchmarks/storage.py`, v0.2 against v0.1):
+
+| Queries / trace | On disk per trace | v0.1 | Writer, traces/s | v0.1 |
+|---|---|---|---|---|
+| 0 | 2.3 KiB | 1.6 KiB | about 29,000 to 32,000 | 53,600 |
+| 20 | 31.5 KiB | 30.9 KiB | about 3,200 to 3,600 | 3,800 |
+| 200 | 265.3 KiB | 260.9 KiB | about 400 | 440 |
+
+A profile adds 1.8 KiB of speedscope JSON per profiled trace. An in-flight SQL span costs
+1,549 bytes, so the default `max_spans_per_trace = 2000` caps a request at about 3 MiB of
+spans. Tiny traces are about 0.7 KiB bigger and the writer is slower for them (not
+investigated), still far above any realistic rate for one process.
+
+**Load generator** (`redline load`, httpx, open model, against a hello-world ASGI app on
+the same machine): about 1,300 requests per second per worker process without drops, scaling
+less than linearly (about 1,600 to 1,800 with 2 workers, about 2,400 to 3,000 with 4).
+Beyond a worker's capacity the open-model backlog never drains and the run collapses, which
+`redline load` reports as a knee, so start a sweep low and step up. Repeat sweeps varied by
+10 to 25% at the edge. For more than about 1,000 requests per second per process add
+`--workers`.
+
+### v0.1 numbers
+
 From `benchmarks/RESULTS.md`, measured on **2026-10-26** against `0.1.0a1`, Apple M2 Pro, Python 3.13.15
 (CPython, macOS arm64), Django 6.1.2, FastAPI 0.162.0, SQLAlchemy 2.1.6, pyinstrument
 5.1.3. Each cell is 1500 timed requests after warm-up, in a fresh subprocess, through an
@@ -149,8 +209,9 @@ The FastAPI per-query figures include SQLAlchemy's event dispatch around a ~15 �
 | Writer saturation | the writer stores about **3,800 traces/s** of 20 queries each (about 440/s at 200 queries, 50,000/s with none) on the same machine; `dropped` only rises above that rate of *kept* traces (`benchmarks/storage.py`) |
 
 The plan's target was "under 1 ms plus a few microseconds per query when not profiling".
-The per-request part is met by a wide margin; the per-query part is **12 to 44 µs**, more
-than "a few", mostly spent on fingerprinting, callsite capture and parameter redaction.
+The per-request part is met by a wide margin; the per-query part is **12 to 51 µs** across
+both releases, more than "a few", mostly spent on fingerprinting, callsite capture and
+parameter redaction.
 
 ### Reproduce
 

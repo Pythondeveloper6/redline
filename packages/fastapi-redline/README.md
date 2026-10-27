@@ -50,7 +50,7 @@ install(
     app,
     engine=None,          # Engine | AsyncEngine | [engines] | {"alias": engine}
     settings=None,        # dict | redline_core.Settings
-    prefix="/_redline",
+    prefix=None,          # default: the mount_path setting, else "/_redline"
     dependencies=None,    # auth dependencies for the UI + API (see below)
     models=None,          # Base / registry for fix suggestions (default: auto-discover)
     store=None,           # custom Store (default: SQLite file at storage_path)
@@ -160,14 +160,16 @@ the one-line code hint with lower confidence instead. Both the lazy-load form
 
 The UI exposes your SQL, request bodies and EXPLAIN, so treat it like an admin tool.
 
-**Default.** With no `dependencies`, only loopback clients (127.0.0.0/8, `::1`, unix sockets)
+**Default.** With no `dependencies`, the `access` setting decides (default `local`): only loopback clients (127.0.0.0/8, `::1`, unix sockets)
 that address the server by a loopback name (`Host: localhost`, `127.0.0.1`, `[::1]`, any port;
 this blocks DNS rebinding)
 are served and a warning is logged at startup. Refusals, and `HTTPException`s from your own
 dependencies, are JSON `{"error": {"code": "forbidden" | "unauthorized" | ..., "message"}}`.
-Use `Depends(loopback_guard(allowed_hosts=["devbox"]))` to allow another host name. Behind a
-reverse proxy every client may look like localhost: pass real dependencies instead, or run
-uvicorn with `--proxy-headers` and `--forwarded-allow-ips` so the client address is the real one.
+Add other host names with the `allowed_hosts` setting. Passing `dependencies=` implies
+`access="framework"`. A loopback peer sending `X-Forwarded-For` without being in
+`trusted_proxies` is refused; behind a reverse proxy use `access="token"` and
+`trusted_proxies`. Tokens, basic auth, `allowed_ips` and `read_only` are described in the
+[access control docs](https://pythondeveloper6.github.io/redline/access-control/).
 
 **Your existing auth dependency:**
 

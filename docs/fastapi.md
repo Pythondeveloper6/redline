@@ -32,7 +32,7 @@ install(
     app,
     engine=None,          # Engine | AsyncEngine | [engines] | {"alias": engine}
     settings=None,        # dict | redline_core.Settings
-    prefix="/_redline",
+    prefix=None,          # default: the mount_path setting, else "/_redline"
     dependencies=None,    # auth dependencies for the UI and API
     models=None,          # Base / registry for fix suggestions (default: auto-discover)
     store=None,           # a custom Store (default: SQLite file at storage_path)
@@ -44,8 +44,8 @@ install(
 | `app` | `FastAPI` | required | The application to instrument. Call after it is built, before it starts |
 | `engine` | `Engine`, `AsyncEngine`, list, or `{alias: engine}` | `None` | Engines to record SQL from and run EXPLAIN on. See [Engines](#engines) |
 | `settings` | `dict` or `redline_core.Settings` | `None` (defaults) | Any [setting](settings.md); keys are case-insensitive; unknown keys raise `SettingsError` |
-| `prefix` | `str` | `"/_redline"` | Where the UI and API are mounted. Must be a sub-path; `"/"` raises `ValueError` |
-| `dependencies` | sequence of callables or `Depends(...)` | `None` | Protects the UI and API. `None` means **loopback only** plus a warning. See [Access control](#access-control) |
+| `prefix` | `str` or `None` | `None` | Where the UI and API are mounted. `None` means the `mount_path` setting, then `"/_redline"`. Must be a sub-path; `"/"` raises `ValueError` |
+| `dependencies` | sequence of callables or `Depends(...)` | `None` | Protects the UI and API; passing them implies `access = "framework"`. `None` means the `access` policy decides (default `local`: **loopback only**, plus a warning). See [Access control](#access-control) |
 | `models` | declarative `Base`, `registry`, mapped class, or an iterable of those | `None` | Where the fix suggester looks for relationships. Default: every registry SQLAlchemy knows |
 | `store` | a `Store` | `None` | Replace the SQLite store. See [Extending](extending.md#the-store-protocol) |
 
@@ -227,8 +227,8 @@ instrumented.
 
 ### The default: loopback only
 
-With no `dependencies`, a built-in `local_only` dependency allows a request only when
-**both** of these hold:
+With no `dependencies`, the `access` setting decides, and its default `local` allows a
+request only when **both** of these hold:
 
 - the **client** is loopback: `127.0.0.0/8`, `::1`, IPv4-mapped IPv6 loopback, unix
   sockets, or Starlette's `TestClient`;
@@ -248,19 +248,21 @@ Pass install(app, dependencies=[...]) before exposing it.
 !!! warning "Behind a reverse proxy, 'loopback' may be everyone"
 
     If nginx or a load balancer forwards to your app over `127.0.0.1`, every request
-    looks like localhost and the default check lets the **whole internet** in. Either pass
-    real dependencies, or run uvicorn with `--proxy-headers` and
-    `--forwarded-allow-ips` so `request.client` is the real client address.
+    would look like localhost. Redline refuses a loopback peer that carries
+    `X-Forwarded-For`, `X-Real-IP` or `Forwarded` unless it is listed in `trusted_proxies`,
+    but the safe setup is `access = "token"` (or real dependencies) plus `trusted_proxies`.
 
 To reach a local server through another name (a hosts-file alias, a tunnel), keep the
-loopback rules and allow that name explicitly:
+loopback rules and allow that name explicitly with the `allowed_hosts` setting:
 
 ```python
-from fastapi import Depends
-from fastapi_redline import install, loopback_guard
-
-install(app, engine=engine, dependencies=[Depends(loopback_guard(allowed_hosts=["devbox"]))])
+install(app, engine=engine, settings={"allowed_hosts": ["devbox"]})
 ```
+
+(`loopback_guard(allowed_hosts=[...])` is still exported for use as an explicit
+dependency.) The `local` policy treats Starlette's `TestClient` as loopback, but
+`POST api/runs` from a `TestClient` targets `http://testserver`, which is not a loopback
+name: set `base_url` if a test starts a load run.
 
 ### Your own dependency
 
@@ -301,8 +303,10 @@ install(app, engine=engine, dependencies=[Depends(loopback_guard(allowed_hosts=[
     install(app, engine=engine, dependencies=[only_staff])   # wrapped in Depends for you
     ```
 
-`dependencies=[]` leaves the UI **open on purpose**. Do not do that outside a private
-network.
+`dependencies=[]` leaves the UI **open on purpose** (it implies `access = "framework"` and
+nothing checks). Do not do that outside a private network. For tokens, basic auth,
+`allowed_ips`, `read_only` and the rest, use the [`access` settings](access-control.md);
+with an explicit policy other than `framework` your dependencies still run, after the gate.
 
 The dependencies apply to **everything** under the prefix: the page, assets and the API.
 An `HTTPException` they raise is answered in Redline's error shape,
@@ -312,12 +316,12 @@ An `HTTPException` they raise is answered in Redline's error shape,
 
 ### CSRF and Origin
 
-The mutating endpoints (`DELETE api/traces...`, `POST api/explain`) are always protected
-by a guard, whatever your dependencies:
+Every non-`GET` request (`DELETE api/traces...`, `POST api/explain`, login, logout) is
+always protected by the gate, whatever your dependencies:
 
-- a request with `Sec-Fetch-Site: cross-site` is rejected (`403 csrf_failed`);
+- a request with `Sec-Fetch-Site: cross-site` or `same-site` is rejected (`403 csrf_failed`);
 - a request with an `Origin` header must match the request's `Host` (or
-  `X-Forwarded-Host`); `Origin: null` is rejected;
+  `X-Forwarded-Host` from a trusted proxy); `Origin: null` is rejected;
 - a request **without** `Origin` (curl, scripts) is allowed, because a web page cannot
   forge that, but your dependencies still apply.
 

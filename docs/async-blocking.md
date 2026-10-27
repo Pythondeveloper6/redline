@@ -82,7 +82,7 @@ The overhead is the timer callback, a few microseconds every 5 ms per busy loop.
 |---|---|
 | FastAPI | Lag monitor, watchdog and sync-driver hooks |
 | Django on ASGI | Lag monitor and the sync ORM hook, for `async def` views |
-| Litestar | Lag monitor and watchdog <!-- verify: litestar blocking-in-async wiring --> |
+| Litestar | Lag monitor (the app runs inside it while a request is recorded) |
 | Django on WSGI, Flask | No event loop to watch: not applicable |
 
 ## Limits

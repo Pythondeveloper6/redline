@@ -237,7 +237,8 @@ and log a warning.
 - **Endpoints, Cache and External.** p50, p95 and p99 per route, cache hit rates and
   stampedes, and outbound-call latency, duplicates and retries.
 - **A static N+1 scan** of templates and DRF serializers, for CI.
-- **A floating badge and `Server-Timing`** on every recorded response.
+- **A floating badge and `Server-Timing`** in debug mode (`badge` and `server_timing` default
+  to `"auto"`), off in the `production` preset.
 - **Your own spans.** `@redline_core.span("pricing.compute")`, or `with` and `async with`.
 
 <table>
@@ -312,9 +313,9 @@ shop_order ...: 3 ms -> 410 ms`). Run it against environments you own, never pro
 
 ## Configuration
 
-Everything is optional. Settings are layered, last one wins: built-in defaults, a **preset**
-(`dev`, `staging`, `production`), a `redline.toml` (or `[tool.redline]`), `REDLINE_*`
-environment variables, then your framework's own settings. `redline config` prints the
+Everything is optional. Settings are layered, last one wins: built-in defaults, the
+adapter's defaults, a **preset** (`dev`, `staging`, `production`), a `redline.toml` (or
+`[tool.redline]`), `REDLINE_*` environment variables, then your framework's own settings. `redline config` prints the
 result and where each value came from.
 
 ```python
@@ -343,10 +344,11 @@ and the [settings reference](https://pythondeveloper6.github.io/redline/settings
 - **Access.** One policy for every framework: `local` (loopback only; Django: staff users),
   `token`, `basic`, the framework's own hook, or your own check, plus IP allow-lists,
   trusted proxies, a read-only mode and per-feature switches. Behind a reverse proxy
-  "loopback" may mean everyone: use a token. See
+  use a token and `trusted_proxies`; a loopback peer carrying forwarding headers is refused. See
   [Access control](https://pythondeveloper6.github.io/redline/access-control/).
-- **CSRF.** The mutating calls are protected: Django's own CSRF check on every API request,
-  and an `Origin` / `Sec-Fetch-Site` guard on the other frameworks.
+- **CSRF.** Every non-GET call is protected: a shared `Origin` / `Sec-Fetch-Site` check
+  (cross-site and same-site are refused) on all four adapters, plus Django's own CSRF check
+  on Django.
 - **Redaction** is on by default: `Authorization`, `Cookie`, `Set-Cookie`, `X-Api-Key` and
   password, token, secret, card and similar keys in query strings, bodies, SQL parameters,
   log messages and exception locals are masked **before** anything is stored. It is
@@ -355,7 +357,9 @@ and the [settings reference](https://pythondeveloper6.github.io/redline/settings
   [Security](https://pythondeveloper6.github.io/redline/security/#what-redaction-does-not-catch).
 - **Data on disk.** `.redline/redline.db` is not encrypted. Keep it out of Git, keep
   retention short, and keep the UI off the public internet.
-- **Load from the UI** is off by default, and can only target the app that serves it.
+- **Load from the UI** is off by default. It sends only paths, to the `base_url` you set or
+  to a loopback / `allowed_hosts` address, and is capped at one hour, 5 000 rps and 200
+  steps.
 - Requests to Redline's own URLs are never recorded; its storage is never a Django
   connection or one of your engines.
 
@@ -368,8 +372,8 @@ more.
 
 - **Alpha.** The API, settings and storage schema may change. The store migrates itself in
   place, but there is no deprecation cycle yet.
-- **Overhead is measured on one machine, on 0.1.** About 0.04 to 0.06 ms per request plus 12
-  to 44 µs per query on an Apple M2 Pro
+- **Overhead is measured on one machine.** On v0.2 about 0.04 to 0.09 ms per request plus 28
+  to 51 µs per query on an Apple M2 Pro (v0.1: 0.05 to 0.06 ms and 22 to 44 µs)
   ([numbers](https://pythondeveloper6.github.io/redline/performance/#measured-numbers)).
   `sample_rate` reduces analysis and disk work, **not** the per-query recording cost.
 - **Not hardened for production fleets.** Single-node SQLite. Multi-process use shares one

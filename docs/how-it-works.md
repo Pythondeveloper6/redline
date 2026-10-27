@@ -221,10 +221,11 @@ Cost has four sources:
 | Per-kept-trace analysis (redaction, detectors, serialising) | kept traces | `sample_rate`, always-keep rules |
 | Profiling | profiled requests | `profile`, `profile_sample_rate` |
 
-Measured on an Apple M2 Pro (Python 3.13, 2026-10-26, `benchmarks/RESULTS.md`), the
-per-request bookkeeping is **0.03 to 0.06 ms**, and per-query recording **12.5 µs**
-(Django) or **25.6 µs** (FastAPI, including SQLAlchemy event dispatch) when nothing is
-kept, rising to **22 to 44 µs** when every trace is kept and analysed. Disabled, Redline
+Measured on an Apple M2 Pro (Python 3.14, 2026-10-27, `benchmarks/RESULTS.md`), the
+per-request bookkeeping is **0.04 to 0.09 ms**, and per-query recording **15 to 31 µs**
+(including SQLAlchemy event dispatch on FastAPI, Flask and Litestar) when nothing is
+kept, rising to **28 to 51 µs** when every trace is kept and analysed (v0.1 on Python
+3.13: 12.5 to 44 µs). Disabled, Redline
 costs a few µs per request. See [Performance and overhead](performance.md#measured-numbers)
 for the full table and how to reproduce it.
 

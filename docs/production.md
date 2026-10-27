@@ -17,7 +17,6 @@ authentication, and leave the expensive features off.**
 
 ## The production preset
 
-<!-- verify: presets and access control -->
 The quickest safe start is one line. `preset = "production"` sets defaults for a
 production instance; anything you set explicitly still wins.
 
@@ -28,14 +27,18 @@ REDLINE_TOKEN=...                 # from your secret store
 
 | What the preset does | Value |
 |---|---|
-| Sampling | `sample_rate = 0.05`, plus every slow request and every error |
+| Sampling | `sample_rate = 0.05`, `always_keep_errors = True`, plus every slow request (`always_keep_slower_than_ms`, default 500) |
 | Request and response bodies | not captured |
 | Exception locals | not captured |
-| Logs | `WARNING` and above only |
-| Access | `access = "token"`, **required**: without a token the UI refuses everyone |
-| Read-only | on: no `DELETE`, no runs from the API, no EXPLAIN ANALYZE |
-| Floating badge | off |
-| Load tests from the UI | off |
+| Logs | `log_level = "WARNING"` |
+| Access | `access = "token"`, **required** (24+ characters): without a token Redline raises a `SettingsError` at startup |
+| Read-only | on: every non-GET `api/` call is refused with `403 read_only`, and so is EXPLAIN ANALYZE |
+| Floating badge, `Server-Timing` | both off |
+| Load tests from the UI, `explain_analyze` | off |
+
+Django keeps its staff check under the preset (a preset does not change `access` there).
+Also set `secret_key` (`REDLINE_SECRET_KEY`) when you run several workers, and
+`trusted_proxies` when a proxy is in front.
 
 It does **not** choose your retention, your storage path or your ignore list, so still set
 those (below). Run `redline doctor` after deploying, and `redline config` to see exactly

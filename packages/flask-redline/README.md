@@ -60,7 +60,7 @@ Redline(
     *,
     engine=None,          # Engine | [engines] | {"alias": engine} (default: Flask-SQLAlchemy's)
     settings=None,        # dict | redline_core.Settings
-    url_prefix="/_redline",
+    url_prefix=None,      # default: the mount_path setting, else "/_redline"
     permission=None,      # callable(request) -> bool (see "Access control")
     store=None,           # custom Store (default: SQLite file at storage_path)
 )
@@ -191,16 +191,19 @@ code hint with lower confidence instead.
 
 The UI exposes your SQL, request bodies and EXPLAIN, so treat it like an admin tool.
 
-**Default.** With no `permission`, only loopback clients (127.0.0.0/8, `::1`, unix sockets)
+**Default.** With no `permission`, the `access` setting decides (default `local`): only loopback clients (127.0.0.0/8, `::1`, unix sockets)
 that address the server by a loopback name (`Host: localhost`, `127.0.0.1`, `[::1]`, any
 port; this blocks DNS rebinding) are served, and a warning is logged at startup. Refusals
-are JSON `{"error": {"code": "forbidden", "message"}}`. Use
-`permission=loopback_guard(allowed_hosts=["devbox"])` to allow another host name. Behind a
-reverse proxy every client may look like localhost: pass a real `permission`, or apply
-`ProxyFix` so the client address is the real one.
+are JSON `{"error": {"code": "forbidden", "message"}}`. Add other host names with the
+`allowed_hosts` setting. A loopback peer sending `X-Forwarded-For` without being in
+`trusted_proxies` is refused; behind a reverse proxy use `access="token"` and
+`trusted_proxies`. Tokens, basic auth, `allowed_ips` and `read_only` are described in the
+[access control docs](https://pythondeveloper6.github.io/redline/access-control/).
 
 **Your own check.** `permission` is any `callable(request) -> bool`, called with Flask's
-`request`; it replaces the loopback default entirely, so the `Host` check becomes yours.
+`request`; passing it implies `access="framework"` and replaces the loopback default, so the
+`Host` check becomes yours (the core gate still applies `allowed_ips`, `read_only`, features
+and CSRF).
 
 ```python
 from flask_login import current_user
@@ -212,11 +215,11 @@ Raise `werkzeug.exceptions.abort(401)` (or any `HTTPException`) inside it to ans
 that status; it is rendered as `{"error": {"code": "unauthorized", ...}}`, keeping a
 `WWW-Authenticate` header.
 
-**CSRF.** The mutating endpoints (`DELETE` traces, `POST explain`) reject browser requests
-whose `Origin` does not match the request host, `Origin: null`, and
-`Sec-Fetch-Site: cross-site` (`403 csrf_failed`). Browsers always send `Origin` on those
-methods, so another website cannot drive your Redline through a logged-in browser.
-Non-browser clients (curl, scripts) send no `Origin` and are only subject to `permission`.
+**CSRF.** Every non-GET request is refused with `403 csrf_failed` when it carries
+`Sec-Fetch-Site: cross-site` or `same-site`, or an `Origin` (including `null`) that does not
+match the request host. Browsers always send `Origin` on those methods, so another website
+cannot drive your Redline through a logged-in browser. Non-browser clients (curl, scripts)
+send no `Origin` and are only subject to the access policy.
 
 Redline's own responses carry `X-Frame-Options: DENY`.
 

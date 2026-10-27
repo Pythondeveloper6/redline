@@ -40,7 +40,7 @@ Traces go to their own SQLite file (`.redline/redline.db`), never to your databa
 RedlinePlugin(
     settings=None,      # dict | redline_core.Settings
     engine=None,        # Engine | AsyncEngine | [engines] | {"alias": engine}
-    path="/_redline",   # where the UI and API live; never recorded
+    path=None,          # default: the mount_path setting, else "/_redline"; never recorded
     guards=None,        # Litestar guards for the UI and API
     store=None,         # a custom Store; default is the SQLite file
 )
@@ -66,8 +66,8 @@ RedlinePlugin(engine=engine, settings={
 })
 ```
 
-<!-- verify: configuration -->
-Presets, `redline.toml` and `REDLINE_*` environment variables apply too. See
+Presets, `redline.toml` and `REDLINE_*` environment variables apply too; `settings=` is the
+top layer. `path` defaults to the `mount_path` setting, then `/_redline`. See
 [Configuration](configuration.md).
 
 ### Engines
@@ -153,22 +153,33 @@ See [Load testing](load-testing.md#generating-scenarios).
 
 ## Server-Timing, the badge and live mode
 
-<!-- verify: adapter wiring (Server-Timing, badge, SSE, snapshot) -->
-Every recorded response carries a `Server-Timing` header, HTML pages get the floating badge
-in debug mode, `api/stream` feeds [Live mode](the-ui.md#live-mode) and the snapshot
-download is served as-is. See [Server-Timing and the badge](server-timing-badge.md).
+Every recorded response carries a `Server-Timing` header when `server_timing` is on (`"auto"`
+by default: on in debug mode, off otherwise), HTML pages get the floating badge when
+`badge` is on (`"auto"`: debug mode), `api/stream` feeds [Live mode](the-ui.md#live-mode)
+and the snapshot download is served as-is. All of them sit behind the same
+[access control](access-control.md) and can be switched off with the `sse` and `snapshot`
+feature switches. See [Server-Timing and the badge](server-timing-badge.md).
+
+"Debug mode" is the Litestar app's `debug` flag. The badge is injected only into small,
+non-streamed HTML pages (a known `content-length` of at most 2 MiB, or a single body
+message); anything else passes through untouched. `api/stream` is served on the event loop
+and closes after five minutes; the UI reconnects with the last `seq`.
 
 ## Access control
 
 The UI exposes your SQL, request bodies and EXPLAIN, so treat it like an admin tool.
 
-**Default.** With no `guards`, only loopback clients (`127.0.0.0/8`, `::1`, unix sockets)
-that address the server by a loopback name (`Host: localhost`, `127.0.0.1`, `[::1]`, any
-port; this blocks DNS rebinding) are served, and a warning is logged at startup. Refusals
-are JSON: `{"error": {"code": "forbidden" | "unauthorized" | ..., "message": "..."}}`.
-Use `guards=[loopback_guard(allowed_hosts=["devbox"])]` to accept another host name.
+**Default.** With no `guards`, the [`access` policy](access-control.md) decides, and the
+default is `local`: only loopback clients (`127.0.0.0/8`, `::1`, unix sockets) that address
+the server by a loopback name (`Host: localhost`, `127.0.0.1`, `[::1]`, any port; this
+blocks DNS rebinding) are served, and a warning is logged at startup. Refusals are JSON:
+`{"error": {"code": "forbidden" | "unauthorized" | ..., "message": "..."}}`. Add other
+host names with the `allowed_hosts` setting (or `guards=[loopback_guard(allowed_hosts=["devbox"])]`).
 
-**Your own guard.** Any Litestar guard. It **replaces** the loopback default:
+**Your own guard.** Any Litestar guard. Passing `guards=` implies `access = "framework"`
+(unless you set `access` yourself), so your guards **replace** the loopback default. The
+core access check runs first (it still applies `allowed_ips`, `trusted_proxies`,
+`read_only`, features and CSRF), then your guards:
 
 ```python
 from litestar.exceptions import NotAuthorizedException
@@ -182,20 +193,22 @@ RedlinePlugin(engine=engine, guards=[require_admin])
 
 `guards=[]` leaves the UI open on purpose. Do not do that outside a private network.
 
-<!-- verify: access control -->
 For tokens, basic auth, IP allow-lists, trusted proxies and read-only mode, use the
 `access` family of settings. They behave the same on every framework: see
-[Access control](access-control.md).
+[Access control](access-control.md). With an explicit policy other than `framework`, your
+`guards` still run after the gate.
 
-**CSRF.** The mutating endpoints (`DELETE`, `POST`) reject browser requests whose `Origin`
-does not match the request host, `Origin: null`, and `Sec-Fetch-Site: cross-site`. This is
-always on, whatever `guards` you pass. Redline's own responses carry
-`X-Frame-Options: DENY`.
+**CSRF.** Every non-`GET` request to Redline (including login and logout) is refused with
+`403 csrf_failed` when it carries `Sec-Fetch-Site: cross-site` or `same-site`, or an
+`Origin` (including `null`) that does not match the request host. This is always on,
+whatever `guards` you pass. Redline's own responses carry `X-Frame-Options: DENY`.
 
 !!! tip "Behind a reverse proxy"
 
-    Every client may look like localhost. Pass real guards, or run uvicorn with
-    `--proxy-headers` and `--forwarded-allow-ips`. See [Access control](access-control.md#behind-a-reverse-proxy).
+    A proxy on the same host makes every client look like localhost, so a loopback peer
+    that sends `X-Forwarded-For` (and is not in `trusted_proxies`) is refused under
+    `local`. Use `access = "token"` and `trusted_proxies`. See
+    [Access control](access-control.md#behind-a-reverse-proxy).
 
 ## EXPLAIN
 

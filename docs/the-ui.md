@@ -55,12 +55,13 @@ see [The HTTP API](http-api.md#get-apitraces). **Reset** clears all filters.
 
 ### Live mode
 
-<!-- verify: SSE live mode -->
 New requests stream into the list as they happen. The page subscribes to `api/stream`
-(Server-Sent Events: one event per new trace, a keep-alive comment every 15 seconds, and a
-reconnect after the server closes the stream every five minutes) and falls back to polling
-every two seconds when streaming is unavailable or the `sse`
-[feature switch](access-control.md#feature-switches) is off. The pulsing **Live** button
+(Server-Sent Events: one event per new trace, a keep-alive comment every 15 seconds). The
+server closes the stream periodically (every five minutes on ASGI servers, about every 25
+seconds on WSGI servers) and the page reconnects, resuming after the last trace it saw by
+its `seq`, so nothing is skipped or repeated. It falls back to polling every two seconds
+when streaming is unavailable. With the `sse`
+[feature switch](access-control.md#feature-switches) off, Live mode is hidden. The pulsing **Live** button
 pauses (**Pause**, then **Resume**) while you read. The counter shows how many rows are
 loaded of how many match. Older rows load with cursor pagination.
 
@@ -281,11 +282,12 @@ see [History](history.md#before-and-after-comparing-periods).
 
 ## Snapshots
 
-<!-- verify: snapshot download -->
 **Download snapshot** saves a trace as one standalone HTML file: the whole UI bundle inlined,
 with the trace (and its profile) embedded. Open it in any browser, offline, with no Redline
 running: attach it to a ticket, send it to a colleague, keep it as evidence. It is
-read-only; actions that need a server (Explain, Replay) are not available in it.
+read-only; actions that need a server (Explain, Replay) are not available in it. The
+button is hidden when the `snapshot` feature is off, and the profile is left out when the
+`profile` feature is off.
 
 !!! warning "A snapshot contains the trace as stored"
 
@@ -315,11 +317,22 @@ cannot provide (a custom store) says so instead of failing.
 
 ## Login and the Settings page
 
-<!-- verify: login screen and Settings page -->
 When the instance uses `access = "token"` or `"basic"` and you are not signed in, the API
-answers `401 login_required` and the UI shows a **login screen**. The **Settings** page is a
-read-only view of the effective configuration, where each value came from, and any
-warnings: the same as `redline config` and `GET api/config`. See
+answers `401 login_required` and the UI shows a **login screen**: a token field, or a
+username and password for `basic`. It posts to `api/login` and reloads. **Log out** (in the
+header and the command palette) appears when a login is in use. The page shell itself is
+public; every `api/` call needs credentials, and the UI sends `X-Redline-UI: 1` so the
+browser shows no native dialog.
+
+The **Settings** page (`#/settings`, in the More menu and the palette) is a read-only view
+of the effective configuration, grouped, with a chip showing where each value came from and
+the warnings: `GET api/config`, including the settings you gave in code, which
+`redline config` cannot see. Secrets show as `***`.
+
+The UI hides what is switched off: `features` hide Explain, the Profile tab, Replay,
+snapshot download, the Load page, the Logs tab, locals and Live mode, and `read_only` hides
+Clear all, ANALYZE and the run controls. **Replay** only sends requests to the same origin
+as the UI; a path that points at another origin is refused. See
 [Access control](access-control.md) and [Configuration](configuration.md).
 
 ## On a phone

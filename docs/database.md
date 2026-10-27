@@ -47,12 +47,25 @@ requests that ran a matching statement.
 
 ## Index advisor
 
-<!-- verify: index advisor (api/indexes) -->
 The EXPLAIN drawer already suggests an index for a single query. The **advisor** looks at
 the whole recorded workload instead, and proposes the indexes that would help the most
 queries at once.
 
-For each candidate you see:
+How it works, in order:
+
+1. It takes the 100 SELECT fingerprints that cost the most time in the window and works out,
+   per table, which columns they filter and sort on: equality columns first (`=`, `IN`,
+   `IS NULL`), then one range column (`<`, `BETWEEN`, a prefix `LIKE 'abc%'`) or, without a
+   range, the `ORDER BY` columns. A leading-wildcard `LIKE` or an `ILIKE` becomes a
+   text-search suggestion (`pg_trgm`, FTS5 or `FULLTEXT`) instead of a B-tree.
+2. It reads the database's catalog, through the same always-rolled-back connection EXPLAIN
+   uses, and drops every requirement an existing index already serves.
+3. It runs a plain `EXPLAIN` (never `ANALYZE`) for the 20 heaviest remaining queries to see
+   which tables are read by a sequential or full scan. Catalog and EXPLAIN share a
+   three-second budget; what does not fit is left unverified.
+4. It picks the smallest set of indexes, up to 10, that covers the most query time.
+
+Nothing here ever runs DDL. For each candidate you see:
 
 | Field | Meaning |
 |---|---|
@@ -61,7 +74,8 @@ For each candidate you see:
 | Covers | the query fingerprints it would speed up |
 | Executions | how often those queries ran in the window |
 | Total time | what those queries cost in the window |
-| Estimated saving | a rough upper bound on the time you would get back |
+| Estimated saving | a heuristic: 80% of the covered time when EXPLAIN showed a scan of that table, 40% otherwise |
+| Confidence | `high` when a scan was seen, `medium` for an unverified B-tree, `low` for text-search alternatives (not drop-in) and for queries that already avoid a full scan |
 
 How to use it: take the top candidate, create the index on a **staging copy**, re-run the
 [EXPLAIN](explain.md) for one of the covered queries, and compare. The advisor reads recorded
@@ -80,9 +94,9 @@ says the advisor is not available and the API answers `501 not_supported`.
 
 ## Unused indexes
 
-<!-- verify: index advisor (api/indexes) -->
-Where the database exposes index statistics, Redline lists indexes that have **never been
-scanned** since the statistics were last reset:
+On **PostgreSQL**, Redline lists indexes that have **never been scanned** since the
+statistics were last reset (primary keys, unique indexes and indexes backing a constraint
+are excluded):
 
 | Column | Meaning |
 |---|---|
@@ -91,8 +105,14 @@ scanned** since the statistics were last reset:
 | Size | disk it occupies |
 | Copy DROP | the `DROP INDEX` statement |
 
-Support is per database. PostgreSQL provides `pg_stat_user_indexes`; for SQLite and MySQL
-the page says the detection is not supported (`unused_supported: false` in the API).
+Support is **PostgreSQL only** (it reads `pg_stat_user_indexes`). For SQLite and MySQL the
+page says the detection is not supported (`unused_supported: false` in the API). If the
+database connection for the alias is missing or the statistics query fails on PostgreSQL,
+`unused_error` carries the reason.
+
+The advisor result is cached for 30 seconds per window and database, because it runs
+catalog reads and EXPLAINs. Add `refresh=1` to recompute at once; the response says
+`"cached": true` when it was served from the cache.
 
 Before dropping anything:
 
