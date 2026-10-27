@@ -21,6 +21,10 @@ Requirements: Python 3.10+, FastAPI 0.110+ (below 1.0), SQLAlchemy 2.x, and
 `redline-core` at the exact version the adapter pins. Install as shown in
 [Getting started](getting-started.md#install).
 
+Since 0.2 the SQLAlchemy and httpx hooks live in `redline_core.contrib` and are shared with
+the Flask and Litestar adapters; `fastapi_redline` re-exports them (`instrument_engine`,
+`instrument_httpx`), so existing imports keep working.
+
 ## `install()`
 
 ```python
@@ -198,8 +202,22 @@ installed, is idempotent, and `uninstrument_httpx()` undoes it. Outside a traced
 the wrapper costs one `ContextVar.get()`.
 
 Each span is named `GET host/path` and carries `method`, `url` and `status`. **URLs are
-redacted**: `?api_key=...` is masked. Other HTTP clients (`requests`, `aiohttp`) are not
+redacted**: `?api_key=...` is masked. `requests` is covered by [`instrument_requests()`](integrations.md#requests). `aiohttp` is not
 instrumented.
+
+## New in 0.2 for FastAPI
+
+| Feature | Where to read |
+|---|---|
+| An event-loop lag monitor that names the blocking call in an `async def` endpoint | [Blocking in async](async-blocking.md) |
+| `transaction` and `pool_wait` spans from SQLAlchemy | [Transactions and locks](transactions.md) |
+| Response serialization (`serialize_response`, Pydantic) timed as a `serializer` span | [Slow serializers](serializers.md) |
+| Row counts, large and unbounded results | [Large and unbounded results](result-size.md) |
+| `requests`, Redis, asyncpg, psycopg, Marshmallow | [Integrations](integrations.md) |
+| Strawberry GraphQL | [GraphQL](graphql.md) |
+| `redline load init --from-openapi` against FastAPI's `/openapi.json` | [Load testing](load-testing.md#generating-scenarios) |
+| `Server-Timing`, the badge, live mode, snapshots | [Server-Timing and the badge](server-timing-badge.md) |
+| Presets, `redline.toml`, `REDLINE_*`, token and basic access, read-only | [Configuration](configuration.md), [Access control](access-control.md) |
 
 ## Access control
 

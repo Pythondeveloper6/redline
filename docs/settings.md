@@ -3,8 +3,9 @@
 [← Index](index.md)
 
 Every setting, its type, default and effect. They are defined once, in
-`redline_core.conf.Settings`, and shared by both adapters. Each adapter only chooses *how
-you pass them*:
+`redline_core.conf.Settings`, and shared by every adapter. Each adapter only chooses *how
+you pass them*, and settings can also come from a [preset, a config file and `REDLINE_*`
+environment variables](configuration.md), which this page's defaults sit underneath.
 
 === "Django"
 
@@ -27,6 +28,26 @@ you pass them*:
     ```
 
     or pass a `redline_core.Settings` instance.
+
+=== "Flask"
+
+    ```python
+    app.config["REDLINE"] = {"sample_rate": 0.1, "slow_query_ms": 50}
+    Redline(app, engine=engine)           # or Redline(app, settings={...})
+    ```
+
+=== "Litestar"
+
+    ```python
+    RedlinePlugin(engine=engine, settings={"sample_rate": 0.1, "slow_query_ms": 50})
+    ```
+
+=== "redline.toml"
+
+    ```toml
+    sample_rate = 0.1
+    slow_query_ms = 50
+    ```
 
 ## Rules that apply to every setting
 
@@ -59,7 +80,9 @@ you pass them*:
 |---|---|---|---|
 | `enabled` | `bool` | `True` | Master switch. When false nothing is recorded or stored. Django: the middleware stays installed but every request passes straight through. FastAPI: `install()` adds no middleware and no SQLAlchemy listeners. The UI still serves stored traces |
 | `storage_path` | `str` or `os.PathLike` (converted to `str`) | `".redline/redline.db"` | The SQLite file. Parent directories are created. `":memory:"` works. **Django default:** `<BASE_DIR>/.redline/redline.db`. See [Storage](storage.md) |
-| `project_root` | `str`, `os.PathLike` or `None` | `None` | Directory that marks "your code" for [callsite capture](how-it-works.md#callsites). `None` means the working directory. **Django default:** `BASE_DIR` |
+| `project_root` | `str`, `os.PathLike` or `None` | `None` | Directory that marks "your code" for [callsite capture](how-it-works.md#callsites). `None` means the working directory. **Django default:** `BASE_DIR`. Also where [`redline.toml`](configuration.md#the-config-file) is looked for |
+| `preset` | `"dev"`, `"staging"` or `"production"` | `"dev"` | A bundle of defaults. Explicit settings override it. See [Configuration](configuration.md#presets) |
+| `release` | `str` or `None` | `None` (automatic) | Name stamped on each trace for [History](history.md#releases). Automatic: `REDLINE_RELEASE`, then `GIT_SHA` / `SOURCE_VERSION` / `RENDER_GIT_COMMIT` / `HEROKU_SLUG_COMMIT`, then `git rev-parse --short HEAD` in `project_root` (once, one-second timeout), else none |
 
 ## Sampling: what gets stored
 
@@ -80,7 +103,11 @@ See [How it works: sampling](how-it-works.md#sampling).
 | `capture_response_body` | `bool` | `True` | Store response bodies (redacted, capped). Streaming and file responses are never captured |
 | `max_body_bytes` | `int`, 0 or more | `20000` | Cap for a stored body. Longer bodies are cut and flagged `body_truncated`. Masking runs **before** the cut |
 | `redact_headers` | list of `str` | `["authorization", "cookie", "set-cookie", "x-api-key", "proxy-authorization"]` | Header names (case-insensitive) whose values are replaced with `[redacted]` |
-| `redact_keys` | list of regex | `["(?i)pass(word)?\|secret\|token\|api[_-]?key\|auth(?!or)\|session\|csrf\|card\|cvv\|ssn"]` | Patterns matched with `re.search` against **key names** in query strings, form and JSON bodies (at any depth), outbound URLs, and SQL parameter column names. A match masks the value. `auth(?!or)` means `author` and `author_id` stay visible |
+| `redact_keys` | list of regex | `["(?i)pass(word)?\|secret\|token\|api[_-]?key\|(?<![a-z])auth(orization)?(?![a-z])\|session\|csrf\|card\|cvv\|ssn\|private[_-]?key"]` | Patterns matched with `re.search` against **key names** in query strings, form and JSON bodies (at any depth), outbound URLs, SQL parameter column names, log messages (`key=value` pairs) and the names of exception locals. A match masks the value. `auth` and `authorization` match only as a whole word, so `author`, `author_id`, `authenticated` and `oauth_provider` stay visible |
+| `capture_logs` | `bool` | `True` | Keep the log records emitted during a request. See [Logs and exceptions](logs-and-exceptions.md) |
+| `log_level` | `str` | `"INFO"` | Minimum level captured into a trace |
+| `max_logs_per_trace` | `int` | `200` | Cap per trace; extras are counted, not stored |
+| `capture_locals` | `bool` | `True` | Keep the local variables of project frames in an exception (names matching `redact_keys` are masked). See [Logs and exceptions](logs-and-exceptions.md#exceptions-with-locals) |
 
 ## Detectors
 
@@ -92,6 +119,16 @@ See [N+1 detection](n-plus-one.md).
 | `duplicate_threshold` | `int` | `2` | 2 | Identical SQL and params at least this many times is a duplicate |
 | `slow_query_ms` | `float` | `100` | 0 | A query at least this slow is a slow query. `0` flags every query. It also feeds the N+1 and duplicate severity rules |
 | `too_many_queries` | `int` | `50` | 0 | A request with at least this many queries is over budget. `0` disables the check |
+| `blocking_ms` | `float` | `20` | 0 | A stall of the event loop of at least this long is reported. See [Blocking in async](async-blocking.md) |
+| `large_result_rows` | `int` | `1000` | 0 | A SELECT returning at least this many rows is a [large result](result-size.md) |
+| `unbounded_rows` | `int` | `200` | 0 | A SELECT with no `LIMIT` returning at least this many rows is [unbounded](result-size.md#unbounded-query) |
+| `slow_serializer_ms` | `float` | `50` | 0 | A [serializer](serializers.md) at least this slow is reported |
+| `long_transaction_ms` | `float` | `200` | 0 | A [transaction](transactions.md) open at least this long is reported |
+| `slow_external_ms` | `float` | `500` | 0 | An [outbound call](external-calls.md) at least this slow is reported |
+
+Two more switches belong here. `detect_blocking` (`bool`, default `True`) runs the
+event-loop lag monitor in async adapters, only while a request is in flight; set it false to
+remove it entirely.
 
 ## Profiling
 
@@ -108,6 +145,15 @@ See [Flamegraphs](flamegraphs.md). Needs `redline-core[profile]`.
 |---|---|---|---|
 | `explain_analyze` | `bool` | `False` | Allow `EXPLAIN ANALYZE`, which **executes** the query. Off: `analyze: true` is refused with `403 analyze_disabled`. See [EXPLAIN](explain.md#safety) |
 
+## Developer experience
+
+| Setting | Type | Default | Description |
+|---|---|---|---|
+| `editor` | `"vscode"`, `"cursor"`, `"pycharm"`, `"idea"`, `"sublime"`, `"none"`, or a template string | `"vscode"` | Where callsite links open. A template contains `{file}` (absolute path) and `{line}`. See [Open in editor](the-ui.md#open-in-editor) |
+| `server_timing` | `bool` | `True` | Add a `Server-Timing` header to recorded responses. See [Server-Timing and the badge](server-timing-badge.md) |
+| `badge` | `"auto"` or `bool` | `"auto"` | Inject the floating badge into HTML responses. `auto` means on when the framework is in debug mode |
+| `load_from_ui` | `bool` | `False` | Allow starting a [load run](load-testing.md#starting-a-run-from-the-ui) from the UI (`POST api/runs`) |
+
 ## Storage and retention
 
 See [Storage](storage.md).
@@ -117,33 +163,83 @@ See [Storage](storage.md).
 | `max_rows` | `int` (0 or more) or `None` | `10000` | Keep at most this many traces; the oldest beyond it are pruned. **`0` or `None` disables the row cap** |
 | `max_age_days` | `int` (0 or more) or `None` | `7` | Prune traces older than this. **`0` or `None` disables age-based pruning** |
 | `max_spans_per_trace` | `int` (0 or more) or `None` | `2000` | Spans stored per request. Beyond it spans are **counted, not stored**: `query_count`, `query_ms` and the N+1 and slow-query issues still cover every query, and the trace is marked `truncated` (the UI shows a notice). `middleware` and `view` spans are always kept. **`0` or `None` disables the cap**. See [Performance](performance.md#memory) |
+| `history_retention_days` | `int` (0 or more) or `None` | `90` | How long hourly rollups, the issue index, releases and load runs are kept, independent of `max_age_days`. **`0` or `None` keeps them forever**. See [History](history.md#retention) |
 | `writer_queue_size` | `int` | `1000` (minimum 1) | Bound of the in-memory queue between requests and the writer thread. When full, new traces are **dropped and counted** (`storage.dropped` in `api/meta`) |
 
 For every limit above, `0` and `None` mean the same thing, "no limit", and a negative value
 is an error. To delete everything use **Clear all**, `DELETE api/traces` or
 `manage.py redline_clear`, never a zero.
 
+## Access control
+
+<!-- verify: access control settings (section 18) -->
+Who may open the UI and API, and how. The policies, recipes and reasoning are on
+[Access control](access-control.md); the table is the reference.
+
+| Setting | Type | Default | Description |
+|---|---|---|---|
+| `access` | `"local"`, `"token"`, `"basic"`, `"framework"`, `"custom"` or `"open"` | `"local"` (Django: `"framework"`, staff users) | The access policy. `"open"` is refused unless `REDLINE_ALLOW_OPEN=1` is set too |
+| `allowed_ips` | list of IPs or CIDRs | `[]` | Client networks allowed in addition to the policy (for example a VPN range) |
+| `allowed_hosts` | list of `str` | `[]` | Extra `Host` values accepted by the DNS-rebinding check |
+| `trusted_proxies` | list of CIDRs | `[]` | Only requests from these proxies have `X-Forwarded-For` honoured for the client IP |
+| `token` | `str` (secret) | `None` | The token for `access = "token"`. Prefer the environment variable `REDLINE_TOKEN` |
+| `token_file` | path | `None` | Read the token from a file (a mounted secret) |
+| `basic_users` | table of user to hash | `{}` | For `access = "basic"`; make hashes with `redline hash-password` |
+| `access_check` | callable `(request_info) -> bool` | `None` | For `access = "custom"` |
+| `read_only` | `bool` | `False` | Refuse `DELETE`, `POST api/runs` and EXPLAIN ANALYZE (`403 read_only`) |
+| `features` | table of switch to `bool` | all `True` | Turn individual features off: `explain`, `profile`, `replay`, `snapshot`, `load`, `logs`, `locals`, `sse` |
+| `ui_enabled` | `bool` | `True` | Capture without serving the UI or API |
+| `mount_path` | `str` | adapter default | Where the UI and API are served |
+| `session_ttl_s` | `int` | `43200` | Login cookie lifetime in seconds |
+| `max_login_attempts` | `int` | 10 per 5 minutes per IP | Rate limit on `POST api/login` |
+
+## Presets
+
+<!-- verify: presets -->
+`preset` only sets **defaults**. Anything you set elsewhere overrides it.
+
+| | `dev` (default) | `staging` | `production` |
+|---|---|---|---|
+| `sample_rate` | `1.0` | `0.25` | `0.05` (slow requests and errors still kept) |
+| Request and response bodies | captured | captured | not captured |
+| `capture_locals` | on | off | off |
+| `log_level` | `INFO` | `INFO` | `WARNING` |
+| `access` | `local` | `token` | `token` (required) |
+| `read_only` | off | off | **on** |
+| `badge` | `auto` | `auto` | off |
+| `load_from_ui` | off | off | off |
+
+See [Configuration](configuration.md#presets) and [Production](production.md#the-production-preset).
+
+## Where a value comes from
+
+Layers, last one wins: built-in defaults, preset, config file (`redline.toml` or
+`[tool.redline]`), `REDLINE_<SETTING>` environment variables, then the framework's own
+settings. `redline config` prints the result and the layer of every value. See
+[Configuration](configuration.md#layers-and-precedence).
+
 ## Django-only
 
 | Setting | Type | Default | Description |
 |---|---|---|---|
-| `PERMISSION` | callable `(request) -> bool` or a dotted path to one | active staff users (`user.is_active and user.is_staff`) | Who may open the UI and the API. See [Django: access control](django.md#access-control) |
+| `PERMISSION` | callable `(request) -> bool` or a dotted path to one | active staff users (`user.is_active and user.is_staff`). Used when `access = "framework"` | Who may open the UI and the API. See [Django: access control](django.md#access-control) |
 | `STORE` | a `Store` instance, a callable (or class) taking the core `Settings` and returning one, or a dotted path to either | `None` (`SQLiteStore.from_settings(settings)`) | Where traces are kept: Django's counterpart of FastAPI's `install(store=...)`. See [Extending: the Store protocol](extending.md#the-store-protocol) |
 
 `PERMISSION` and `STORE` are read by the Django adapter before the rest is handed to the
-core, so they are not core settings and FastAPI does not accept them in `settings` (use
-`dependencies` and `install(store=...)`).
+core, so they are not core settings and the other adapters do not accept them in `settings`.
+Their counterparts are FastAPI's `dependencies` and `store=`, Flask's `permission=` and
+`store=`, and Litestar's `guards=` and `store=`.
 
 ## Adapter defaults at a glance
 
-| | Django | FastAPI |
-|---|---|---|
-| Passed as | `settings.REDLINE` dict | `install(settings=...)` |
-| `sample_rate` | `1.0` with `DEBUG`, else `0.1` | `1.0` |
-| `storage_path` | `<BASE_DIR>/.redline/redline.db` | `.redline/redline.db` (working directory) |
-| `project_root` | `BASE_DIR` | working directory |
-| Mount prefix | wherever you `include()` the URLs (e.g. `/redline/`) | `prefix` argument, default `/_redline` |
-| Access | `PERMISSION`, default staff | `dependencies`, default loopback only |
+| | Django | FastAPI | Flask | Litestar |
+|---|---|---|---|---|
+| Passed as | `settings.REDLINE` dict | `install(settings=...)` | `app.config["REDLINE"]` or `Redline(settings=...)` | `RedlinePlugin(settings=...)` |
+| `sample_rate` | `1.0` with `DEBUG`, else `0.1` | `1.0` | `1.0` | `1.0` |
+| `storage_path` | `<BASE_DIR>/.redline/redline.db` | `.redline/redline.db` (working directory) | same as FastAPI | same as FastAPI |
+| `project_root` | `BASE_DIR` | working directory | working directory | working directory |
+| Mount prefix | wherever you `include()` the URLs (e.g. `/redline/`) | `prefix`, default `/_redline` | `url_prefix`, default `/_redline` | `path`, default `/_redline` |
+| Access | `PERMISSION`, default staff | `dependencies`, default loopback only | `permission`, default loopback only | `guards`, default loopback only |
 
 ## A complete example
 

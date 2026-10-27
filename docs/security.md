@@ -21,6 +21,11 @@ For every kept request, on local disk, in `.redline/redline.db`:
 | **SQL text** and **parameters** | verbatim SQL; parameters as JSON | parameters bound to a column matching `redact_keys` are masked |
 | **Callsites** | file, line, function and the **source line** | no |
 | **Tracebacks** and exception messages | text | no |
+| **Exception locals** (project frames: names and `repr` of variables) | text, at most 30 per frame, 300 characters each | variables whose **name** matches `redact_keys` are masked; mappings have secret keys masked. Values under innocent names are **not** |
+| **Log records** emitted during the request | level, logger, message, callsite | `key=value` pairs whose key matches `redact_keys` are masked in the message. Free text is not |
+| **Normalised SQL summaries** (`trace_sql`) | statements with literals replaced by `?` | contains no parameter values |
+| **Outbound URL and cache key patterns** | digit runs, UUIDs and long hex strings replaced by `*` | by pattern only; keys and URLs that embed other secrets are stored as seen |
+| **Release name**, load-run definitions | text | no |
 | Outbound **URLs** (`http_out`) | URL | query-string values whose key matches `redact_keys` are masked |
 | The request **path** | text | no |
 | Client address | `REMOTE_ADDR` / ASGI client | no |
@@ -38,15 +43,18 @@ its value.
 
 | Where | What is masked | Replaced with |
 |---|---|---|
+| Log messages | `key=value` and `"key": "value"` pairs whose key matches `redact_keys` | `[redacted]` |
+| Exception locals | the value of a variable whose name matches `redact_keys`; secret keys of dict values | `[redacted]` |
 | Headers | `authorization`, `cookie`, `set-cookie`, `x-api-key`, `proxy-authorization` (case-insensitive) | `[redacted]` |
-| Query strings, form bodies, JSON bodies (any depth) | any key matching `(?i)pass(word)?\|secret\|token\|api[_-]?key\|auth(?!or)\|session\|csrf\|card\|cvv\|ssn` | `[redacted]` |
+| Query strings, form bodies, JSON bodies (any depth) | any key matching `(?i)pass(word)?\|secret\|token\|api[_-]?key\|(?<![a-z])auth(orization)?(?![a-z])\|session\|csrf\|card\|cvv\|ssn\|private[_-]?key` | `[redacted]` |
 | Outbound URLs | the same key rule on the query string | `[redacted]` |
 | SQL parameters | values bound to a column whose name matches the same pattern (`SET "password" = %s`, `INSERT ... ("token") VALUES (%s)`) | `[redacted]` |
 | Bodies | cut at `max_body_bytes`, **after** masking, so a cut never exposes half a secret | |
 | Binary bodies | replaced by `<N bytes binary>` | |
 
-`auth(?!or)` is deliberate: it catches `auth`, `authorization` and `authentication` but not
-`author` or `author_id`, which would otherwise hide half a blog's data.
+The `auth` rule is deliberate: it matches `auth` and `authorization` only as a **whole word**,
+so `author`, `author_id`, `authenticated`, `authority` and `oauth_provider` stay visible,
+which would otherwise hide half a blog's data.
 
 ### Customising
 
@@ -55,7 +63,8 @@ REDLINE = {
     "REDACT_HEADERS": ["authorization", "cookie", "set-cookie", "x-api-key",
                        "proxy-authorization", "x-internal-token"],
     "REDACT_KEYS": [
-        r"(?i)pass(word)?|secret|token|api[_-]?key|auth(?!or)|session|csrf|card|cvv|ssn",
+        r"(?i)pass(word)?|secret|token|api[_-]?key|(?<![a-z])auth(orization)?(?![a-z])"
+        r"|session|csrf|card|cvv|ssn|private[_-]?key",
         r"(?i)^iban$|national_id",
     ],
 }
@@ -89,6 +98,24 @@ Be clear-eyed about this. Anything not matched by **key name** is stored in clea
     then open **Request / Response**. The demo does this: `POST /checkout` with
     `Authorization`, `card_number` and `password` shows all three redacted.
 
+### Logs and locals
+
+Two 0.2 features capture more of your application's internals than 0.1 did, so they deserve
+the same scrutiny as request bodies.
+
+- **Log messages** are formatted, redacted for `key=value` pairs, and capped at 2,000
+  characters. A log line like `Created user alice@example.com with token=abc123` stores the
+  email and masks the token. If your logs carry personal data, raise `log_level`, or set
+  `capture_logs = False`.
+- **Exception locals** are the values of variables in project frames when a request raised.
+  A model instance's `repr`, a request object, a dict of form data: the value is stored as
+  printed. Names that look secret are masked; **a secret under an innocent name is not**. The
+  `staging` and `production` presets turn `capture_locals` off. The `logs` and `locals`
+  [feature switches](access-control.md#feature-switches) are the access-side counterpart.
+
+Neither feature is a place to put secrets, and neither is a reason to log them: redaction
+is a safety net, not a licence.
+
 ### The SQL EXPLAIN consequence
 
 Because masked parameter values are what is stored, EXPLAIN of a query filtered on a
@@ -97,8 +124,17 @@ See [EXPLAIN](explain.md#safety).
 
 ## Who can open the UI
 
-The UI and API expose SQL, bodies and EXPLAIN. Treat access to them as access to a database
-console with read-only privileges *and* to the traffic.
+The UI and API expose SQL, bodies, source lines and exception locals, and can run EXPLAIN.
+Treat access to them as access to a database console with read-only privileges *and* to the
+traffic.
+
+<!-- verify: access control (unified policy) -->
+From 0.2 there is **one access policy for every framework**, chosen with the `access`
+setting: `local`, `token`, `basic`, `framework` (the adapter's native hook), `custom` or
+`open`. On top of it you can add IP allow-lists, trusted proxies, a `read_only` mode and
+per-feature switches. The full description, with recipes for a laptop, a VPN, staging,
+production, a reverse proxy and Kubernetes, is on [Access control](access-control.md). The
+sections below describe the defaults and the threats.
 
 === "Django"
 
@@ -125,29 +161,34 @@ console with read-only privileges *and* to the traffic.
 
     The callable is wrapped: an exception in it denies access (it **fails closed**).
 
-=== "FastAPI"
+=== "FastAPI, Flask and Litestar"
 
-    **Default: loopback only.** Without `dependencies`, a request is served only when
+    **Default: loopback only.** Without `dependencies` (FastAPI), `permission` (Flask) or
+    `guards` (Litestar), a request is served only when
     **both** hold, and a warning is logged at startup:
 
     - the client is loopback (`127.0.0.0/8`, `::1`, unix sockets);
     - the `Host` header names loopback: `localhost`, `*.localhost`, `127.x.x.x` or
       `[::1]`, with any port. This defeats DNS rebinding (below).
 
-    Pass your own dependencies for anything else. A refusal is `403` JSON
+    Pass your own hook, or set `access`, for anything else. A refusal is `403` JSON
     `{"error": {"code": "forbidden", ...}}`. See
-    [FastAPI: access control](fastapi.md#access-control).
+    [FastAPI](fastapi.md#access-control), [Flask](flask.md#access-control) and
+    [Litestar](litestar.md#access-control).
 
 ### Cross-site request forgery
 
-Reads are `GET`. The two mutating calls, `DELETE` (traces, **Clear all**) and `POST
-api/explain`, are protected:
+Reads are `GET`. The mutating calls (`DELETE` on traces and runs, `POST api/explain`,
+`POST api/runs`) are protected:
 
 - **Django** runs Django's own CSRF machinery on every API request (token in the CSRF
   header, plus the Origin and Referer checks on HTTPS), even if `CsrfViewMiddleware` is not
   installed, and answers `403 csrf_failed` as JSON.
-- **FastAPI** rejects cross-site browser requests via `Origin` and `Sec-Fetch-Site`,
-  with `403 csrf_failed` in the same JSON shape.
+- **FastAPI, Flask and Litestar** reject cross-site browser requests via `Origin` and
+  `Sec-Fetch-Site`, with `403 csrf_failed` in the same JSON shape. This applies whatever
+  access policy you chose.
+- **Token and basic access** use an HttpOnly, SameSite=Strict, path-scoped session cookie, so
+  a cross-site request does not carry it.
 
 ### DNS rebinding
 
@@ -170,17 +211,50 @@ header, which still says `evil.example`.
 
 ### Framing
 
-The UI page is served with `X-Frame-Options: DENY` by both adapters, so another site
+The UI page is served with `X-Frame-Options: DENY` by every adapter, so another site
 cannot frame it and trick a click on **Clear all**.
 
 ### Putting it behind a proxy
 
 !!! warning "Loopback is not a security boundary behind a proxy"
 
-    If a reverse proxy forwards to your app on `127.0.0.1`, FastAPI's default allows
+    If a reverse proxy forwards to your app on `127.0.0.1`, the `local` default allows
     **everyone** the proxy lets through whose `Host` the proxy rewrites to `localhost`
-    (many do). Pass `dependencies`, or run uvicorn with
-    `--proxy-headers --forwarded-allow-ips=<proxy ip>` so the real client address is seen.
+    (many do). Use `access = "token"`, or set `trusted_proxies` so the real client address is
+    taken from `X-Forwarded-For` **only** when the request comes from your proxy. Without
+    `trusted_proxies` Redline ignores that header, so a client cannot spoof its address. See
+    [Access control: behind a reverse proxy](access-control.md#behind-a-reverse-proxy).
+
+### Badge, Server-Timing and CSP
+
+<!-- verify: adapter wiring (Server-Timing, badge, SSE, snapshot) -->
+- The **floating badge** adds one `<script src>` tag, from Redline's own mount, to HTML pages
+  in development (`badge = "auto"`). It is off in the `production` preset. A strict CSP
+  that allows only nonced scripts will block it; see
+  [Server-Timing and the badge](server-timing-badge.md#content-security-policy).
+- **Server-Timing** exposes timings, a query count and a trace id to anyone who can read the
+  response, including the browser. No SQL or data. Turn it off with `server_timing = False`
+  if you do not want it public.
+- The **trace id** in `Server-Timing` lets someone who already has UI access find the trace;
+  it grants nothing by itself.
+- **Snapshots** are files containing a full trace. Whoever has the file has the data.
+
+### Load from the UI
+
+<!-- verify: load from UI (POST api/runs) -->
+Starting a load run from the UI is **off by default** (`load_from_ui = False`, `403
+load_disabled`). When on, its safety rests on three rules:
+
+1. The request list may contain only **paths** (each must start with a single `/`). A scheme
+   or host is rejected with `400 invalid_body`, so the target is always the application that
+   serves the UI. It cannot be used to make your server attack a third party.
+2. It is gated by the same access policy, by `read_only` and by the `load` feature switch.
+3. It is a real load: a user who may start runs can make your instance slow. Enable it only
+   in environments where that is acceptable, and not in production.
+
+The `redline load` command line is a different matter: it runs on the machine you run it
+on, against the URL you give it, with the rights you have there. Point it only at systems you
+own or are authorised to test.
 
 ### If you must expose it
 
@@ -192,7 +266,8 @@ In order of preference:
    check, restricted to a small group.
 3. Serve it only on an internal network or a VPN.
 
-Never expose it with `dependencies=[]` or a permission that returns `True`.
+Never expose it with `dependencies=[]`, a permission that returns `True`, or `access = "open"`
+(which Redline refuses without `REDLINE_ALLOW_OPEN=1` and warns about on every request).
 
 ## Data on disk
 
@@ -203,8 +278,12 @@ Never expose it with `dependencies=[]` or a permission that returns `True`.
   and your backups too.
 - It is **not your application database**: separate file, separate lifetime. Deleting it is
   always safe (`manage.py redline_clear` or **Clear all** in the UI).
-- It lives as long as `max_age_days` and `max_rows` say, **and no longer**: retention is
-  the main control on how much data you hold. Keep both low in production.
+- Traces live as long as `max_age_days` and `max_rows` say, **and no longer**: retention is
+  the main control on how much data you hold. Keep both low in production. The longer-lived
+  [history](history.md) tables (`history_retention_days`, 90 by default) hold only
+  **aggregates**: counts, latency histograms, normalised SQL and issue titles. They contain
+  no request bodies, headers or parameter values, but an issue title can contain a
+  table name or a route.
 - It is a **GDPR-style** concern as much as a security one: recorded bodies may be personal
   data. Retention, access control and the redaction patterns are your levers. Redline has
   no per-user erase; the nearest equivalent is `DELETE api/traces/<id>` or clearing
@@ -214,7 +293,7 @@ Never expose it with `dependencies=[]` or a permission that returns `True`.
 
 | Surface | Behaviour |
 |---|---|
-| **Responses** | Both adapters: the page sets `X-Content-Type-Options: nosniff`, `Referrer-Policy: same-origin`, `X-Frame-Options: DENY` and `Cache-Control: no-store`. API responses are `no-store` and `nosniff` |
+| **Responses** | Every adapter: the page sets `X-Content-Type-Options: nosniff`, `Referrer-Policy: same-origin`, `X-Frame-Options: DENY` and `Cache-Control: no-store`. API responses are `no-store` and `nosniff` |
 | **Static assets** | Served through the same access check. Hashed asset names are cached for a year; the path is resolved (symlinks and `..` included) and refused unless it stays inside the bundle directory, so `assets/../../conf.py` is a `404` |
 | **`X-Redline-Trace` header** | Django only, and only when `DEBUG` is true: the id of the trace is added to the response, so you can find it. It is not sent in production |
 | **Rendering** | The UI renders stored text through React, which escapes it: there is no `dangerouslySetInnerHTML` or `innerHTML` anywhere. The SQL highlighter returns tokens rendered as text nodes, the diff view renders each line as text, and a suggestion's docs link is only rendered when it is `http(s)` (never `javascript:`). Trace ids are URL-encoded in API calls |
@@ -224,17 +303,20 @@ Never expose it with `dependencies=[]` or a permission that returns `True`.
 
 ## Supply chain: installing from Git
 
-Redline is not on PyPI. See
+Redline is not on PyPI yet. See
 [Getting started](getting-started.md#install) for why you must name `redline-core` in the
 same install command. Do not run an unqualified `pip install redline-core` against PyPI:
-the project does not own that name there, and a third party could.
+the project does not own that name there, and a third party could. Install from the GitHub
+repository, and pin a tag or a commit in your lock file.
 
 ## A short threat model
 
 | Attacker | Wants | Stopped by |
 |---|---|---|
-| Anonymous internet user | Read traces | Django: login and staff check. FastAPI: loopback default or your dependency. **Not stopped** if you expose it open |
-| Logged-in non-admin user | Read other users' request data | `PERMISSION` / `dependencies` |
+| Anonymous internet user | Read traces | Django: login and staff check. Others: the loopback default, a token or your own hook. **Not stopped** if you expose it open |
+| Logged-in non-admin user | Read other users' request data | `PERMISSION`, `dependencies`, `permission`, `guards` or a token |
+| A logged-in user who may start load runs | Make the server hit someone else, or overload it | Paths only (no host), `load_from_ui` off by default, `read_only`, the `load` switch |
+| Someone who guesses or sniffs a token | Read everything | A long random token, HTTPS, login rate limit, constant-time comparison. Use a VPN as well |
 | A malicious website the admin visits | Delete traces, trigger EXPLAIN | CSRF protections; `X-Frame-Options: DENY` |
 | A malicious website (DNS rebinding) | Read `GET` endpoints of a local instance | FastAPI: the `Host` check of the loopback default, or real auth. Django: `ALLOWED_HOSTS` (enforced on Redline's views) and the session cookie |
 | Someone with read access to the disk or backups | Everything stored | redaction, retention, file permissions. **Not** encryption |

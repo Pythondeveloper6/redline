@@ -29,10 +29,17 @@ Traces are stored in their own SQLite file (`.redline/redline.db`), never in you
 ## Install
 
 ```bash
-pip install flask-redline                 # core + Flask/SQLAlchemy adapter
-pip install "flask-redline[profile]"      # + pyinstrument for flamegraphs
-pip install "flask[async]"                # only if you use `async def` views
+pip install \
+  "flask-redline @ git+https://github.com/Pythondeveloper6/redline#subdirectory=packages/flask-redline" \
+  "redline-core @ git+https://github.com/Pythondeveloper6/redline#subdirectory=packages/redline-core"
+pip install "flask[async]"      # only if you use `async def` views
 ```
+
+Not on PyPI yet: install from GitHub, naming `redline-core` in the same command (the adapter
+pins it exactly). Docs: <https://pythondeveloper6.github.io/redline/>.
+
+Add the extra to the core requirement for flamegraphs:
+`"redline-core[profile] @ git+https://github.com/Pythondeveloper6/redline#subdirectory=packages/redline-core"`.
 
 Python 3.10+, Flask 3.0+, SQLAlchemy 2.x.
 

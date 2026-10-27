@@ -4,45 +4,48 @@
 
 ## How finished is this?
 
-**Alpha, private, and unpublished.** The version is `0.1.0a1`, the classifier is
-`Development Status :: 3 - Alpha`, the repository is private, and **nothing is published**
-to PyPI or GitHub Pages. Redline is the first of four planned parts, and only that first
-part exists.
+**Alpha, and open source.** The version is `0.2.0a1`, the classifier is
+`Development Status :: 3 - Alpha`, and the code is on GitHub under the MIT licence. It is
+**not on PyPI yet**: you install it from GitHub (see [Getting started](getting-started.md#install)).
+Redline has four planned parts; the first two (Profile and Analyze) and the third (Stress)
+exist, and the fourth (Compare / CI) is next.
 
 What that means in practice:
 
-- **What is built.** Request tracing with span timelines; SQL, cache, template and
-  outbound HTTP spans; N+1, duplicate, slow-query and query-budget detectors; fix
-  suggestions for Django and SQLAlchemy; EXPLAIN with plan analysis for PostgreSQL, MySQL
-  and SQLite; opt-in flamegraphs; redaction; a SQLite store; a JSON API; the web UI; both
-  adapters, with demo shops for each.
-- **It is tested.** The repository has roughly 250 test functions across the three
-  packages (a `grep` count of `def test_`, so parametrised cases are more), including
-  concurrency tests for the `contextvars` recorder, redaction, and the fix suggesters
-  against real models. A CI workflow is defined for Python 3.10 to 3.14 and Django 5.2,
-  6.0 and 6.1. PostgreSQL EXPLAIN tests skip when no server is available.
+- **What is built.** Request tracing with span timelines; SQL, cache, template, serializer,
+  transaction, GraphQL resolver and outbound HTTP spans; N+1, duplicate, slow-query,
+  query-budget, blocking-in-async, transaction, result-size, count/exists, serializer and
+  external-call detectors; fix suggestions for Django and SQLAlchemy; EXPLAIN with plan
+  analysis for PostgreSQL, MySQL and SQLite; opt-in flamegraphs; logs and exception locals;
+  redaction; a SQLite store with release-aware history; a load tester with knee detection
+  and per-step bottlenecks; a static N+1 scan; one access-control model for all frameworks;
+  a JSON API; the web UI; adapters for **Django (including Ninja), FastAPI, Flask and
+  Litestar**, with demo apps.
+- **It is tested.** The repository has a large test suite across the five packages,
+  including concurrency tests for the `contextvars` recorder, redaction, and the fix
+  suggesters against real models. CI covers Python 3.10 to 3.14 and Django 5.2, 6.0 and 6.1.
+  PostgreSQL EXPLAIN tests skip when no server is available.
 - **The API may still move.** Setting names, the JSON API shape and the extension protocols
-  are not frozen. Pin an exact version.
-- **There is no upgrade guarantee**: no migrations for the store, no deprecation cycle.
+  are not frozen. Pin an exact version or commit.
+- **Upgrades are best-effort.** The SQLite store migrates itself in place and a 0.1 file is
+  backfilled (see [Storage](storage.md#migration)), but there is no deprecation cycle yet.
 - **Measured on one machine.** Overhead benchmarks exist (`benchmarks/`) and were run on an
-  Apple M2 Pro; see [Performance and overhead](performance.md#measured-numbers). Your
-  application is not that benchmark, so A/B it.
-- **Not yet proven in production.** It is designed to be usable there with sampling, but
-  multi-process behaviour in particular has not been exercised. See
-  [Production](production.md).
-- **Not built.** Load testing ([v0.2](roadmap.md)), baselines and CI integration
-  (v0.3), a shared Postgres store, Celery stitching, and everything else on the
-  [roadmap](roadmap.md).
-- **Not deployed.** The documentation is built locally
-  (`uv run --with mkdocs-material mkdocs serve`).
+  Apple M2 Pro against 0.1; see [Performance and overhead](performance.md#measured-numbers).
+  Your application is not that benchmark, so A/B it.
+- **Not yet proven in production.** It is designed to be usable there with the
+  [production preset](production.md#the-production-preset), but multi-process behaviour in
+  particular has had little real-world exercise.
+- **Not built.** Baselines in CI and a pytest plugin (v0.3), a shared Postgres store,
+  Celery stitching, and everything else on the [roadmap](roadmap.md).
 
 Use it in development and staging first, and on an internal service second.
 
 ## Why is it not on PyPI?
 
-The project is private by the owner's decision, and nothing is published. Install from Git,
-naming both the adapter and `redline-core` in one command. See
-[Getting started](getting-started.md#install).
+Publishing a package under a name is a commitment to maintain it, and the project is still
+in alpha. For now you install from GitHub, naming both the adapter and `redline-core` in one
+command so pip can satisfy the adapter's pin. See
+[Getting started](getting-started.md#install). Publishing to PyPI is a later decision.
 
 ## How is it different from django-silk?
 
@@ -52,7 +55,7 @@ solved a harder problem first.
 
 | | django-silk | Redline |
 |---|---|---|
-| Frameworks | Django | Django and FastAPI |
+| Frameworks | Django | Django (and Ninja), FastAPI, Flask, Litestar |
 | Async | no async support | recorded through `contextvars`; ASGI and WSGI, sync and async views |
 | Where traces live | your application database | a separate SQLite file |
 | Secrets | request data is stored as captured | masked before storage, by default |
@@ -88,26 +91,34 @@ route got slow and Redline tells you the query behind it.
 
 ## How is it different from Locust or k6?
 
-Load testers generate traffic and see the application from outside. Redline sees inside
-one request at a time. They answer different questions today. The point of
-[v0.2](roadmap.md) is to join them. **Until that exists, Redline does no load testing at
-all.**
+Load testers generate traffic and see the application from outside. Redline's profiler
+sees inside one request at a time. Since 0.2 Redline also has a **load tester**
+(`redline load`) that joins the two: it drives your app at a controlled rate with an open
+model, corrects for coordinated omission, finds the knee, and shows which query or endpoint
+got slower at each step. See [Load testing](load-testing.md).
+
+It is deliberately smaller than Locust or k6: HTTP only, scenario files instead of
+scripting, no distributed generators, no browsers or WebSockets. If you need those, use them
+and tag the requests with `X-Redline-Run` so Redline can still correlate.
 
 ## Does it slow my application down?
 
 It adds work: on an Apple M2 Pro, about **0.04 to 0.06 ms per request plus 12 to 44 µs
-per SQL query** while recording (a few µs in total when disabled). See
+per SQL query** while recording (a few µs in total when disabled), measured on 0.1. The 0.2
+features add small per-span or per-batch costs and are idle when unused. See
 [Performance and overhead](performance.md) for the measurements, the cost model and what
-each setting controls. The headline facts are that disk I/O is off the request path, the cost when
-nothing is recording is a `ContextVar.get()`, and **`sample_rate` reduces analysis and
-disk but not the per-query recording cost**.
+each setting controls. The headline facts are that disk I/O is off the request path, the
+cost when nothing is recording is a `ContextVar.get()`, and **`sample_rate` reduces analysis
+and disk but not the per-query recording cost**.
 
 ## Is it safe to run in production?
 
-It can be, with sampling, authentication, `explain_analyze` off, and retention limits. It
-is an alpha, and not hardened. Read [Production](production.md) and
+It can be, with the `production` preset (sampling, token access, read-only, no bodies, no
+locals), `explain_analyze` off, and retention limits. It is an alpha, and not hardened. Read
+[Production](production.md), [Access control](access-control.md) and
 [Security](security.md) first. The safest posture is to run it in development and staging
-and tunnel to a loopback-only instance when you need to look at production.
+and tunnel to a loopback-only or token-protected instance when you need to look at
+production.
 
 ## Does it touch my database?
 
@@ -122,19 +133,21 @@ anywhere. See [Storage](storage.md).
 
 ## Can I use it with Flask / Litestar / Falcon?
 
-Not out of the box. The `redline-core` engine is framework-free and you can drive it
-yourself ([Extending: Using the core directly](extending.md#using-the-core-directly)), but
-there is no adapter, and the web UI is served by an adapter. FastAPI-adjacent Starlette
-apps work through `fastapi-redline` if you can call `install()` on a FastAPI app. A
-plain-Starlette entry point is not offered.
+Flask and Litestar: yes, since 0.2. See [Flask](flask.md) and [Litestar](litestar.md). Django
+Ninja is served by the Django adapter ([Django Ninja](django-ninja.md)). Falcon and others
+have no adapter. The `redline-core` engine is framework-free and you can drive it yourself
+([Extending: Using the core directly](extending.md#using-the-core-directly)), but the web UI
+is served by an adapter. A plain-Starlette entry point is not offered; Starlette apps work
+through `fastapi-redline` if you can call `install()` on a FastAPI app.
 
 ## Can I use it with another ORM?
 
-Recording works for any **SQLAlchemy** engine and any **Django database connection**.
-Fix suggestions exist for the Django ORM and SQLAlchemy. For other ORMs you still get
-detection and the SQL, and you can write a
-[FixSuggester](extending.md#fixsuggester). Tortoise, Peewee or raw drivers are not
-instrumented, because nothing hooks their cursors.
+Recording works for any **SQLAlchemy** engine and any **Django database connection**, and
+for raw **asyncpg** and **psycopg 3** through [integrations](integrations.md). Fix
+suggestions exist for the Django ORM and SQLAlchemy. For other ORMs you still get detection
+and the SQL if the driver is instrumented, and you can write a
+[FixSuggester](extending.md#fixsuggester). Tortoise and Peewee are not instrumented, because
+nothing hooks their cursors.
 
 ## Does it work with async Django?
 
@@ -156,9 +169,10 @@ and its tasks appear together, is planned for [v1.0](roadmap.md).
 
 ## Does it support GraphQL, gRPC or WebSockets?
 
-A GraphQL endpoint served over HTTP POST is recorded like any request (one route, so
-Endpoints will group every query under it). **WebSockets are not recorded** on FastAPI.
-gRPC is not supported.
+**GraphQL:** yes, with Strawberry and Graphene. Each field resolution is a span, and an N+1
+is reported against the resolver path (`orders.*.customer`). See [GraphQL](graphql.md).
+Without the extension, a GraphQL endpoint is recorded like any POST (one route).
+**WebSockets are not recorded.** gRPC is not supported.
 
 ## Why does my N+1 show no diff?
 
@@ -208,6 +222,40 @@ Recording works with any database SQLAlchemy or Django can talk to. EXPLAIN and 
 analysis support **PostgreSQL, MySQL (including MariaDB) and SQLite**; `EXPLAIN ANALYZE`
 only on PostgreSQL. Other databases record SQL but cannot be explained.
 
+## Does it work with Django Ninja?
+
+Yes, through `django-redline`. Ninja's per-path view is resolved to the real operation, so
+the trace shows your endpoint function and the route aggregates per method. See
+[Django Ninja](django-ninja.md).
+
+## How does it find blocking calls in an async app?
+
+An event-loop lag monitor runs only while a request is in flight, and a watchdog thread samples
+the loop's stack when a tick is late. The issue names the call (`time.sleep`, `requests.get`,
+sync ORM). See [Blocking in async](async-blocking.md).
+
+## Can I compare two releases?
+
+Yes: hourly rollups and an issue index are kept for 90 days, and the History page compares
+any two releases or time ranges with a per-endpoint verdict. See [History](history.md).
+
+## Is the load tester safe to point at production?
+
+No. It is an attack tool by nature. Run it against your own staging or local environment.
+Starting runs from the UI is off by default and can only target the app serving the UI. See
+[Load testing](load-testing.md) and [Security](security.md#load-from-the-ui).
+
+## Can I put it behind a reverse proxy or in Kubernetes?
+
+Yes, with a token and `trusted_proxies`. See the recipes in
+[Access control](access-control.md#recipes).
+
+## How do I configure it per environment?
+
+Presets (`dev`, `staging`, `production`), a `redline.toml`, `REDLINE_*` environment
+variables, and your framework's settings are layered. `redline config` shows the result.
+See [Configuration](configuration.md).
+
 ## How do I delete everything?
 
 **Clear all** in the UI, `DELETE api/traces`, `manage.py redline_clear` (Django), or delete
@@ -219,5 +267,5 @@ MIT, copyright 2026 Mahmoud Ahmed. See `LICENSE` in the repository.
 
 ## Where do I report a bug or a security problem?
 
-Bugs: the repository's issue tracker (it is private; ask the owner for access).
+Bugs: the repository's [issue tracker](https://github.com/Pythondeveloper6/redline/issues).
 Security: privately, see `SECURITY.md`. Contributing is in [Contributing](contributing.md).
