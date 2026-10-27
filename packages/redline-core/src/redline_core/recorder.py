@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import functools
 import inspect
+import json
 import linecache
 import logging
 import re
@@ -313,7 +314,7 @@ class Recorder:
         self.release = resolve_release(self.settings)
         self._log_level = getattr(logging, self.settings.log_level, logging.INFO)
         if self.settings.enabled and self.settings.capture_logs:
-            _install_log_handler()
+            _install_log_handler(self._log_level)
         #: The trace most recently finished by :meth:`recording` (handy in tests).
         self.last_trace: Trace | None = None
 
@@ -510,9 +511,7 @@ class Recorder:
                     local_vars[name] = MASK
                     continue
                 try:
-                    if isinstance(value, Mapping):
-                        value = redactor.mapping(value)
-                    text = repr(value)
+                    text = _local_repr(redactor, value)
                 except Exception:
                     text = "<unrepresentable>"
                 local_vars[name] = text if len(text) <= _MAX_REPR else text[:_MAX_REPR] + "…"
@@ -552,6 +551,70 @@ class Recorder:
         return {"headers": hdrs, "body": text, "body_truncated": truncated, "size": size}
 
 
+# ── exception locals ─────────────────────────────────────────────────────────────────
+
+_LOCAL_DEPTH = 4  # container nesting masked in a local's value
+_LOCAL_ITEMS = 50  # items kept per container (the repr is cut at _MAX_REPR anyway)
+_LOCAL_TEXT = 20_000  # chars of a str/bytes value or repr scanned for secrets
+
+
+class _More:
+    """Stands in for the items of a container beyond :data:`_LOCAL_ITEMS`."""
+
+    def __repr__(self) -> str:
+        return "…"
+
+
+def _local_repr(redactor: Redactor, value: Any) -> str:
+    """``repr(value)`` with secrets masked: keys matching ``redact_keys`` at any depth of
+    dicts/lists/tuples, JSON and ``key=value`` secrets inside str/bytes, and
+    finally the whole repr through :meth:`Redactor.text` (URLs, ``?token=…`` in reprs)."""
+    text = repr(_mask_local(redactor, value, _LOCAL_DEPTH))
+    return redactor.text(text[:_LOCAL_TEXT])
+
+
+def _mask_local(redactor: Redactor, value: Any, depth: int) -> Any:
+    if isinstance(value, str):
+        return _mask_local_text(redactor, value)
+    if isinstance(value, (bytes, bytearray)):
+        try:
+            decoded = bytes(value[:_LOCAL_TEXT]).decode("utf-8")
+        except UnicodeDecodeError:
+            return value
+        masked = _mask_local_text(redactor, decoded)
+        return value if masked == decoded else masked.encode("utf-8")
+    if depth <= 0 or not isinstance(value, (Mapping, list, tuple)):
+        return value
+    if isinstance(value, Mapping):
+        out: dict[Any, Any] = {}
+        for i, (k, v) in enumerate(value.items()):
+            if i >= _LOCAL_ITEMS:
+                out["…"] = _More()
+                break
+            secret = isinstance(k, str) and redactor.is_secret_key(k)
+            out[k] = MASK if secret else _mask_local(redactor, v, depth - 1)
+        return out
+    items = [_mask_local(redactor, v, depth - 1) for v in value[:_LOCAL_ITEMS]]
+    if len(value) > _LOCAL_ITEMS:
+        items.append(_More())
+    return tuple(items) if isinstance(value, tuple) else items
+
+
+def _mask_local_text(redactor: Redactor, text: str) -> str:
+    """A str local with JSON secrets masked (like a body), then ``key=value`` pairs
+    (which covers form-encoded text and query strings)."""
+    text = text[:_LOCAL_TEXT]
+    if text.lstrip()[:1] in ("{", "["):
+        try:
+            data = json.loads(text)
+            masked = redactor.mapping(data)
+            if masked != data:
+                return json.dumps(masked, ensure_ascii=False)
+        except (ValueError, RecursionError):
+            pass
+    return redactor.text(text)
+
+
 # ── log capture ──────────────────────────────────────────────────────────────────────
 
 
@@ -565,6 +628,8 @@ class _LogCapture(logging.Handler):
     """
 
     def handle(self, record: logging.LogRecord) -> bool:  # skip filters and the handler lock
+        if record.levelno >= logging.WARNING:
+            _last_resort(record)
         builder = _trace.get()
         if builder is None or builder.finished or not builder.active:
             return False
@@ -635,21 +700,65 @@ def _log_callsite(recorder: Recorder, record: logging.LogRecord) -> Callsite | N
     )
 
 
+def _last_resort(record: logging.LogRecord) -> None:
+    """Print ``record`` the way an unconfigured app would.
+
+    When no handler at all sees a record, :mod:`logging` writes WARNING and above to stderr
+    through :data:`logging.lastResort`. Our root handler counts as one, so without this an
+    app that never configured logging would silently lose its warnings once Redline is on.
+    """
+    last = logging.lastResort
+    if last is None or record.levelno < last.level:
+        return
+    logger = logging.Logger.manager.loggerDict.get(record.name)
+    node: logging.Logger | None = logger if isinstance(logger, logging.Logger) else logging.root
+    while node is not None:
+        if any(h is not _log_handler for h in node.handlers):
+            return  # the app has a handler on the record's path: it is not "unconfigured"
+        if not node.propagate:
+            break
+        node = node.parent
+    last.handle(record)
+
+
 _log_handler = _LogCapture(level=logging.NOTSET)
 _log_lock = threading.Lock()
+#: ``(level before, level set)`` when Redline lowered the root level of an app that had not
+#: configured logging, so that ``log_level`` records reach the capture handler at all.
+_root_lowered: tuple[int, int] | None = None
 
 
-def _install_log_handler() -> None:
-    """Attach the capture handler to the root logger (idempotent)."""
+def _install_log_handler(level: int = logging.INFO) -> None:
+    """Attach the capture handler to the root logger (idempotent).
+
+    Capture follows the app's logger levels. Only when logging is unconfigured (the root
+    logger has no handler of the app's) and its level (Python's default WARNING) would hide
+    ``level`` records is the root level lowered to ``level``; console output does not
+    change, because records below WARNING have no handler to print them and WARNING and
+    above still reach stderr through :func:`_last_resort`.
+    """
+    global _root_lowered
     root = logging.getLogger()
     with _log_lock:
         if _log_handler not in root.handlers:
+            if not root.handlers and root.level > level and _root_lowered is None:
+                _root_lowered = (root.level, level)
+                root.setLevel(level)
             root.addHandler(_log_handler)
+        elif _root_lowered is not None and root.level == _root_lowered[1] and level < root.level:
+            _root_lowered = (_root_lowered[0], level)
+            root.setLevel(level)
 
 
 def _uninstall_log_handler() -> None:
+    global _root_lowered
     with _log_lock:
-        logging.getLogger().removeHandler(_log_handler)
+        root = logging.getLogger()
+        root.removeHandler(_log_handler)
+        if _root_lowered is not None:
+            if root.level == _root_lowered[1]:  # not changed by the app since
+                root.setLevel(_root_lowered[0])
+            _root_lowered = None
 
 
 # ── module-level API (the default recorder) ──────────────────────────────────────────

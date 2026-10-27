@@ -115,6 +115,7 @@ class QueryRecorder:
 
     def __call__(self, execute: Callable[..., Any], sql: Any, params: Any, many: bool, context):
         if current() is None or _suppressed.get():
+            _detach_counter(context.get("cursor"))  # a reused cursor stops counting
             return execute(sql, params, many, context)
         start = _perf()
         try:
@@ -150,7 +151,11 @@ def _record(sql: Any, params: Any, many: bool, context: dict, start: float, dura
         attribute_to_view(span)
         if rows is None and not many and cursor is not None and span.data.get("explainable"):
             _count_fetched_rows(cursor, span)
+        else:
+            _detach_counter(cursor)
         note_sync_call(span, "sync ORM")  # sync ORM on the event loop (async views)
+    else:
+        _detach_counter(cursor)
 
 
 class _RowCounter:
@@ -160,45 +165,67 @@ class _RowCounter:
     ``CursorWrapper`` gets instance-level ``fetchone``/``fetchmany``/``fetchall`` that
     forward to the real ones and add what they return. ``rows`` therefore means "rows read
     so far"; a partly consumed iterator reports the rows it actually read.
+
+    One counter per cursor (``cursor._redline_rows``), installed once with the cursor's
+    true fetch methods: every later execute on the same (reused) cursor retargets it to
+    the new span with a fresh count, or detaches it (``data = None``) when that execute is
+    not counted, so the methods never stack up.
     """
 
     __slots__ = ("_all", "_many", "_one", "data", "n")
 
-    def __init__(self, cursor: Any, span: Any) -> None:
-        self.data = span.data
+    def __init__(self, cursor: Any) -> None:
+        self.data: dict[str, Any] | None = None
         self.n = 0
         self._one, self._many, self._all = cursor.fetchone, cursor.fetchmany, cursor.fetchall
 
     def fetchone(self) -> Any:
         row = self._one()
-        if row is not None:
-            self.n += 1
-        self.data["rows"] = self.n
+        if self.data is not None:
+            if row is not None:
+                self.n += 1
+            self.data["rows"] = self.n
         return row
 
     def fetchmany(self, *args: Any, **kwargs: Any) -> Any:
         rows = self._many(*args, **kwargs)
-        self.n += len(rows)
-        self.data["rows"] = self.n
+        if self.data is not None:
+            self.n += len(rows)
+            self.data["rows"] = self.n
         return rows
 
     def fetchall(self) -> Any:
         rows = self._all()
-        self.n += len(rows)
-        self.data["rows"] = self.n
+        if self.data is not None:
+            self.n += len(rows)
+            self.data["rows"] = self.n
         return rows
 
 
 def _count_fetched_rows(cursor: Any, span: Any) -> None:
     try:
-        counter = _RowCounter(cursor, span)
-        cursor.fetchone, cursor.fetchmany, cursor.fetchall = (
-            counter.fetchone,
-            counter.fetchmany,
-            counter.fetchall,
-        )
+        counter = cursor.__dict__.get("_redline_rows")
+        if counter is None:
+            counter = _RowCounter(cursor)
+            cursor.fetchone, cursor.fetchmany, cursor.fetchall = (
+                counter.fetchone,
+                counter.fetchmany,
+                counter.fetchall,
+            )
+            cursor._redline_rows = counter
+        counter.n = 0
+        counter.data = span.data
     except Exception:  # a cursor we cannot decorate just leaves rows unknown
         pass
+
+
+def _detach_counter(cursor: Any) -> None:
+    counter = getattr(cursor, "__dict__", _NO_DICT).get("_redline_rows")
+    if counter is not None:
+        counter.data = None
+
+
+_NO_DICT: dict[str, Any] = {}
 
 
 _wrapper = QueryRecorder()
