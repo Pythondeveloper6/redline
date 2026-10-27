@@ -245,6 +245,7 @@ jobs:
         working-directory: frontend
         run: |
           npm ci
+          npm test
           npm run build
       # The bundle is committed so the wheels ship without Node. Vite names assets by
       # content hash and the build has no timestamps, so a rebuild from the same sources
