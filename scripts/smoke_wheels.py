@@ -11,10 +11,18 @@ import importlib
 import importlib.resources as res
 import sys
 
+MODULES = (
+    "redline_core",
+    "django_redline",
+    "fastapi_redline",
+    "flask_redline",
+    "litestar_redline",
+)
+
 
 def main() -> int:
     failures: list[str] = []
-    for module in ("redline_core", "django_redline", "fastapi_redline", "flask_redline"):
+    for module in MODULES:
         mod = importlib.import_module(module)
         where = mod.__file__ or ""
         if "site-packages" not in where:
@@ -25,7 +33,7 @@ def main() -> int:
     if not core.joinpath("ui/static/index.html").is_file():
         failures.append("redline_core wheel is missing ui/static/index.html (bundled UI)")
 
-    for module in ("redline_core", "django_redline", "fastapi_redline", "flask_redline"):
+    for module in MODULES:
         if not res.files(module).joinpath("py.typed").is_file():
             failures.append(f"{module} wheel is missing py.typed")
 
