@@ -162,6 +162,7 @@ class Detector:
         samples: dict[str, Span] = {}
         n1 = self._n_plus_one(sql_spans, extra, samples)
         covered = {sid for issue in n1 for sid in issue.span_ids}
+        _tag_resolvers(n1, trace.spans)
         issues.extend(n1)
         issues.extend(self._duplicates(sql_spans, covered))
         issues.extend(self._slow(sql_spans, extra, samples))
@@ -347,6 +348,27 @@ class Detector:
             count=n,
             total_ms=round(total, 3),
         )
+
+
+def _tag_resolvers(issues: list[Issue], spans: Sequence[Span]) -> None:
+    """GraphQL: name the resolver an N+1 comes from (``extra["resolver_path"]``)."""
+    resolvers = {s.id: s for s in spans if s.kind == "resolver"}
+    if not resolvers:
+        return
+    parents = {s.id: s.parent_id for s in spans}
+    for issue in issues:
+        paths = set()
+        for sid in issue.span_ids:
+            pid = parents.get(sid)
+            while pid is not None and pid not in resolvers:
+                pid = parents.get(pid)
+            paths.add(resolvers[pid].data.get("path") if pid else None)
+        path = paths.pop() if len(paths) == 1 else None
+        if path:
+            issue.extra["resolver_path"] = path
+            issue.title = (
+                f"N+1: {issue.count} queries{_on(issue.fingerprint or '')} from resolver {path}"
+            )
 
 
 def detect(
