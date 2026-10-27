@@ -6,6 +6,8 @@ What gets masked (replaced by :data:`MASK`):
 * **query string, form and JSON body keys** matching any ``Settings.redact_keys`` regex,
   at any nesting depth;
 * **URLs** (outbound HTTP spans): the same key rule on their query string;
+* **free text** (captured log messages): ``key=value`` and ``"key": "value"`` pairs whose
+  key matches ``redact_keys`` have the value masked (:meth:`Redactor.text`);
 * **SQL parameters** bound to a column whose name matches ``redact_keys``
   (``… SET "password" = %s`` or ``INSERT … ("token") VALUES (%s)``).
 
@@ -28,6 +30,14 @@ __all__ = ["MASK", "Redactor", "json_safe"]
 
 MASK = "[redacted]"
 _MAX_PARAM_CHARS = 500
+
+#: ``password=hunter2``, ``"token": "abc"``, ``Authorization: Bearer abc`` inside free text.
+_TEXT_PAIR = re.compile(
+    r"""(?P<q>["']?)(?P<key>[A-Za-z_][\w.\-]*)(?P=q)(?P<sep>\s*[:=]\s*)"""
+    r"""(?P<val>"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'"""
+    r"""|(?:(?:Bearer|Basic|Token)\s+)?[^\s,;&)}\]"']+)""",
+    re.IGNORECASE,
+)
 
 _PLACEHOLDER = re.compile(r"%\([^)]*\)s|%s|\?|\$\d+|(?<![:\w]):[A-Za-z_]\w*")
 _COLUMN_BEFORE = re.compile(
@@ -70,6 +80,19 @@ class Redactor:
     # keys ------------------------------------------------------------------
     def _is_secret_key(self, key: str) -> bool:
         return any(p.search(key) for p in self._keys)
+
+    def text(self, text: str) -> str:
+        """``text`` with the values of secret-looking ``key=value`` / ``"key": "v"`` masked."""
+
+        def mask(m: re.Match[str]) -> str:
+            if not self.is_secret_key(m.group("key")):
+                return m.group(0)
+            val = m.group("val")
+            quote = val[0] if len(val) > 1 and val[0] in "\"'" and val[-1] == val[0] else ""
+            q = m.group("q")
+            return f"{q}{m.group('key')}{q}{m.group('sep')}{quote}{MASK}{quote}"
+
+        return _TEXT_PAIR.sub(mask, text)
 
     def headers(self, headers: Mapping[str, Any] | Iterable[tuple[Any, Any]] | None) -> dict:
         """Header dict with sensitive values masked. Accepts ASGI ``[(b"k", b"v")]`` too."""
