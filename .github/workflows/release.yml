@@ -52,7 +52,7 @@ jobs:
 
       # The wheels ship the committed UI bundle, so publishing a stale one ships a UI that
       # does not match the frontend sources. Same check as CI's `frontend` job.
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v7
         with:
           node-version: lts/*
           cache: npm
@@ -139,7 +139,7 @@ jobs:
           mv all/"${PACKAGE//-/_}"-* dist/
           ls dist
           test "$(ls dist | wc -l)" -eq 2
-      - uses: pypa/gh-action-pypi-publish@v1.14.2
+      - uses: pypa/gh-action-pypi-publish@v1.14.3
         with:
           repository-url: https://test.pypi.org/legacy/
           # Re-tagging after a failed run should not be blocked by the files that
@@ -173,7 +173,7 @@ jobs:
           mv all/"${PACKAGE//-/_}"-* dist/
           ls dist
           test "$(ls dist | wc -l)" -eq 2
-      - uses: pypa/gh-action-pypi-publish@v1.14.2
+      - uses: pypa/gh-action-pypi-publish@v1.14.3
         with:
           # PEP 740 attestations, signed by the same OIDC identity. Free provenance.
           attestations: true
