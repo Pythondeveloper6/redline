@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import math
 import os
+import signal
 import sys
 from collections.abc import Callable, Sequence
 from typing import Any, TextIO
@@ -209,6 +210,38 @@ def _open_store_sink(path: str, err: TextIO) -> Any:
     return StoreSink(store, close=True)
 
 
+def _graceful_sigterm() -> Any:
+    """Make SIGTERM stop the run like Ctrl-C (partial results kept). Returns the previous
+    handler, or ``None`` when it cannot be installed (not the main thread)."""
+
+    def handler(signum: int, frame: Any) -> None:
+        raise KeyboardInterrupt
+
+    try:
+        return signal.signal(signal.SIGTERM, handler)
+    except (ValueError, OSError):  # not the main thread
+        return None
+
+
+def _fail_run(store_path: str, run_id: str, message: str) -> None:
+    """Close a still-``running`` row (pre-inserted by the UI) as ``failed``, so a run that
+    could not start never stays "running" forever."""
+    from .storage import SQLiteStore
+
+    try:
+        store = SQLiteStore(store_path, background=False)
+    except Exception:
+        return
+    try:
+        run = store.get_run(run_id)
+        if run is not None and run.status == "running":
+            store.finish_run(run_id, "failed", {"message": message})
+    except Exception:  # pragma: no cover - best effort
+        pass
+    finally:
+        store.close()
+
+
 def _ui_hint(base_url: str, run_id: str) -> str:
     from urllib.parse import urlsplit
 
@@ -235,6 +268,8 @@ def _cmd_load(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
         profile = _cli_profile(args, scenario)
     except ScenarioError as exc:
         err.write(f"redline load: {exc}\n")
+        if args.run_id and not args.no_store:  # started by the UI: its row must not stay "running"
+            _fail_run(args.store, args.run_id, str(exc))
         return EXIT_USAGE
     except argparse.ArgumentTypeError as exc:
         err.write(f"redline load: {exc}\n")
@@ -263,6 +298,7 @@ def _cmd_load(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
     if store_path:
         stop.clear()
         control.write_pid(run_id, store_path)
+    previous_term = _graceful_sigterm()
     printer = _Printer(out, quiet=args.quiet)
     if not args.quiet:
         printer.line(f"redline load: {args.name or scenario.name} → {scenario.base_url}")
@@ -278,10 +314,14 @@ def _cmd_load(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
             name=args.name,
             on_event=printer,
         )
-    except (ScenarioError, RuntimeError) as exc:
+    except Exception as exc:
         err.write(f"redline load: {exc}\n")
+        if store_path:
+            _fail_run(store_path, run_id, f"{type(exc).__name__}: {exc}")
         return EXIT_USAGE if isinstance(exc, ScenarioError) else EXIT_FAIL
     finally:
+        if previous_term is not None:
+            signal.signal(signal.SIGTERM, previous_term)
         if store_path:
             control.cleanup(run_id, store_path)
 

@@ -254,6 +254,7 @@ class _Engine:
             "worker": k,
             "workers": self.n,
             "run_id": self.run_id,
+            "parent_pid": os.getpid(),
             "base_url": sc.base_url,
             "headers": dict(sc.headers),
             "timeout_s": sc.timeout_s,

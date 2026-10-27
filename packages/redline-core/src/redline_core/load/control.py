@@ -77,6 +77,26 @@ def scenario_from_config(config: Mapping[str, Any], base_url: str) -> dict[str, 
     return data
 
 
+#: Stricter caps for runs started from the UI (the CLI allows more).
+UI_MAX_DURATION_S = 3_600.0
+UI_MAX_RPS = 5_000.0
+UI_MAX_STEPS = 200
+
+
+def _check_ui_limits(scenario: Any) -> None:
+    from .profile import ScenarioError
+
+    profile = scenario.profile
+    if profile.step_count() > UI_MAX_STEPS:
+        raise ScenarioError(f"runs started here are limited to {UI_MAX_STEPS} steps", "profile")
+    if profile.total_duration_s > UI_MAX_DURATION_S:
+        raise ScenarioError(
+            f"runs started here are limited to {UI_MAX_DURATION_S:g}s", "profile.duration_s"
+        )
+    if profile.max_rps > UI_MAX_RPS:
+        raise ScenarioError(f"runs started here are limited to {UI_MAX_RPS:g} rps", "profile.rps")
+
+
 def launch_background(
     config: Mapping[str, Any],
     base_url: str,
@@ -94,7 +114,8 @@ def launch_background(
     :func:`stop_run`.
     """
     data = scenario_from_config(config, base_url)
-    load_scenario(data)  # validate before spawning anything
+    scenario = load_scenario(data)  # validate before spawning anything
+    _check_ui_limits(scenario)
     run_id = run_id or uuid.uuid4().hex
     store = os.fspath(store_path or DEFAULT_STORE)
     rdir = runs_dir(store)
@@ -132,6 +153,10 @@ def launch_background(
 
 
 def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if os.name == "nt":  # pragma: no cover - os.kill(pid, 0) would send CTRL_C_EVENT there
+        return _pid_alive_windows(pid)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -141,6 +166,33 @@ def _pid_alive(pid: int) -> bool:
     except OSError:  # pragma: no cover
         return False
     return True
+
+
+def _pid_alive_windows(pid: int) -> bool:  # pragma: no cover - Windows only
+    import ctypes
+
+    process_query_limited_information = 0x1000
+    still_active = 259
+    kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+    handle = kernel32.OpenProcess(process_query_limited_information, False, pid)
+    if not handle:
+        return False
+    try:
+        code = ctypes.c_ulong()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+            return False
+        return code.value == still_active
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def run_process_alive(run_id: str, store_path: str | os.PathLike[str] | None = None) -> bool:
+    """Whether the process recorded in ``<run id>.pid`` is alive (no pid file: ``False``)."""
+    pid_file = runs_dir(store_path) / f"{_safe_id(run_id)}.pid"
+    try:
+        return _pid_alive(int(pid_file.read_text(encoding="ascii").strip()))
+    except (OSError, ValueError):
+        return False
 
 
 def stop_run(run_id: str, store_path: str | os.PathLike[str] | None = None) -> bool:
