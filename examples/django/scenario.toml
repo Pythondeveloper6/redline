@@ -1,0 +1,31 @@
+name = "django shop browse"
+description = "Browse the demo shop: N+1 on orders and items, a duplicate dashboard and a slow review search."
+base_url = "http://127.0.0.1:8000"
+timeout_s = 10
+
+[[requests]]
+name = "orders (N+1 on items)"
+path = "/orders/"
+weight = 3
+
+[[requests]]
+name = "items (N+1 on product)"
+path = "/items/"
+weight = 2
+
+[[requests]]
+name = "dashboard (duplicate query)"
+path = "/dashboard/"
+weight = 1
+
+[[requests]]
+name = "review search (slow query)"
+path = "/reviews/search/?q={random_choice:battery|screen|charger|camera}"
+weight = 1
+
+[profile]
+mode = "steps"
+start_rps = 5
+end_rps = 50
+step_rps = 5
+step_duration_s = "10s"
