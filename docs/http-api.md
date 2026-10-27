@@ -13,13 +13,14 @@ turns its request object into a call to `dispatch(method, path, params, body)` a
 
 | | |
 |---|---|
-| **Base** | `<mount>/api/` where `<mount>` is `/redline/` (Django) or `/_redline/` (FastAPI) |
+| **Base** | `<mount>/api/` where `<mount>` is `/redline/` (Django) or `/_redline/` (FastAPI, Flask, Litestar) |
 | **Format** | JSON in, JSON out. Responses carry `Cache-Control: no-store` |
 | **Errors** | `{"error": {"code": "<code>", "message": "<text>"}}` with a 4xx or 5xx status |
 | **Times** | `started_at` is a Unix epoch in seconds (float); `duration_ms`, `start_ms` are milliseconds |
 | **Ids** | 32-character lowercase hex strings |
 | **Limits** | `limit` is clamped to 1 to 500 |
-| **Windows** | `1h`, `24h` (default), `7d`, or any `<n>m`, `<n>h`, `<n>d` |
+| **Windows** | `1h`, `24h` (default), `7d`, or any `<n>m`, `<n>h`, `<n>d` (`api/history` defaults to `30d`) |
+| **Status** | `status` also accepts `1xx` and `3xx` |
 
 ### Authentication and CSRF
 
@@ -36,22 +37,48 @@ The mutating methods are additionally protected against cross-site requests:
       and on HTTPS the Origin and Referer checks apply. Failure is `403` with code
       `csrf_failed`.
     - Scripts must therefore log in with a session and send the token. The page embeds a
-      fresh token in `<meta name="redline-csrf">`.
+      fresh token in `<meta name="redline-csrf">`. The exception is `access = "token"`: a
+      request authenticated with an `Authorization: Bearer` header skips Django's CSRF
+      check.
 
 === "FastAPI"
 
-    - Your `dependencies` run first. The default (`local_only`) answers `403
-      forbidden` to a non-loopback client, or to a request whose `Host` is not a loopback
-      name (DNS rebinding).
+    - Redline's access check runs first, then your `dependencies`. The default policy
+      (`local`) answers `403 forbidden` to a non-loopback client, or to a request whose
+      `Host` is not a loopback name (DNS rebinding).
     - An `HTTPException` raised by **your** dependencies is answered in the same error
       shape: `401` becomes `unauthorized`, `403` `forbidden`, other statuses
       `bad_request`/`not_found`/`too_many_requests`/`http_error`. The exception's `detail`
       is the `message`, and its headers (`WWW-Authenticate`) are kept.
-    - `DELETE` and `POST` reject browser requests whose `Origin` does not match the
-      request host (or `X-Forwarded-Host`), `Origin: null`, and `Sec-Fetch-Site:
-      cross-site`, with `403 csrf_failed`.
-    - Requests **without** an `Origin` header (curl, scripts) pass the CSRF guard. They
-      are still subject to your auth dependencies.
+
+=== "Flask and Litestar"
+
+    - Redline's access check runs first, then Flask's `permission` or Litestar's `guards`
+      (passing one implies `access = "framework"`). A `werkzeug` `HTTPException` (Flask) or
+      Litestar exception raised by your hook is answered in the same error shape.
+
+=== "Token and basic access"
+
+    - With `access = "token"` or `"basic"` (see [Access control](access-control.md)) a
+      caller either sends `Authorization: Bearer <token>` (or `Authorization: Basic ...`),
+      or logs in through `POST api/login` and then uses the cookie it receives. The page
+      shell and assets are public; **every `api/` call needs credentials**.
+    - An unauthenticated call is answered `401` with code `login_required` (wrong
+      credentials: `invalid_credentials`). Both carry a `WWW-Authenticate` header unless
+      the request sends `X-Redline-UI: 1`, which the UI and the badge do so browsers show
+      no native dialog.
+    - With `read_only` on, every non-GET `api/` call except `api/explain`, `api/login` and
+      `api/logout` answers `403 read_only`, and so does `POST api/explain` with
+      `"analyze": true`.
+    - A switched-off [feature](access-control.md#feature-switches) answers
+      `404 feature_disabled`.
+
+**CSRF, on every framework.** For every method but `GET`, `HEAD` and `OPTIONS` (login and
+logout included) a request is refused with `403 csrf_failed` when it carries
+`Sec-Fetch-Site: cross-site` **or `same-site`**, or an `Origin` (including `null`) whose
+host and port differ from the host the request was addressed to (`X-Forwarded-Host` when
+the peer is a trusted proxy). A request **without** an `Origin` (curl, scripts) passes this
+check and is subject to the access policy only.
 
 The examples below use curl against FastAPI on localhost. For Django, add your session
 cookie and `X-CSRFToken`.
@@ -62,24 +89,35 @@ cookie and `X-CSRFToken`.
 |---|---|---|
 | 400 | `invalid_filter` | A list filter or cursor could not be parsed |
 | 400 | `invalid_window` | `window` is not `1h`, `24h`, `7d` or `<n>m/h/d` |
-| 400 | `invalid_kind` | `kind` is not one of the four issue kinds |
+| 400 | `invalid_kind` | `kind` is not one of the known issue kinds |
+| 400 | `invalid_period` | A `a` or `b` of `api/history/compare` is not `release:<name>` or `range:<start>-<end>` |
 | 400 | `invalid_json` | The `POST` body is not valid JSON |
-| 400 | `invalid_body` | The body is not an object, or `trace_id` or `span_id` is missing or not a string |
+| 400 | `invalid_body` | The body is not an object, or a required field is missing or not valid (for `POST api/runs`: also when no load target can be determined, see [Runs](#runs)) |
 | 400 | `not_explainable` | The span is not a single read-only `SELECT` |
 | 400 | `analyze_unsupported` | `analyze: true` on MySQL |
 | 400 | `unsupported_vendor` | EXPLAIN on a database that is not PostgreSQL, MySQL or SQLite |
-| 401 | `unauthorized` | (FastAPI) one of your auth dependencies raised `401` |
+| 401 | `unauthorized` | (FastAPI, Flask, Litestar) one of your auth hooks raised `401` |
+| 401 | `login_required` | The access policy is `token` or `basic` and the request is not signed in |
 | 403 | `analyze_disabled` | `analyze: true` while `explain_analyze` is off |
-| 403 | `forbidden` | Django: `PERMISSION` refused. FastAPI: the loopback default refused the client or the `Host`, or your dependency raised `403` |
-| 403 | `csrf_failed` | Django: the CSRF check failed. FastAPI: a cross-origin `DELETE`/`POST` |
-| 404 | `not_found` | No such API endpoint (or UI asset) |
+| 401 | `invalid_credentials` | Wrong token, password or username |
+| 403 | `forbidden` | The policy refused: not a loopback client or `Host` under `local`, a client outside `allowed_ips`, a loopback peer with forwarding headers and no `trusted_proxies`, `framework` with a hook that returned false (or no hook), `custom` returned false, or your dependency raised `403` |
+| 403 | `open_refused` | `access = "open"` without `REDLINE_ALLOW_OPEN=1` |
+| 403 | `csrf_failed` | The CSRF check failed (see above; on Django also Django's own check) |
+| 403 | `load_disabled` | `POST api/runs` while `load_from_ui` is off |
+| 403 | `read_only` | A state-changing call while `read_only` is on |
+| 404 | `feature_disabled` | The route belongs to a feature switched off in `features` |
+| 404 | `not_found` | No such API endpoint (or UI asset), or `ui_enabled` is off, or `api/login` under a policy without login |
 | 404 | `trace_not_found` | The trace id does not exist (or was pruned) |
 | 404 | `span_not_found` | The span id is not in that trace |
 | 404 | `profile_not_found` | The trace has no profile |
+| 404 | `run_not_found` | The load-run id does not exist |
 | 405 | `method_not_allowed` | Wrong method for the endpoint |
+| 409 | `run_active` | `DELETE api/runs/{id}` while the run is still running |
+| 429 | `too_many_requests` | Too many failed credentials from one client (`Retry-After` is set) |
 | 422 | `explain_failed` | The database rejected the EXPLAIN |
 | 500 | `internal_error` | An unexpected error. Logged on the `redline` logger |
 | 501 | `explain_unavailable` | No connection or engine for the span's database alias |
+| 501 | `not_supported` | The store (a custom one) cannot answer this route, or the run launcher is not wired |
 
 Every one of these uses the `{"error": {"code", "message"}}` shape, on both adapters. The
 only exception is Django's own `400` for a disallowed `Host`, which Django renders before
@@ -98,7 +136,7 @@ curl -s localhost:8000/_redline/api/meta
 
 ```json
 {
-  "version": "0.1.0a1",
+  "version": "0.2.0a1",
   "framework": "fastapi",
   "settings": {
     "thresholds": {"n_plus_one": 5, "duplicate": 2, "slow_query_ms": 100.0, "too_many_queries": 50},
@@ -108,9 +146,18 @@ curl -s localhost:8000/_redline/api/meta
     "explain_analyze_enabled": false,
     "profiler_available": true
   },
-  "storage": {"rows": 143, "path": ".redline/redline.db", "dropped": 0}
+  "storage": {"rows": 143, "path": ".redline/redline.db", "dropped": 0},
+  "project_root": "/srv/shop",
+  "editor": "vscode",
+  "editor_url_template": "vscode://file/{file}:{line}",
+  "release": "3f9c2ab",
+  "features": {"load_from_ui": false, "sse": true, "snapshot": true}
 }
 ```
+
+The last five keys are new in 0.2: `project_root` and the editor fields drive the
+[open-in-editor](the-ui.md#open-in-editor) links, `release` is the resolved
+[release](history.md#releases) name, and `features` tells the UI which optional parts exist.
 
 `storage.dropped` counts traces dropped because the writer queue was full. A value that
 keeps rising means the writer cannot keep up: see [Storage](storage.md#the-writer-thread).
@@ -340,14 +387,324 @@ Response, `200`:
 
 Field-by-field semantics and the safety model are on [EXPLAIN](explain.md).
 
+### GET api/traces: new filters
+
+0.2 adds three parameters to the list endpoint:
+
+| Parameter | Meaning |
+|---|---|
+| `sql=<text>` | only traces that ran a statement whose **normalised** SQL contains the text (case-insensitive) |
+| `since=<epoch>` | only traces strictly newer than this time |
+| `replay_of=<trace id>` | only [replays](the-ui.md#replay) of that trace |
+
+An invalid value is `400 invalid_filter`.
+
+### GET api/stream
+
+A **Server-Sent Events** feed of new traces, used by [Live mode](the-ui.md#live-mode).
+Parameters: `since=<epoch>` (default: now) and `after=<seq>`. Every trace has a `seq`, its
+position in insertion order, and every event carries it as the SSE `id`. A client that
+reconnects resumes exactly after the last event it saw with `after=<seq>` or the standard
+`Last-Event-ID` header, so a slow request that finished late is never skipped. `after`
+wins over `since`.
+
+```bash
+curl -N "localhost:8000/_redline/api/stream"
+```
+
+```text
+retry: 3000
+: connected
+
+event: trace
+id: 1842
+data: {"id": "9d4c...", "seq": 1842, "method": "GET", "path": "/orders/", "status": 200, "duration_ms": 84.2, ...}
+
+: ping
+```
+
+Each `trace` event carries a `TraceSummary`. The stream opens with a `retry:` hint (3000 ms on ASGI, 500 ms on WSGI) and
+a `: connected` comment, polls the store every second, and sends a comment line `: ping`
+every 15 seconds as a keep-alive. The server closes the stream so the browser reconnects:
+after **five minutes** on ASGI servers (FastAPI, Litestar) and after about **25 seconds**
+on WSGI servers (Flask, Django), where each open stream holds a worker thread. The UI
+reconnects with the last `seq`, so nothing is lost. It is served by the adapter, is subject
+to the same access control, and can be switched off with the `sse` feature
+(`404 feature_disabled`).
+
+### GET api/traces/{id}/snapshot
+
+The trace as a **standalone HTML page** (`text/html; charset=utf-8`, with
+`Content-Disposition: attachment; filename="redline-<id>.html"`): the UI bundle inlined,
+with the trace (as stored, already redacted) and its profile embedded. The profile is left
+out when the `profile` feature is off; the route answers `404 feature_disabled` when
+`snapshot` is off, and `404 trace_not_found` for an unknown id. Open it offline. See
+[Snapshots](the-ui.md#snapshots).
+
+### GET api/compare
+
+Two traces side by side. Parameters: `a` and `b` (trace ids).
+
+```bash
+curl -s "localhost:8000/_redline/api/compare?a=5b1f...&b=9d4c..."
+```
+
+```json
+{
+  "a": {"id": "5b1f...", "duration_ms": 412.0, "query_count": 31, "query_ms": 380.2},
+  "b": {"id": "9d4c...", "duration_ms": 38.4,  "query_count": 3,  "query_ms": 21.0},
+  "delta": {"duration_ms": -373.6, "query_count": -28, "query_ms": -359.2},
+  "by_kind": {"sql": {"a_ms": 380.2, "b_ms": 21.0, "a_count": 31, "b_count": 3}},
+  "sql": [{"fingerprint": "8a3c0f21d4b6e7a9", "sql": "SELECT ... WHERE customer_id = ?",
+           "a_count": 30, "b_count": 0, "a_ms": 360.0, "b_ms": 0.0}],
+  "issues": {"only_a": [{"id": "e3f1...", "kind": "n_plus_one", "severity": "critical", "title": "..."}],
+             "only_b": [], "both": []}
+}
+```
+
+`delta` and every `*_ms` difference are **b minus a**. The `sql` rows are keyed by the
+16-hex fingerprint and sorted by the largest time difference. A missing `a` or `b` is `400
+invalid_filter`; an unknown id is `404 trace_not_found`.
+
+### GET api/sql
+
+SQL aggregated by fingerprint across traces. Parameters: `q` (substring of the normalised
+SQL), `window` (default `24h`), `limit` (default 100).
+
+```json
+{"items": [{"fingerprint": "8a3c0f21d4b6e7a9", "sql": "SELECT ... FROM shop_order WHERE status = ?",
+            "count": 1840, "traces": 412, "total_ms": 5120.4, "max_ms": 88.0, "mean_ms": 2.78,
+            "mean_rows": 14.2, "routes": ["GET /orders/"], "sample_trace_id": "9d4c...",
+            "vendor": "postgresql"}]}
+```
+
+Sorted by total time. See [Database](database.md).
+
+### GET api/indexes
+
+The workload index advisor and the unused-index list. Parameters: `window` (default `24h`),
+`db` (the database alias, default `default`) and `refresh=1`. The result is cached for
+30 seconds per window and alias; `refresh=1` recomputes it.
+
+```json
+{
+  "db": "default",
+  "vendor": "postgresql",
+  "window": 86400,
+  "candidates": [{
+    "table": "shop_order", "columns": ["customer_id", "status"],
+    "create_sql": "CREATE INDEX shop_order_customer_id_status_idx ON shop_order (customer_id, status);",
+    "covers": ["8a3c0f21d4b6e7a9"], "queries": 1840, "total_ms": 5120.4,
+    "est_saving_ms": 4300.0, "vendor": "postgresql", "kind": "btree",
+    "confidence": "high", "verified": true, "explained": true, "note": null
+  }],
+  "unused": [{"schema": "public", "table": "shop_order", "index": "shop_order_legacy_idx",
+              "scans": 0, "size_bytes": 8388608,
+              "drop_sql": "DROP INDEX \"public\".\"shop_order_legacy_idx\";"}],
+  "unused_supported": true,
+  "unused_error": null,
+  "verified": true,
+  "queries_analyzed": 62,
+  "already_indexed": 9,
+  "explained": 20,
+  "elapsed_ms": 412.7,
+  "cached": false
+}
+```
+
+`candidates` is at most 10, best first. `kind` is `btree` or a text-search alternative
+(`pg_trgm`, FTS5 or `FULLTEXT`; those have `confidence: "low"` and a `note`). `verified`
+says the existing indexes were read from the database catalog, `already_indexed` how many
+requirements an existing index already served, `explained` how many queries were checked
+with a plain `EXPLAIN`. `unused` is **PostgreSQL only** (`unused_supported` is `false`
+elsewhere); `unused_error` is `{code, message}` when it could not be read. Nothing is ever
+executed besides catalog `SELECT`s and plain `EXPLAIN`s. Answers `501 not_supported` if the
+store cannot provide the workload. See [Database](database.md#index-advisor).
+
+### GET api/cache
+
+Cache efficiency per backend and key pattern. Parameter: `window`.
+
+```json
+{"items": [{"backend": "redis", "key_pattern": "user:*:profile", "gets": 5200, "hits": 4100,
+            "misses": 1100, "hit_rate": 0.788, "sets": 1100, "deletes": 12,
+            "unread_sets": 0, "stampedes": 2}]}
+```
+
+`hit_rate` is `null` when the backend does not report hits. See
+[Cache efficiency](cache-efficiency.md).
+
+### GET api/external
+
+Outbound HTTP per method, host and URL pattern. Parameter: `window`.
+
+```json
+{"items": [{"method": "POST", "host": "api.payments.example", "url_pattern": "https://api.payments.example/v2/charge",
+            "count": 310, "total_ms": 91200.0, "p95_ms": 840.0, "max_ms": 2100.0,
+            "errors": 6, "error_rate": 0.019, "duplicates": 0, "retries": 1}]}
+```
+
+See [External calls](external-calls.md).
+
+### GET api/history
+
+Time series of an endpoint, or of the whole app when `route` is omitted. Parameters:
+`route`, `method` (case-insensitive), `window` (default `30d`), `bucket` (`1h` or `1d`;
+default `1h` for windows up to two days, else `1d`; anything else is `400 invalid_filter`).
+
+```json
+{"series": [{"t": 1761436800, "count": 4120, "p50_ms": 11.0, "p95_ms": 48.0, "p99_ms": 120.0,
+             "error_rate": 0.002, "avg_queries": 4.1}],
+ "releases": [{"release": "3f9c2ab", "first_seen": 1761440400}]}
+```
+
+Only non-empty buckets are returned. See [History](history.md).
+
+### GET api/releases
+
+```json
+{"items": [{"release": "3f9c2ab", "first_seen": 1761440400, "last_seen": 1761526800, "requests": 88210}]}
+```
+
+### GET api/history/compare
+
+Compare two periods. `a` is the baseline and `b` the period under test; each is
+`release:<name>` or `range:<start>-<end>` (epoch seconds). An invalid one is `400
+invalid_period`.
+
+```bash
+curl -s "localhost:8000/_redline/api/history/compare?a=release:a81d0e4&b=release:3f9c2ab"
+```
+
+```json
+{
+  "a": {"kind": "release", "release": "a81d0e4", "requests": 61000},
+  "b": {"kind": "release", "release": "3f9c2ab", "requests": 88210},
+  "endpoints": [{
+    "route": "/orders/", "method": "GET",
+    "a": {"count": 4100, "error_rate": 0.0, "p50_ms": 12.0, "p95_ms": 40.0, "p99_ms": 90.0, "avg_ms": 18.0, "avg_queries": 4.0},
+    "b": {"count": 5200, "error_rate": 0.0, "p50_ms": 30.0, "p95_ms": 95.0, "p99_ms": 210.0, "avg_ms": 41.0, "avg_queries": 31.0},
+    "delta_p95_pct": 137.5, "delta_queries": 27.0, "verdict": "regressed"
+  }],
+  "issues": {"new": [{"id": "e3f1...", "kind": "n_plus_one", "severity": "critical", "title": "...",
+                      "route": "/orders/", "first_seen": 1761440500, "last_seen": 1761526000,
+                      "first_release": "3f9c2ab", "last_release": "3f9c2ab", "occurrences": 17}],
+             "resolved": [], "persisting": []}
+}
+```
+
+An endpoint's `a` or `b` is `null` when it is new or gone, and `delta_p95_pct` is `null`
+when it cannot be computed. Verdicts and sort order are explained in
+[History](history.md#before-and-after-comparing-periods): regressed means p95 up 20% **and**
+5 ms, or average queries up by 1.
+
+### Runs
+
+Load-test runs ([Load testing](load-testing.md)).
+
+| Request | Returns |
+|---|---|
+| `GET api/runs?limit=50` | `{"items": [Run]}`, newest first, steps included |
+| `GET api/runs/{id}` | one run |
+| `GET api/runs/{id}/bottlenecks` | what got slower, per step |
+| `POST api/runs` | start a run (`202`) |
+| `POST api/runs/{id}/stop` | stop a run: `{"stopped": true}` |
+| `DELETE api/runs/{id}` | delete a finished run: `{"deleted": 1}` |
+
+Runs started from the UI go through the same validation as a scenario file. A run's
+`config` has secret-looking header values, body keys and URL secrets masked.
+
+A `Run`:
+
+```json
+{
+  "id": "7c1e...", "name": "browse", "status": "done",
+  "config": {"workers": 4},
+  "created_at": 1761500000, "finished_at": 1761500220,
+  "steps": [{"step": 1, "target_rps": 10, "achieved_rps": 10.0, "sent": 200, "ok": 200, "errors": 0,
+             "dropped": 0, "p50_ms": 12.0, "p95_ms": 21.0, "p99_ms": 38.0, "max_ms": 64.0,
+             "error_rate": 0.0, "error_breakdown": {}}],
+  "summary": {"knee_step": 8, "max_ok_rps": 69.8, "verdict": "saturated"}
+}
+```
+
+`status` is `running`, `done`, `stopped` or `failed`. The knee rule and verdicts are on the
+[Load testing](load-testing.md#reading-the-results) page.
+
+`GET api/runs/{id}/bottlenecks`:
+
+```json
+{
+  "steps": [{"step": 1, "target_rps": 10}, {"step": 8, "target_rps": 80}],
+  "items": [{
+    "key": "sql:8a3c0f21d4b6e7a9", "kind": "sql", "label": "SELECT ... FROM shop_order WHERE ...",
+    "callsite": {"file": "shop/api.py", "line": 44, "function": "list_orders"},
+    "per_step": [{"step": 1, "mean_ms": 3.1, "p95_ms": 5.0, "count": 40},
+                 {"step": 8, "mean_ms": 410.0, "p95_ms": 900.0, "count": 310}],
+    "growth": 132.3
+  }]
+}
+```
+
+`kind` is `sql` or `route`. Items are sorted by `growth` (last step's mean over the first's),
+top 50. It is `404 run_not_found` when there is neither the run nor a trace tagged with it.
+
+`POST api/runs` starts a run **against the app that serves the UI**:
+
+```bash
+curl -s -X POST localhost:8000/_redline/api/runs -H 'content-type: application/json' -d '{
+  "name": "smoke",
+  "requests": [{"method": "GET", "path": "/api/orders/", "weight": 3}],
+  "profile": {"mode": "steps", "start_rps": 10, "end_rps": 50, "step_rps": 10, "step_duration_s": 20}
+}'
+# 202 {"id": "7c1e...", "name": "smoke", "status": "running"}
+```
+
+It is refused with `403 load_disabled` unless `load_from_ui` is on (`403 read_only` in
+read-only mode, `404 feature_disabled` when the `load` feature is off). The body needs a
+`name`, a non-empty `requests` list and a `profile` with `mode` (`constant`, `ramp` or
+`steps`), a positive `duration_s` and the rates for that mode. Every `path` must start with
+a single `/`: a scheme or host is `400 invalid_body`. A `base_url` or `workers` key in the
+body is ignored.
+
+**The target** is the `base_url` setting when set. Otherwise it is the URL the request was
+addressed to, accepted only when its host is a loopback name or one in `allowed_hosts`
+(and carries no credentials); for any other host the call answers `400 invalid_body` and
+asks you to set `base_url`. A `Host` header can no longer aim a run at another machine.
+This is why a UI served at `https://staging.example.com` needs `base_url`, and why
+`TestClient`-style hosts such as `http://testserver` are refused (FastAPI and Starlette's
+`TestClient` default `base_url` is `http://testserver`).
+
+**Limits** for runs started here: at most one hour, 5 000 rps and 200 steps. `status` goes
+`running`, then `done`, `stopped` or `failed`. See [Load testing](load-testing.md#starting-a-run-from-the-ui)
+and [Security](security.md#load-from-the-ui).
+
+### POST api/login, POST api/logout, GET api/config
+
+Part of [access control](access-control.md#login-and-api).
+
+| Request | Returns |
+|---|---|
+| `POST api/login` body `{"token": "..."}` or `{"username": "...", "password": "..."}` (4 KiB at most) | `200 {"ok": true, "expires_at": <epoch>}` and a session cookie (HttpOnly, SameSite=Strict, scoped to the mount, `Secure` on https). `400 invalid_json` / `invalid_body`, `401 invalid_credentials`, `429 too_many_requests`; `404 not_found` under a policy without login. It never redirects |
+| `POST api/logout` | `200 {"ok": true}` and an expiring cookie, under any policy |
+| `GET api/config` | `{preset, file, settings, sources, groups, warnings}`: the effective configuration, secrets as `"***"`, where each value came from (`default`, `adapter`, `preset`, `file`, `env`, `framework`), the settings grouped for display, and a list of warnings (configuration plus runtime notes of the access gate) |
+
+`GET api/meta` also reports `features` (`explain`, `profile`, `replay`, `snapshot`, `load`,
+`logs`, `locals`, `sse`, and `load_from_ui`, which is the setting and the `load` feature
+and not `read_only`) and `access: {policy, login, read_only, preset}`, where `login` is
+`"token"`, `"basic"` or `null`. The UI uses them to hide what is switched off.
+
 ## Things to know
 
-- **The API is not versioned.** It is `0.1.0a1`: the shape may change between alpha
+- **The API is not versioned.** It is `0.2.0a1`: the shape may change between alpha
   releases. The frontend and the core ship together, so they never disagree.
 - **Redacted values are redacted in the API too.** There is no way to ask for the
   original.
 - **Anything you can read here is on disk.** The API reads the same store. A leaked
   session on this API is a leak of recent request bodies. See [Security](security.md).
 - **Polling is cheap but not free.** The list endpoint runs a `COUNT(*)` for `total` on
-  every call. The UI polls every two seconds while the Requests page is open and not
-  paused.
+  every call. Prefer `api/stream` for a live view; the UI falls back to polling every two
+  seconds only when streaming is unavailable.
+- **A store may not support every route.** A custom store without the extended methods
+  answers `501 not_supported` for the history, SQL, cache, external and run routes. The core
+  routes keep working.

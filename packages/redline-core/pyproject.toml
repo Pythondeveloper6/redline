@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "redline-core"
-version = "0.1.0a1"
+version = "0.2.0a1"
 description = "Framework-agnostic request profiler engine: span tracing, SQL fingerprinting, N+1 detection, EXPLAIN analysis, storage and the Redline web UI."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -45,6 +45,18 @@ dependencies = []
 
 [project.optional-dependencies]
 profile = ["pyinstrument>=5.0,<6.0"]
+sqlalchemy = ["sqlalchemy>=2.0,<3.0"]
+httpx = ["httpx>=0.27"]
+requests = ["requests>=2.31"]
+redis = ["redis>=5.0"]
+asyncpg = ["asyncpg>=0.29"]
+psycopg = ["psycopg>=3.1"]
+strawberry = ["strawberry-graphql>=0.240"]
+graphene = ["graphene>=3.3"]
+load = ["httpx>=0.27"]
+
+[project.scripts]
+redline = "redline_core.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/Pythondeveloper6/redline"
@@ -54,7 +66,24 @@ Issues = "https://github.com/Pythondeveloper6/redline/issues"
 Changelog = "https://github.com/Pythondeveloper6/redline/blob/main/CHANGELOG.md"
 
 [dependency-groups]
-dev = ["pytest>=8.3", "pytest-asyncio>=0.24", "ruff>=0.8", "pyinstrument>=5.0"]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.8",
+    "pyinstrument>=5.0",
+    "sqlalchemy[asyncio]>=2.0,<3.0",
+    "aiosqlite>=0.20",
+    "greenlet>=3.0",
+    "httpx>=0.27",
+    "requests>=2.31",
+    "marshmallow>=3.20",
+    "redis>=5.0",
+    "fakeredis>=2.20",
+    "asyncpg>=0.29",
+    "psycopg>=3.1",
+    "strawberry-graphql>=0.240",
+    "graphene>=3.3",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/redline_core"]
@@ -69,6 +98,9 @@ testpaths = ["tests"]
 addopts = "--strict-markers -q"
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+markers = [
+    "slow: spawns load-test worker processes (a few seconds each)",
+]
 
 [tool.ruff]
 extend = "../../pyproject.toml"

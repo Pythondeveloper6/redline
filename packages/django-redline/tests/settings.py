@@ -18,6 +18,8 @@ INSTALLED_APPS = [
     "django.contrib.contenttypes",
     "django.contrib.sessions",
     "django.contrib.messages",
+    "rest_framework",
+    "rest_framework.authtoken",
     "django_redline",
     "tests.testapp",
 ]

@@ -1,0 +1,85 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "flask-redline"
+version = "0.2.0a1"
+description = "A modern request profiler for Flask and SQLAlchemy: span timelines, N+1 detection with fix diffs, one-click EXPLAIN, flamegraphs and a fast web UI."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Mahmoud Ahmed", email = "pythondeveloper6@gmail.com" }]
+maintainers = [{ name = "Mahmoud Ahmed", email = "pythondeveloper6@gmail.com" }]
+keywords = [
+    "flask",
+    "wsgi",
+    "sqlalchemy",
+    "flask-sqlalchemy",
+    "profiler",
+    "performance",
+    "n+1",
+    "explain",
+    "flamegraph",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Web Environment",
+    "Framework :: Flask",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Debuggers",
+    "Topic :: System :: Monitoring",
+    "Typing :: Typed",
+]
+# Lockstep: the adapter pins the exact core release it was tested with.
+dependencies = [
+    "redline-core==0.2.0a1",
+    "flask>=3.0,<4",
+    "sqlalchemy>=2.0,<3",
+]
+
+[project.optional-dependencies]
+profile = ["redline-core[profile]==0.2.0a1"]
+
+[project.urls]
+Homepage = "https://github.com/Pythondeveloper6/redline"
+Documentation = "https://pythondeveloper6.github.io/redline/flask/"
+Source = "https://github.com/Pythondeveloper6/redline"
+Issues = "https://github.com/Pythondeveloper6/redline/issues"
+Changelog = "https://github.com/Pythondeveloper6/redline/blob/main/CHANGELOG.md"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "flask-sqlalchemy>=3.1",
+    "asgiref>=3.8",
+    "pyinstrument>=5.0",
+    "ruff>=0.8",
+]
+
+[tool.uv.sources]
+redline-core = { workspace = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/flask_redline"]
+exclude = ["**/__pycache__", "**/*.py[cod]", "**/.DS_Store"]
+
+[tool.hatch.build.targets.sdist]
+include = ["/src/flask_redline", "/tests", "/README.md", "/LICENSE"]
+exclude = ["**/__pycache__", "**/*.py[cod]", "**/.DS_Store"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--strict-markers -q"
+
+[tool.ruff]
+extend = "../../pyproject.toml"

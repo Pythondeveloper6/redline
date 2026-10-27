@@ -22,7 +22,7 @@ Each choice fixes something that makes in-database profilers painful.
 | | Default |
 |---|---|
 | Django | `<BASE_DIR>/.redline/redline.db` |
-| FastAPI | `.redline/redline.db`, relative to the **working directory** at start |
+| FastAPI, Flask, Litestar | `.redline/redline.db`, relative to the **working directory** at start |
 | Any | the `storage_path` setting. `":memory:"` works (nothing persists) |
 
 Parent directories are created. Add `.redline/` to `.gitignore`. The `-wal` and `-shm`
@@ -40,9 +40,51 @@ Created on first open with `CREATE TABLE IF NOT EXISTS`.
 | `trace_tags` | `(trace_id, key, value)` | makes `tag=key:value` filters fast |
 | `issues` | one row per issue per trace, with the issue as JSON | Indexed by issue id and time; this is what the Issues page aggregates |
 
-There is **no schema version and no migration mechanism** in this alpha. If a later
-alpha changes the schema and the file will not open, delete `.redline/` (it is only
-history).
+### Schema version 3 (0.2)
+
+Version 0.2 adds a `meta(key, value)` table holding `schema_version` (now `3`) and a set of
+**derived tables** that are written in the same transaction as the trace, from the same
+batch:
+
+| Table | Holds | Lives |
+|---|---|---|
+| `trace_sql` | one row per (trace, SQL fingerprint): the normalised statement, execution count, total and max time, rows, vendor, db alias | with its trace |
+| `trace_ext` | one row per (trace, outbound URL pattern): count, total and max time, errors | with its trace |
+| `trace_cache` | one row per (trace, cache key pattern): gets, hits, misses, sets, deletes | with its trace |
+| `rollups` | hourly per release, route and method: count, errors, summed duration, a latency **histogram**, summed queries and query time, issue count | `history_retention_days` |
+| `issue_rollups` | hourly per release and issue: occurrences (for period comparison) | `history_retention_days` |
+| `releases` | release name, first and last seen, request count | `history_retention_days` |
+| `issue_index` | every issue ever seen: kind, severity, title, route, first and last seen, first and last release, occurrences | `history_retention_days` |
+| `runs`, `run_steps` | [load-test](load-testing.md) runs and their per-step results and histograms | `history_retention_days` |
+
+Version 3 also adds `saved_seq` to `traces`: an insertion-order sequence number (indexed,
+`meta` keeps the high-water mark). The live stream uses it to resume exactly after the last
+event a client saw (`after=` or `Last-Event-ID`), because traces are saved when they
+*finish*, not when they start.
+
+In the rollups and the issue index a request that matched no route (a 404, a scanner
+probing random paths) is filed under the single route key `(unmatched)`, so the long-lived
+history does not grow a row per random path.
+
+The first three power the [Database](database.md), [Cache](cache-efficiency.md) and
+[External calls](external-calls.md) pages and are pruned **with their trace**. The rest
+power [History](history.md) and the Load page and outlive the traces.
+
+A re-saved trace id replaces its trace-scoped rows and is **not** counted again in rollups,
+releases or the issue index. History reflects **kept** traces, so [sampling](production.md#sampling)
+applies to it.
+
+### Migration
+
+Migrations are additive and run when the store connects. A 0.1 file (no `schema_version`
+row) or a version 2 file is migrated **in place**, inside one `BEGIN IMMEDIATE` transaction that re-checks the
+version once it holds the lock, so several workers starting at once migrate it exactly once.
+The new tables are created and **backfilled from the traces already stored**. Traces
+written by 0.1 still load: every new field has a default.
+
+There is no downgrade. If you may need to roll back to 0.1, copy `.redline/redline.db`
+first. The data is a cache of recent requests, so deleting the file is always an
+acceptable fix for a store that will not open.
 
 ## The writer thread
 
@@ -51,7 +93,9 @@ history).
 each process:
 
 1. takes one item, then drains up to **50** more that are already waiting (a batch);
-2. writes the batch in **one transaction**;
+2. writes the batch in **one transaction**, opened with `BEGIN IMMEDIATE` (as are pruning
+   and migrations), so concurrent worker processes take the write lock up front and wait
+   instead of failing with a busy error halfway through;
 3. every 200 saved traces, runs [retention](#retention);
 4. survives errors: a failed batch is logged on the `redline` logger and the thread
    carries on.
@@ -105,6 +149,22 @@ and `manage.py redline_clear` remove everything.
 
 Because retention is checked per 200 writes, the store can briefly exceed `max_rows` by up
 to roughly that many.
+
+### History tables
+
+The [history](history.md) tables have their own, longer clock.
+
+| Setting | Default | Covers |
+|---|---|---|
+| `history_retention_days` | `90` | `rollups`, `issue_rollups`, `releases`, `issue_index`, and load `runs` with their steps. `0` or `None` keeps them forever |
+
+When pruning runs it also calls `prune_history()`: rollup hours that ended before the
+cutoff are deleted, as are releases and issue-index entries **last seen** before it, and
+finished runs created before it. A run that is still `running` is never deleted. The trace
+summary tables (`trace_sql`, `trace_ext`, `trace_cache`) follow their traces.
+
+**Clear all** and `redline_clear` delete traces and **keep history**, so a clean-up does not
+erase your release comparisons. `store.clear(history=True)` wipes history as well.
 
 !!! note "Retention shapes the Issues and Endpoints pages"
 
@@ -176,5 +236,12 @@ the `.db` file while it is being written can miss data that is still in the `-wa
 ## A different store
 
 The `Store` protocol is public. A Postgres store is planned for
-[v1.0](roadmap.md). To plug in your own now, pass `install(store=...)` (FastAPI) or set
-`REDLINE["STORE"]` (Django); see [Extending](extending.md#the-store-protocol).
+[v1.0](roadmap.md). To plug in your own now, pass `install(store=...)` (FastAPI),
+`Redline(store=...)` (Flask), `RedlinePlugin(store=...)` (Litestar) or set `REDLINE["STORE"]`
+(Django); see [Extending](extending.md#the-store-protocol).
+
+The 0.1 `Store` surface is unchanged, so a 0.1 custom store keeps working. The 0.2
+features (history, the Database, Cache and External pages, load runs, live tail) live on an
+**extended** protocol, `redline_core.storage.ExtendedStore`. A store that lacks a method, or
+raises `NotImplementedError`, makes the matching API route answer `501 not_supported` and
+the UI page say it is unavailable, while everything else works.

@@ -15,7 +15,41 @@ authentication, and leave the expensive features off.**
     afford a surprise, start in staging, watch the numbers on
     [Performance and overhead](performance.md), and enable it for a fraction of traffic.
 
+## The production preset
+
+The quickest safe start is one line. `preset = "production"` sets defaults for a
+production instance; anything you set explicitly still wins.
+
+```bash
+REDLINE_PRESET=production
+REDLINE_TOKEN=...                 # from your secret store
+```
+
+| What the preset does | Value |
+|---|---|
+| Sampling | `sample_rate = 0.05`, `always_keep_errors = True`, plus every slow request (`always_keep_slower_than_ms`, default 500) |
+| Request and response bodies | not captured |
+| Exception locals | not captured |
+| Logs | `log_level = "WARNING"` |
+| Access | `access = "token"`, **required** (24+ characters): without a token Redline raises a `SettingsError` at startup |
+| Read-only | on: every non-GET `api/` call is refused with `403 read_only`, and so is EXPLAIN ANALYZE |
+| Floating badge, `Server-Timing` | both off |
+| Load tests from the UI, `explain_analyze` | off |
+| Profiling | `profile = "off"`: `X-Redline-Profile` / `?_redline=profile` do nothing |
+
+Django keeps its superuser (`PERMISSION`) check under the preset (a preset does not change `access` there).
+Also set `secret_key` (`REDLINE_SECRET_KEY`) when you run several workers, and
+`trusted_proxies` when a proxy is in front.
+
+It does **not** choose your retention, your storage path or your ignore list, so still set
+those (below). Run `redline doctor` after deploying, and `redline config` to see exactly
+what is in effect. A staging environment gets `preset = "staging"`: 25% sampling, a token,
+no locals. See [Configuration](configuration.md#presets) and
+[Access control](access-control.md#recipes).
+
 ## The recipe
+
+If you prefer to spell it out, or need to deviate:
 
 === "Django"
 
@@ -34,6 +68,30 @@ authentication, and leave the expensive features off.**
         "STORAGE_PATH": "/var/lib/myapp/redline.db",
         "PERMISSION": "myproject.redline.is_superuser",
     }
+    ```
+
+=== "Flask"
+
+    ```python
+    app.config["REDLINE"] = {
+        "preset": "production",
+        "max_rows": 5_000,
+        "max_age_days": 2,
+        "storage_path": "/var/lib/myapp/redline.db",
+        "release": os.environ.get("GIT_SHA"),
+    }
+    Redline(app, engine=engine, permission=require_superuser)
+    ```
+
+=== "Litestar"
+
+    ```python
+    RedlinePlugin(engine=engine, guards=[require_superuser], settings={
+        "preset": "production",
+        "max_rows": 5_000,
+        "max_age_days": 2,
+        "storage_path": "/var/lib/myapp/redline.db",
+    })
     ```
 
 === "FastAPI"
@@ -107,6 +165,10 @@ Two limits, both applied by the writer thread every 200 saved traces and by
 | `max_age_days` | delete older than this | `0` or `None` disables the age rule |
 | `max_rows` | keep only the newest N | `0` or `None` disables the row cap |
 
+History is separate: hourly rollups, the issue index and load runs are kept for
+`history_retention_days` (default 90) and take little space, because they hold aggregates, not
+requests. See [History](history.md#retention).
+
 Size depends on what you store. Measured (`benchmarks/storage.py`): about **1.6 KiB** for
 a trace with no queries, **31 KiB** with 20 queries and **260 KiB** with 200, roughly
 1.3 KiB per SQL span. See [Storage: size](storage.md#size). The ceiling you set with
@@ -119,14 +181,26 @@ a trace with no queries, **31 KiB** with 20 queries and **260 KiB** with 200, ro
 |---|---|
 | `profile: "all"` | Every request pays the profiler's overhead |
 | `explain_analyze: True` | It **executes** the query on your production database, on demand, as whoever can reach the UI |
+| `capture_locals` | Variable values can contain personal data; the production preset turns it off |
+| `capture_logs` at `DEBUG` | Chatty and may contain data; use `WARNING` |
+| `badge` | Injects a script tag into your pages; leave it to development |
+| `server_timing` | Exposes timings to every client; turn off if you do not want that |
+| `load_from_ui: True` | Lets a UI user generate real load on your instance |
+| `access = "open"` | Refused without `REDLINE_ALLOW_OPEN=1`, and never right here |
 | `capture_response_body: True` | Response bodies are the biggest and most sensitive thing stored. Keep them off unless you are debugging a specific problem |
 | `sample_rate: 1.0` | The cost scales with traffic and the store churns |
 | Opening the UI to the internet | See [Security](security.md#who-can-open-the-ui) |
 
 ## What NOT to do
 
-- **Do not leave the FastAPI default access in front of a proxy.** The loopback check
-  sees the proxy as localhost. Pass real `dependencies`.
+- **Do not use `local` access in front of a proxy.** The loopback check sees a proxy on
+  the same host as localhost. Use `access = "token"`, and set `trusted_proxies` if you need
+  real client addresses (and so that each client gets its own login rate-limit bucket and
+  `X-Forwarded-Proto` marks the cookie `Secure`). Since 0.2 an unset `access` answers `404`
+  outside debug mode, so this only happens if you set `local` yourself. See
+  [Access control](access-control.md#behind-a-reverse-proxy).
+- **Do not run load tests against production.** `redline load` is for environments you own and
+  can afford to saturate.
 - **Do not skip authentication** on the grounds that it is "just a profiler". It shows
   SQL, request bodies and runs EXPLAIN.
 - **Do not point `storage_path` at your application database file.** Always use a
@@ -148,8 +222,9 @@ in each process, not at import, so it is safe with gunicorn's pre-fork model and
 management commands (`migrate` never creates `.redline/`). Each worker process gets its
 own writer thread writing to the same file (see below).
 
-**FastAPI.** `install()` creates the store when it is called, typically at import time.
-The writer thread starts lazily, on the first trace saved in each process.
+**FastAPI, Flask and Litestar.** `install()`, `Redline(app)` and the plugin create the store
+when called, typically at import time (Litestar: when the app is built). The writer thread
+starts lazily, on the first trace saved in each process.
 
 **Fork-safe in both.** The store notices when it is used in a new process
 (`os.register_at_fork`, plus a PID check on every call) and opens its own SQLite
@@ -172,14 +247,18 @@ second or so.
 
 - **FastAPI:** the wrapped lifespan flushes and closes the store on shutdown (it waits for
   the queue, up to 5 seconds).
+- **Litestar:** the plugin's `on_shutdown` hook does the same.
+- **Flask:** an `atexit` hook flushes and closes the store.
 - **Django:** an `atexit` hook flushes and closes the runtime.
 
 `SIGKILL` skips both. That is acceptable for a profiler.
 
 ## Checklist
 
+- [ ] You used `preset = "production"` (or reproduced it) and ran `redline doctor`
 - [ ] `sample_rate` is below 1 and the always-keep rules are on
-- [ ] UI access is authenticated by something stronger than "it is on localhost"
+- [ ] UI access is authenticated by something stronger than "it is on localhost", and
+      `read_only` is on
 - [ ] `explain_analyze` is off
 - [ ] `profile` is `opt_in` or `off`
 - [ ] `max_rows` and `max_age_days` are set to what you can afford
@@ -187,6 +266,7 @@ second or so.
       `.gitignore`
 - [ ] You checked what your request bodies contain against `redact_keys`
 - [ ] `ignore_paths` includes health checks, metrics endpoints and anything chatty
+- [ ] `release` is set to something that changes every deploy, so [History](history.md) can compare
 - [ ] You looked at [Performance and overhead](performance.md) and measured your own app
 - [ ] (Django) `manage.py check --deploy` and `manage.py check` are clean, including the
       `django_redline.*` checks

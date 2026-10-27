@@ -6,14 +6,16 @@ import asyncio
 from collections.abc import Callable, Coroutine, Sequence
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.routing import APIRoute
 
-from redline_core import ui
+from redline_core import stream, ui
+from redline_core.api import RawResponse, own_base_url
+from redline_core.storage import FilterError
 
-from ._security import RedlineHTTPError, csrf_guard
+from ._security import RedlineHTTPError, request_info
 
 __all__ = ["RedlineRoute", "build_router", "error_response"]
 
@@ -35,11 +37,15 @@ _CODES = {
 
 
 def error_response(
-    status: int, code: str, message: str, headers: dict[str, str] | None = None
+    status: int,
+    code: str,
+    message: str,
+    headers: dict[str, str] | None = None,
+    extra: dict[str, Any] | None = None,
 ) -> JSONResponse:
     """A JSON error in the API's shape (``CONTRACT.md`` §5)."""
     return JSONResponse(
-        {"error": {"code": code, "message": message}},
+        {"error": {"code": code, "message": message, **(extra or {})}},
         status_code=status,
         headers={**_NO_STORE, **_SECURITY, **(headers or {})},
     )
@@ -57,13 +63,16 @@ class RedlineRoute(APIRoute):
             try:
                 return await handler(request)
             except HTTPException as exc:
+                extra: dict[str, Any] = {}
                 if isinstance(exc, RedlineHTTPError):
-                    code, message = exc.code, exc.message
+                    code, message, extra = exc.code, exc.message, exc.extra
                 else:
                     code = _CODES.get(exc.status_code, "http_error")
                     detail = exc.detail
                     message = detail if isinstance(detail, str) else str(detail or code)
-                return error_response(exc.status_code, code, message, dict(exc.headers or {}))
+                return error_response(
+                    exc.status_code, code, message, dict(exc.headers or {}), extra
+                )
 
         return route_handler
 
@@ -86,13 +95,39 @@ def build_router(redline: Any, dependencies: Sequence[Any]) -> APIRouter:
             file, media_type=ui.content_type(file), headers={**_IMMUTABLE, **_SECURITY}
         )
 
+    @router.get("/api/stream")
+    async def live(request: Request) -> Response:
+        """Server-sent events: one ``trace`` event per new trace (``CONTRACT.md`` §12)."""
+        try:
+            since = stream.parse_since(request.query_params)
+        except FilterError as exc:
+            return error_response(400, "invalid_filter", str(exc))
+        return StreamingResponse(
+            stream.async_events(
+                redline.api,
+                since,
+                request.is_disconnected,
+                after=stream.parse_after(request.query_params, request.headers),
+            ),
+            media_type=stream.CONTENT_TYPE,
+            headers=stream.SSE_HEADERS,
+        )
+
     @router.api_route(
         "/api/{path:path}",
         methods=["GET", "POST", "DELETE", "PUT", "PATCH"],  # the core answers 405 for the last two
-        dependencies=[Depends(csrf_guard)],
     )
-    async def api(request: Request, path: str) -> JSONResponse:
+    async def api(request: Request, path: str) -> Response:
         redline.loop = asyncio.get_running_loop()
+        if path.strip("/") in ("login", "logout"):  # the access gate's own endpoints
+            body = await request.body() if request.method == "POST" else None
+            decision = redline.access.handle(request_info(request, redline.prefix), body)
+            if decision is not None:
+                return JSONResponse(
+                    decision.body(),
+                    status_code=decision.status,
+                    headers={**_NO_STORE, **_SECURITY, **decision.headers},
+                )
         params: dict[str, Any] = {}
         for key, value in request.query_params.multi_items():
             if key in params:
@@ -101,14 +136,26 @@ def build_router(redline: Any, dependencies: Sequence[Any]) -> APIRouter:
             else:
                 params[key] = value
         body = await request.body() if request.method == "POST" else None
-        status, payload = await run_in_threadpool(
-            redline.api.dispatch, request.method, f"api/{path}", params, body
+        # the server's own listening port, never the Host header (CONTRACT.md §18)
+        scope = request.scope
+        base_url = own_base_url(
+            scope.get("scheme"), scope.get("server"), scope.get("root_path", "")
         )
+        status, payload = await run_in_threadpool(
+            redline.api.dispatch, request.method, f"api/{path}", params, body, base_url=base_url
+        )
+        if isinstance(payload, RawResponse):  # the snapshot page
+            return Response(
+                payload.body,
+                status_code=payload.status,
+                media_type=payload.content_type,
+                headers={**payload.headers, **_NO_STORE, **_SECURITY},
+            )
         return JSONResponse(payload, status_code=status, headers={**_NO_STORE, **_SECURITY})
 
     @router.get("/{name}")
     async def top_level(name: str) -> Response:
-        file = ui.asset_path(name)  # favicon.svg etc.
+        file = ui.asset_path(name)  # badge.js, favicon.svg etc.
         if file is None:
             return error_response(404, "not_found", "Not found.")
         return FileResponse(

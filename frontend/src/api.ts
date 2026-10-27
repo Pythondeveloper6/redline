@@ -1,13 +1,34 @@
-import type { EndpointStats, ExplainResult, IssueGroup, Meta, Page, Speedscope, Trace, TraceFilters } from './types'
+import type { CacheStat, ConfigResponse, LoginBody, CompareResult, EndpointStats, ExplainResult, ExternalStat, IndexAdvice, IssueGroup, Meta, Page, Speedscope, SqlStat, Trace, TraceFilters } from './types'
+import { getSnapshot } from './lib/snapshot'
 
 export class ApiError extends Error {
   status: number
   code: string
-  constructor(status: number, code: string, message: string) {
+  /** Seconds to wait before retrying (429 `Retry-After`). */
+  retryAfter?: number
+  constructor(status: number, code: string, message: string, retryAfter?: number) {
     super(message)
     this.status = status
     this.code = code
+    this.retryAfter = retryAfter
   }
+}
+
+// ---- Login gate -------------------------------------------------------------
+// Any API call answering 401 `login_required` flips this store; App.tsx subscribes
+// (useSyncExternalStore) and renders the full-page Login screen instead of the Shell.
+export type LoginKind = 'token' | 'basic'
+let loginKind: LoginKind | null = null
+const loginListeners = new Set<() => void>()
+export function getLoginRequired(): LoginKind | null { return loginKind }
+export function subscribeLoginRequired(cb: () => void) {
+  loginListeners.add(cb)
+  return () => { loginListeners.delete(cb) }
+}
+function setLoginRequired(kind: LoginKind) {
+  if (loginKind === kind) return
+  loginKind = kind
+  loginListeners.forEach(cb => cb())
 }
 
 type Mock = (method: string, url: string, body: unknown) => Promise<{ status: number; json: unknown }>
@@ -49,7 +70,24 @@ function csrfHeaders(method: string): Record<string, string> {
   return {}
 }
 
-async function raw(method: string, url: string, body?: unknown): Promise<{ status: number; json: any }> {
+/** Offline snapshot: answer from `window.__REDLINE_SNAPSHOT__`, never touch the network. */
+function fromSnapshot(method: string, url: string): { status: number; json: any } {
+  const snap = getSnapshot()!
+  const path = new URL(url, 'http://x/').pathname.replace(/^\/?(\.\/)?/, '').replace(/^\//, '')
+  const err = (status: number, code: string, message: string) => ({ status, json: { error: { code, message } } })
+  if (method !== 'GET') return err(403, 'snapshot', 'This is an offline snapshot; nothing can be changed.')
+  if (path === 'api/meta') {
+    return { status: 200, json: { version: 'snapshot', framework: snap.trace.framework, settings: {}, storage: { rows: 1, path: '' }, features: { load_from_ui: false, sse: false, snapshot: false } } }
+  }
+  if (path === `api/traces/${snap.trace.id}`) return { status: 200, json: snap.trace }
+  if (path === `api/traces/${snap.trace.id}/profile`) {
+    return snap.profile ? { status: 200, json: snap.profile } : err(404, 'profile_not_found', 'This snapshot has no profile.')
+  }
+  return err(404, 'snapshot', 'Not available in an offline snapshot.')
+}
+
+async function raw(method: string, url: string, body?: unknown): Promise<{ status: number; json: any; retryAfter?: number }> {
+  if (getSnapshot()) return fromSnapshot(method, url)
   if (import.meta.env.DEV) {
     if (!mockReady) mockReady = wantsMock() ? initMock(true) : Promise.resolve()
     await mockReady
@@ -59,7 +97,7 @@ async function raw(method: string, url: string, body?: unknown): Promise<{ statu
   try {
     res = await fetch(url, {
       method,
-      headers: { ...(body ? { 'Content-Type': 'application/json' } : {}), ...csrfHeaders(method) },
+      headers: { 'X-Redline-UI': '1', ...(body ? { 'Content-Type': 'application/json' } : {}), ...csrfHeaders(method) },
       credentials: 'same-origin',
       body: body ? JSON.stringify(body) : undefined,
     })
@@ -72,24 +110,26 @@ async function raw(method: string, url: string, body?: unknown): Promise<{ statu
     if (import.meta.env.DEV) { await initMock(false); return mock!(method, url, body) }
     throw new ApiError(res.status, 'bad_response', 'Unexpected response from the Redline API.')
   }
-  return { status: res.status, json: await res.json() }
+  const ra = Number(res.headers.get('retry-after'))
+  return { status: res.status, json: await res.json(), retryAfter: Number.isFinite(ra) && ra > 0 ? ra : undefined }
 }
 
-async function call<T>(method: string, url: string, body?: unknown): Promise<T> {
-  const { status, json } = await raw(method, url, body)
+export async function call<T>(method: string, url: string, body?: unknown): Promise<T> {
+  const { status, json, retryAfter } = await raw(method, url, body)
   if (status >= 400) {
     const e = json?.error
+    if (status === 401 && e?.code === 'login_required') setLoginRequired(e.login === 'basic' ? 'basic' : 'token')
     // Redline answers {"error": {code, message}}; anything else (a proxy, a foreign
     // framework error) may use {"detail": "..."}.
     const detail = typeof json?.detail === 'string' ? json.detail : undefined
-    throw new ApiError(status, e?.code ?? (status === 401 ? 'unauthorized' : status === 403 ? 'forbidden' : 'error'), e?.message ?? detail ?? `Request failed (${status})`)
+    throw new ApiError(status, e?.code ?? (status === 401 ? 'unauthorized' : status === 403 ? 'forbidden' : 'error'), e?.message ?? detail ?? `Request failed (${status})`, retryAfter)
   }
   return json as T
 }
 
 const enc = encodeURIComponent
 
-const qs = (o: Record<string, string | number | undefined | null>) => {
+export const qs = (o: Record<string, string | number | undefined | null>) => {
   const p = new URLSearchParams()
   for (const [k, v] of Object.entries(o)) if (v !== undefined && v !== null && v !== '') p.set(k, String(v))
   const s = p.toString()
@@ -104,8 +144,17 @@ export const api = {
   profile: (id: string) => call<Speedscope>('GET', `./api/traces/${enc(id)}/profile`),
   endpoints: (window: string) => call<{ items: EndpointStats[] }>('GET', './api/endpoints' + qs({ window })),
   issues: (window: string, kind?: string) => call<{ items: IssueGroup[] }>('GET', './api/issues' + qs({ window, kind })),
+  compare: (a: string, b: string) => call<CompareResult>('GET', './api/compare' + qs({ a, b })),
   explain: (trace_id: string, span_id: string, analyze = false) =>
     call<ExplainResult>('POST', './api/explain', { trace_id, span_id, analyze }),
+  config: () => call<ConfigResponse>('GET', './api/config'),
+  login: (body: LoginBody) => call<{ ok: boolean; expires_at: number }>('POST', './api/login', body),
+  logout: () => call<{ ok: boolean }>('POST', './api/logout', {}),
   clear: () => call<{ deleted: number }>('DELETE', './api/traces'),
+  sql: (p: { q?: string; window: string; limit?: number }) => call<{ items: SqlStat[] }>('GET', './api/sql' + qs(p)),
+  indexes: (window: string) => call<IndexAdvice>('GET', './api/indexes' + qs({ window })),
+  cache: (window: string) => call<{ items: CacheStat[] }>('GET', './api/cache' + qs({ window })),
+  external: (window: string) => call<{ items: ExternalStat[] }>('GET', './api/external' + qs({ window })),
+  snapshotUrl: (id: string) => `./api/traces/${enc(id)}/snapshot`,
   profileUrl: (id: string) => `./api/traces/${enc(id)}/profile`,
 }

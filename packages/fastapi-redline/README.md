@@ -1,6 +1,15 @@
+<p align="center">
+  <a href="https://pythondeveloper6.github.io/redline/">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/assets/logo-dark.svg">
+      <img alt="Redline" src="https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/assets/logo-light.svg" height="56">
+    </picture>
+  </a>
+</p>
+
 # fastapi-redline
 
-The FastAPI + SQLAlchemy adapter for [Redline](../../README.md): a request profiler and
+The FastAPI + SQLAlchemy adapter for [Redline](https://github.com/Pythondeveloper6/redline#readme): a request profiler and
 backend analyzer. Every request becomes a trace with a span timeline, the SQL it ran, N+1
 and duplicate-query detection with **concrete fix diffs**, one-click `EXPLAIN`, optional
 flamegraphs, and a fast web UI served from your own app.
@@ -13,7 +22,8 @@ from fastapi_redline import install
 app = FastAPI()
 engine = create_async_engine("sqlite+aiosqlite:///app.db")
 
-install(app, engine=engine)      # UI at http://localhost:8000/_redline/
+# access="local": localhost only (unset, Redline answers 404 outside debug mode)
+install(app, engine=engine, settings={"access": "local"})  # UI at http://localhost:8000/_redline/
 ```
 
 Traces are stored in their own SQLite file (`.redline/redline.db`), never in your database.
@@ -21,9 +31,16 @@ Traces are stored in their own SQLite file (`.redline/redline.db`), never in you
 ## Install
 
 ```bash
-pip install fastapi-redline                 # core + FastAPI/SQLAlchemy adapter
-pip install "fastapi-redline[profile]"      # + pyinstrument for flamegraphs
+pip install \
+  "fastapi-redline @ git+https://github.com/Pythondeveloper6/redline#subdirectory=packages/fastapi-redline" \
+  "redline-core @ git+https://github.com/Pythondeveloper6/redline#subdirectory=packages/redline-core"
 ```
+
+Not on PyPI yet: install from GitHub, naming `redline-core` in the same command (the adapter
+pins it exactly). Docs: <https://pythondeveloper6.github.io/redline/>.
+
+Add the extra to the core requirement for flamegraphs:
+`"redline-core[profile] @ git+https://github.com/Pythondeveloper6/redline#subdirectory=packages/redline-core"`.
 
 Python 3.10+, FastAPI 0.110+, SQLAlchemy 2.x.
 
@@ -34,7 +51,7 @@ install(
     app,
     engine=None,          # Engine | AsyncEngine | [engines] | {"alias": engine}
     settings=None,        # dict | redline_core.Settings
-    prefix="/_redline",
+    prefix=None,          # default: the mount_path setting, else "/_redline"
     dependencies=None,    # auth dependencies for the UI + API (see below)
     models=None,          # Base / registry for fix suggestions (default: auto-discover)
     store=None,           # custom Store (default: SQLite file at storage_path)
@@ -144,14 +161,16 @@ the one-line code hint with lower confidence instead. Both the lazy-load form
 
 The UI exposes your SQL, request bodies and EXPLAIN, so treat it like an admin tool.
 
-**Default.** With no `dependencies`, only loopback clients (127.0.0.0/8, `::1`, unix sockets)
+**Default.** With no `dependencies`, the `access` setting decides (default `local`, served only in debug mode until you set `access`): only loopback clients (127.0.0.0/8, `::1`; unix sockets only with `trust_unix_socket`)
 that address the server by a loopback name (`Host: localhost`, `127.0.0.1`, `[::1]`, any port;
 this blocks DNS rebinding)
 are served and a warning is logged at startup. Refusals, and `HTTPException`s from your own
 dependencies, are JSON `{"error": {"code": "forbidden" | "unauthorized" | ..., "message"}}`.
-Use `Depends(loopback_guard(allowed_hosts=["devbox"]))` to allow another host name. Behind a
-reverse proxy every client may look like localhost: pass real dependencies instead, or run
-uvicorn with `--proxy-headers` and `--forwarded-allow-ips` so the client address is the real one.
+Add other host names with the `allowed_hosts` setting. Passing `dependencies=` implies
+`access="framework"`. A loopback peer sending `X-Forwarded-For` without being in
+`trusted_proxies` is refused; behind a reverse proxy use `access="token"` and
+`trusted_proxies`. Tokens, basic auth, `allowed_ips` and `read_only` are described in the
+[access control docs](https://pythondeveloper6.github.io/redline/access-control/).
 
 **Your existing auth dependency:**
 
@@ -180,7 +199,7 @@ def redline_auth(creds: HTTPBasicCredentials = Depends(basic)) -> None:
 install(app, engine=engine, dependencies=[Depends(redline_auth)])
 ```
 
-(`dependencies=[]` leaves it open on purpose. Don't, outside a private network.)
+(`dependencies=[]` is the same as passing none. A dependency that returns `False` is refused with 403; raising `HTTPException` is the normal way.)
 
 **CSRF.** The mutating endpoints (`DELETE` traces, `POST explain`) reject browser requests
 whose `Origin` does not match the request host, `Origin: null`, and
@@ -203,7 +222,7 @@ uv sync --all-packages
 cd packages/fastapi-redline && uv run pytest
 ```
 
-A runnable demo with deliberately bad endpoints lives in [`examples/fastapi`](../../examples/fastapi).
+A runnable demo with deliberately bad endpoints lives in [`examples/fastapi`](https://github.com/Pythondeveloper6/redline/blob/main/examples/fastapi).
 
 ## License
 

@@ -51,7 +51,8 @@ def test_failed_statement_does_not_leak_state(tmp_path):
             except Exception:
                 pass
             conn.execute(text("select 1")).all()
-    assert [s.data["sql"] for s in rec.last_trace.spans] == ["select 1"]
+    sql = [s.data["sql"] for s in rec.last_trace.spans if s.kind == "sql"]
+    assert sql == ["select 1"]
 
 
 def test_instrument_is_idempotent(tmp_path):
@@ -62,7 +63,7 @@ def test_instrument_is_idempotent(tmp_path):
     with rec.recording(method="GET", path="/x"):
         with engine.connect() as conn:
             conn.execute(text("select 1")).all()
-    assert len(rec.last_trace.spans) == 1
+    assert len([s for s in rec.last_trace.spans if s.kind == "sql"]) == 1
 
 
 def test_engine_aliases(tmp_path):

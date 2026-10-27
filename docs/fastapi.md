@@ -14,12 +14,17 @@ from fastapi_redline import install
 app = FastAPI()
 engine = create_async_engine("sqlite+aiosqlite:///app.db")
 
-install(app, engine=engine)      # UI at http://localhost:8000/_redline/
+# access="local": localhost only (unset, Redline answers 404 outside debug mode)
+install(app, engine=engine, settings={"access": "local"})  # UI at http://localhost:8000/_redline/
 ```
 
 Requirements: Python 3.10+, FastAPI 0.110+ (below 1.0), SQLAlchemy 2.x, and
 `redline-core` at the exact version the adapter pins. Install as shown in
 [Getting started](getting-started.md#install).
+
+Since 0.2 the SQLAlchemy and httpx hooks live in `redline_core.contrib` and are shared with
+the Flask and Litestar adapters; `fastapi_redline` re-exports them (`instrument_engine`,
+`instrument_httpx`), so existing imports keep working.
 
 ## `install()`
 
@@ -28,7 +33,7 @@ install(
     app,
     engine=None,          # Engine | AsyncEngine | [engines] | {"alias": engine}
     settings=None,        # dict | redline_core.Settings
-    prefix="/_redline",
+    prefix=None,          # default: the mount_path setting, else "/_redline"
     dependencies=None,    # auth dependencies for the UI and API
     models=None,          # Base / registry for fix suggestions (default: auto-discover)
     store=None,           # a custom Store (default: SQLite file at storage_path)
@@ -40,8 +45,8 @@ install(
 | `app` | `FastAPI` | required | The application to instrument. Call after it is built, before it starts |
 | `engine` | `Engine`, `AsyncEngine`, list, or `{alias: engine}` | `None` | Engines to record SQL from and run EXPLAIN on. See [Engines](#engines) |
 | `settings` | `dict` or `redline_core.Settings` | `None` (defaults) | Any [setting](settings.md); keys are case-insensitive; unknown keys raise `SettingsError` |
-| `prefix` | `str` | `"/_redline"` | Where the UI and API are mounted. Must be a sub-path; `"/"` raises `ValueError` |
-| `dependencies` | sequence of callables or `Depends(...)` | `None` | Protects the UI and API. `None` means **loopback only** plus a warning. See [Access control](#access-control) |
+| `prefix` | `str` or `None` | `None` | Where the UI and API are mounted. `None` means the `mount_path` setting, then `"/_redline"`. Must be a sub-path; `"/"` raises `ValueError` |
+| `dependencies` | sequence of callables or `Depends(...)` | `None` | Protects the UI and API; a non-empty list implies `access = "framework"`. `None` or `[]` means the `access` policy decides (default `local`: **loopback only**, and only with `app.debug` until `access` is set). See [Access control](#access-control) |
 | `models` | declarative `Base`, `registry`, mapped class, or an iterable of those | `None` | Where the fix suggester looks for relationships. Default: every registry SQLAlchemy knows |
 | `store` | a `Store` | `None` | Replace the SQLite store. See [Extending](extending.md#the-store-protocol) |
 
@@ -162,7 +167,8 @@ buffers streaming responses.
 | Response body | A size-capped copy. A stream is never buffered beyond `max_body_bytes` |
 | Unhandled exceptions | Recorded with the traceback, then **re-raised untouched** |
 | Client cancellation | Recorded with status 499 when the client disconnects mid-request |
-| `X-Redline-Run` | becomes the `run_id` and `step` tags |
+| `X-Redline-Run` | becomes the `run_id` and `step` tags (only for a run that is running in the store) |
+| `?_redline=profile` / `X-Redline-Profile: 1` | runs the profiler, only with `app.debug` or valid Redline credentials (see [Forcing capture](security.md#forcing-capture)) |
 
 What it does **not** do:
 
@@ -198,8 +204,22 @@ installed, is idempotent, and `uninstrument_httpx()` undoes it. Outside a traced
 the wrapper costs one `ContextVar.get()`.
 
 Each span is named `GET host/path` and carries `method`, `url` and `status`. **URLs are
-redacted**: `?api_key=...` is masked. Other HTTP clients (`requests`, `aiohttp`) are not
+redacted**: `?api_key=...` is masked. `requests` is covered by [`instrument_requests()`](integrations.md#requests). `aiohttp` is not
 instrumented.
+
+## New in 0.2 for FastAPI
+
+| Feature | Where to read |
+|---|---|
+| An event-loop lag monitor that names the blocking call in an `async def` endpoint | [Blocking in async](async-blocking.md) |
+| `transaction` and `pool_wait` spans from SQLAlchemy | [Transactions and locks](transactions.md) |
+| Response serialization (`serialize_response`, Pydantic) timed as a `serializer` span | [Slow serializers](serializers.md) |
+| Row counts, large and unbounded results | [Large and unbounded results](result-size.md) |
+| `requests`, Redis, asyncpg, psycopg, Marshmallow | [Integrations](integrations.md) |
+| Strawberry GraphQL | [GraphQL](graphql.md) |
+| `redline load init --from-openapi` against FastAPI's `/openapi.json` | [Load testing](load-testing.md#generating-scenarios) |
+| `Server-Timing`, the badge, live mode, snapshots | [Server-Timing and the badge](server-timing-badge.md) |
+| Presets, `redline.toml`, `REDLINE_*`, token and basic access, read-only | [Configuration](configuration.md), [Access control](access-control.md) |
 
 ## Access control
 
@@ -207,13 +227,22 @@ instrumented.
 
     Treat it as an admin tool. Decide who can reach it before you deploy.
 
-### The default: loopback only
+### The default: loopback only, in debug mode
 
-With no `dependencies`, a built-in `local_only` dependency allows a request only when
-**both** of these hold:
+With no `dependencies`, the `access` setting decides. **While you have not set it**
+(in code, `redline.toml` or `REDLINE_ACCESS`), Redline serves its `local` default only when
+`app.debug` is on (`FastAPI(debug=True)`); otherwise every Redline URL answers `404` and an
+error is logged at startup. Most apps run under plain `uvicorn` without `debug`, so set it:
 
-- the **client** is loopback: `127.0.0.0/8`, `::1`, IPv4-mapped IPv6 loopback, unix
-  sockets, or Starlette's `TestClient`;
+```python
+install(app, engine=engine, settings={"access": "local"})      # your laptop
+install(app, engine=engine, settings={"access": "token", "token": "..."})  # a server
+```
+
+`local` allows a request only when **both** of these hold:
+
+- the **client** is loopback: `127.0.0.0/8`, `::1`, IPv4-mapped IPv6 loopback, or
+  Starlette's `TestClient` (a unix-socket peer only with `trust_unix_socket = true`);
 - the **`Host` header** names loopback: `localhost`, any `*.localhost`, a `127.x.x.x`
   address or `[::1]`, with any port. This is what stops **DNS rebinding**: a malicious
   page that points its own domain at `127.0.0.1` reaches your server, but its requests
@@ -223,26 +252,27 @@ Anyone else gets `403` with `{"error": {"code": "forbidden", "message": ...}}`, 
 startup warning is logged:
 
 ```text
-Redline is mounted at /_redline with no auth dependency: only loopback clients are allowed.
-Pass install(app, dependencies=[...]) before exposing it.
+Redline is mounted at /_redline with access='local': only loopback clients addressing
+localhost are allowed. Set access='token' or 'basic', or pass install(app, dependencies=[...]),
+before exposing it.
 ```
 
 !!! warning "Behind a reverse proxy, 'loopback' may be everyone"
 
     If nginx or a load balancer forwards to your app over `127.0.0.1`, every request
-    looks like localhost and the default check lets the **whole internet** in. Either pass
-    real dependencies, or run uvicorn with `--proxy-headers` and
-    `--forwarded-allow-ips` so `request.client` is the real client address.
+    would look like localhost. Redline refuses a loopback peer that carries
+    `X-Forwarded-For`, `X-Real-IP` or `Forwarded` unless it is listed in `trusted_proxies`,
+    but the safe setup is `access = "token"` (or real dependencies) plus `trusted_proxies`.
 
 To reach a local server through another name (a hosts-file alias, a tunnel), keep the
-loopback rules and allow that name explicitly:
+loopback rules and allow that name explicitly with the `allowed_hosts` setting:
 
 ```python
-from fastapi import Depends
-from fastapi_redline import install, loopback_guard
-
-install(app, engine=engine, dependencies=[Depends(loopback_guard(allowed_hosts=["devbox"]))])
+install(app, engine=engine, settings={"allowed_hosts": ["devbox"]})
 ```
+
+(`loopback_guard(allowed_hosts=[...])` is still exported for use as an explicit
+dependency.) The `local` policy treats Starlette's `TestClient` as loopback.
 
 ### Your own dependency
 
@@ -283,8 +313,15 @@ install(app, engine=engine, dependencies=[Depends(loopback_guard(allowed_hosts=[
     install(app, engine=engine, dependencies=[only_staff])   # wrapped in Depends for you
     ```
 
-`dependencies=[]` leaves the UI **open on purpose**. Do not do that outside a private
-network.
+Refuse by **raising** `HTTPException` (the FastAPI way). A dependency that *returns*
+`False` (`return user.is_admin`) is refused with `403` too, since FastAPI itself would
+ignore the return value and let the request in; `None` and other values pass.
+
+`dependencies=[]` is the same as not passing any (since 0.2: it used to leave the UI open).
+To open it to everyone on a private network, use a dependency that returns nothing, or
+`access = "open"` with `REDLINE_ALLOW_OPEN=1`. For tokens, basic auth,
+`allowed_ips`, `read_only` and the rest, use the [`access` settings](access-control.md);
+with an explicit policy other than `framework` your dependencies still run, after the gate.
 
 The dependencies apply to **everything** under the prefix: the page, assets and the API.
 An `HTTPException` they raise is answered in Redline's error shape,
@@ -294,12 +331,12 @@ An `HTTPException` they raise is answered in Redline's error shape,
 
 ### CSRF and Origin
 
-The mutating endpoints (`DELETE api/traces...`, `POST api/explain`) are always protected
-by a guard, whatever your dependencies:
+Every non-`GET` request (`DELETE api/traces...`, `POST api/explain`, login, logout) is
+always protected by the gate, whatever your dependencies:
 
-- a request with `Sec-Fetch-Site: cross-site` is rejected (`403 csrf_failed`);
+- a request with `Sec-Fetch-Site: cross-site` or `same-site` is rejected (`403 csrf_failed`);
 - a request with an `Origin` header must match the request's `Host` (or
-  `X-Forwarded-Host`); `Origin: null` is rejected;
+  `X-Forwarded-Host` from a trusted proxy); `Origin: null` is rejected;
 - a request **without** `Origin` (curl, scripts) is allowed, because a web page cannot
   forge that, but your dependencies still apply.
 

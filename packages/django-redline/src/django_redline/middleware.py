@@ -16,18 +16,28 @@ response status, headers and body (never for streaming or file responses, which 
 untouched), unhandled exceptions (re-raised, never swallowed), the ``X-Redline-Run``
 load-test tag, and a pyinstrument flamegraph when asked with ``?_redline=profile`` or
 ``X-Redline-Profile: 1``. Requests under Redline's own mount prefix are never recorded.
+
+On every recorded response it adds a ``Server-Timing`` header (``server_timing`` setting;
+appended to one the view set) and, when the ``badge`` setting is on (``"auto"`` = ``DEBUG``),
+injects the floating badge ``<script>`` before ``</body>`` of a kept 2xx ``text/html``
+``HttpResponse`` – never a streaming or file response, a compressed body, one larger than
+2 MB or one whose ``Content-Security-Policy`` does not allow ``'self'`` scripts.
 """
 
 from __future__ import annotations
 
 import logging
+import sys
 from typing import Any
 
 from asgiref.sync import iscoroutinefunction, markcoroutinefunction
 from django.conf import settings
-from django.http import HttpRequest, HttpResponseBase
+from django.http import HttpRequest, HttpResponse, HttpResponseBase
 from django.urls import NoReverseMatch, reverse
 
+from redline_core import ui
+from redline_core.access import RequestInfo
+from redline_core.blocking import track_request
 from redline_core.recorder import SpanContext, TraceBuilder
 from redline_core.sampling import profile_requested
 
@@ -61,9 +71,24 @@ def _reset_mount(**kwargs: Any) -> None:
 
 
 def _profile_requested(request: HttpRequest) -> bool:
-    return profile_requested(
+    """``?_redline=profile`` / ``X-Redline-Profile: 1`` – honoured only with ``DEBUG`` or
+    when the request would be let into Redline's API without ``PERMISSION`` (a token,
+    Basic credentials, a login cookie…): anyone else could force profiling and storage."""
+    if not profile_requested(
         request.META.get("QUERY_STRING", ""), request.headers.get("X-Redline-Profile")
+    ):
+        return False
+    if settings.DEBUG:
+        return True
+    info = RequestInfo.build(
+        method="GET",
+        path="",
+        client_ip=request.META.get("REMOTE_ADDR"),
+        headers=list(request.headers.items()),
+        host=request.META.get("HTTP_HOST"),
+        scheme=request.scheme or "http",
     )
+    return get_runtime().access.may_force(info)
 
 
 class RedlineMiddleware:
@@ -97,7 +122,7 @@ class RedlineMiddleware:
         if builder is None:
             return await self.get_response(request)
         try:
-            async with SpanContext("middleware", "middleware"):
+            async with track_request(builder), SpanContext("middleware", "middleware"):
                 response = await self.get_response(request)
         except BaseException as exc:
             self._finish(builder, request, None, exc)
@@ -157,6 +182,10 @@ class RedlineMiddleware:
             end_request(token)
         try:
             route, view = _route(request)
+            match = getattr(request, "resolver_match", None)
+            if match is not None and match.kwargs:
+                # ``/reset/<uidb64>/<token>/``: secret-looking values are masked in the path
+                builder.set_route(None, None, match.kwargs)
             if builder.req_body is None and builder.recorder.settings.capture_request_body:
                 builder.req_body = getattr(request, "_body", None)
             error = exc or getattr(request, "_redline_error", None)
@@ -168,6 +197,10 @@ class RedlineMiddleware:
                 )
                 return
             headers, body, size = _response_parts(response)
+            rs = builder.recorder.settings
+            on = ui.server_timing_enabled(rs, settings.DEBUG)
+            timing = builder.server_timing() if on else ""
+            snippet = _badge_snippet(builder, response)
             trace = builder.recorder.finish_trace(
                 builder,
                 status=response.status_code,
@@ -180,8 +213,45 @@ class RedlineMiddleware:
             )
             if trace.tags.get("sampled_by") and settings.DEBUG:
                 response.headers["X-Redline-Trace"] = trace.id
+            if timing:
+                existing = response.get("Server-Timing")
+                response.headers["Server-Timing"] = f"{existing}, {timing}" if existing else timing
+            if snippet and trace.tags.get("sampled_by"):
+                _inject(response, snippet)
         except Exception:
             logger.exception("Redline failed to finish a trace")
+
+
+def _badge_snippet(builder: TraceBuilder, response: HttpResponseBase) -> str | None:
+    """The badge ``<script>`` for ``response``, or ``None`` when it does not get one."""
+    if not builder.active or not ui.badge_enabled(builder.recorder.settings, settings.DEBUG):
+        return None
+    # FileResponse / StreamingHttpResponse are not HttpResponse subclasses.
+    if not isinstance(response, HttpResponse) or response.streaming:
+        return None
+    if not ui.badge_allowed(
+        response.status_code,
+        response.get("Content-Type"),
+        content_encoding=response.get("Content-Encoding"),
+        csp=response.get("Content-Security-Policy"),
+        content_disposition=response.get("Content-Disposition"),
+    ):
+        return None
+    if len(response.content) > ui.BADGE_MAX_BYTES:
+        return None
+    mount = mount_prefix()
+    if not mount:
+        return None
+    return ui.badge_snippet(builder.id, mount, ui.badge_summary(builder, response.status_code))
+
+
+def _inject(response: HttpResponseBase, snippet: str) -> None:
+    new = ui.inject_badge(response.content, snippet)  # type: ignore[attr-defined]
+    if new is None:
+        return
+    response.content = new  # type: ignore[attr-defined]
+    if response.has_header("Content-Length"):
+        response.headers["Content-Length"] = str(len(new))
 
 
 def _small_body(request: HttpRequest, limit: int) -> bytes | None:
@@ -205,6 +275,34 @@ def _small_body(request: HttpRequest, limit: int) -> bytes | None:
         return None
 
 
+def _ninja_operation(func: Any, method: str | None) -> Any:
+    """The endpoint function behind a Django Ninja route, else ``None``.
+
+    Ninja registers one Django view per *path* (a closure over its ``PathView``, whose
+    ``operations`` hold the real functions, one or more per HTTP method), so
+    ``resolver_match.func`` is always ``ninja.operation...view_wrapper``. Nothing is
+    imported: if Ninja is not already loaded, this is not a Ninja request.
+    """
+    operation_module = sys.modules.get("ninja.operation")
+    path_view_cls = getattr(operation_module, "PathView", None)
+    if path_view_cls is None or getattr(func, "__module__", None) != "ninja.operation":
+        return None
+    candidates = [getattr(func, "__self__", None)]  # older Ninja: a bound method
+    for cell in getattr(func, "__closure__", None) or ():
+        try:
+            candidates.append(cell.cell_contents)
+        except ValueError:  # an empty cell
+            continue
+    for candidate in candidates:
+        if not isinstance(candidate, path_view_cls):
+            continue
+        for operation in candidate.operations:
+            if method in operation.methods:
+                return operation.view_func
+        return None
+    return None
+
+
 def _route(request: HttpRequest) -> tuple[str | None, str | None]:
     match = getattr(request, "resolver_match", None)
     if match is None:
@@ -213,7 +311,9 @@ def _route(request: HttpRequest) -> tuple[str | None, str | None]:
     if route is not None:
         route = "/" + route.lstrip("^/") if not route.startswith("/") else route
     func = match.func
-    target = getattr(func, "view_class", None) or getattr(func, "cls", None) or func
+    target = _ninja_operation(func, request.method) or (
+        getattr(func, "view_class", None) or getattr(func, "cls", None) or func
+    )
     module = getattr(target, "__module__", None)
     name = getattr(target, "__qualname__", None) or getattr(target, "__name__", None)
     view = f"{module}.{name}" if module and name else getattr(match, "_func_path", None)

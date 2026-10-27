@@ -13,7 +13,7 @@ Django-only keys:
 
 ``PERMISSION``
     Who may open the UI and the API: a callable ``(request) -> bool`` or its dotted path.
-    Default: active staff users (:func:`default_permission`).
+    Default: active superusers (:func:`default_permission`; staff before 0.2).
 ``STORE``
     Where traces go (the counterpart of FastAPI's ``install(store=...)``): a
     :class:`~redline_core.storage.Store` instance, a callable (or class) taking the core
@@ -35,6 +35,7 @@ from django.http import HttpRequest
 from django.utils.module_loading import import_string
 
 from redline_core.conf import Settings, SettingsError
+from redline_core.config import ResolvedConfig, resolve_settings
 from redline_core.storage import SQLiteStore, Store
 
 __all__ = [
@@ -46,6 +47,7 @@ __all__ = [
     "default_permission",
     "get_core_settings",
     "get_options",
+    "get_resolved_config",
 ]
 
 SETTING_NAME = "REDLINE"
@@ -57,7 +59,18 @@ Permission = Callable[[HttpRequest], bool]
 
 
 def default_permission(request: HttpRequest) -> bool:
-    """Active staff users only (the default ``PERMISSION``)."""
+    """Active superusers only (the default ``PERMISSION``; before 0.2 it was staff).
+
+    Staff status is often handed out for the admin of a single model; Redline shows every
+    captured request (headers, SQL, bodies) of every user, so the default asks for more.
+    Use ``REDLINE = {"PERMISSION": "django_redline.conf.staff_permission"}`` (or your own
+    callable) for the old behaviour."""
+    user = getattr(request, "user", None)
+    return bool(user is not None and user.is_active and user.is_superuser)
+
+
+def staff_permission(request: HttpRequest) -> bool:
+    """Active staff users (the default ``PERMISSION`` before 0.2)."""
     user = getattr(request, "user", None)
     return bool(user is not None and user.is_active and user.is_staff)
 
@@ -81,23 +94,36 @@ def _raw() -> dict[str, Any]:
     return raw
 
 
-def get_core_settings() -> Settings:
-    """``settings.REDLINE`` (minus Django-only keys) as core :class:`Settings`.
+def get_resolved_config() -> ResolvedConfig:
+    """The layered configuration (``redline_core.config``) with ``settings.REDLINE``
+    (minus Django-only keys) as the framework layer.
+
+    Adapter defaults (below a preset, the config file and ``REDLINE_*`` variables):
+    ``sample_rate`` 0.1 without ``DEBUG``, ``storage_path``/``project_root`` from
+    ``BASE_DIR``, and ``access="framework"`` (the ``PERMISSION`` check, default active
+    superusers) unless ``ACCESS`` is set explicitly.
 
     Raises :class:`~django.core.exceptions.ImproperlyConfigured` for unknown keys or bad
     values (the core's message, including its "did you mean" hint).
     """
     raw = {k.lower(): v for k, v in _raw().items() if k.lower() not in DJANGO_KEYS}
+    defaults: dict[str, Any] = {}
     base_dir = getattr(settings, "BASE_DIR", None)
-    if "sample_rate" not in raw and not settings.DEBUG:
-        raw["sample_rate"] = PRODUCTION_SAMPLE_RATE
+    if not settings.DEBUG:
+        defaults["sample_rate"] = PRODUCTION_SAMPLE_RATE
     if base_dir is not None:
-        raw.setdefault("storage_path", os.path.join(str(base_dir), ".redline", "redline.db"))
-        raw.setdefault("project_root", str(base_dir))
+        defaults["storage_path"] = os.path.join(str(base_dir), ".redline", "redline.db")
+        defaults["project_root"] = str(base_dir)
     try:
-        return Settings.from_mapping(raw)
+        return resolve_settings(raw, adapter_defaults=defaults, native_hook=True)
     except SettingsError as exc:
         raise ImproperlyConfigured(f"settings.{SETTING_NAME}: {exc}") from exc
+
+
+def get_core_settings() -> Settings:
+    """``settings.REDLINE`` (minus Django-only keys) as core :class:`Settings` (see
+    :func:`get_resolved_config`)."""
+    return get_resolved_config().settings
 
 
 def get_options() -> DjangoOptions:

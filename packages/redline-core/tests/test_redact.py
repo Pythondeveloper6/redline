@@ -94,3 +94,58 @@ def test_default_keys_mask_secrets_but_not_auth_lookalikes():
         assert red.is_secret_key(key), key
     for key in ("authenticated", "author", "author_id", "authority", "oauth_provider", "name"):
         assert not red.is_secret_key(key), key
+
+
+TEXT_CASES = [
+    # (input, expected) – every secret value masked
+    (
+        "calling url=https://api/v1?api_key=SECRET123",
+        "calling url=https://api/v1?api_key=[redacted]",
+    ),
+    ("Cookie: sessionid=abc123", "Cookie: sessionid=[redacted]"),
+    ("redirect: /cb?token=XYZ", "redirect: /cb?token=[redacted]"),
+    ("user=bob:password=hunter2", "user=bob:password=[redacted]"),
+    ('{"password": "x", "name": "bob"}', '{"password": "[redacted]", "name": "bob"}'),
+    ("{'token': 'x', 'n': 1}", "{'token': '[redacted]', 'n': 1}"),
+    ("Authorization: Bearer x", "Authorization: [redacted]"),
+    ("authorization=Basic dXNlcjpwYXNz ok", "authorization=[redacted] ok"),
+    ("password=a&b=c", "password=[redacted]&b=c"),
+    ("password=ab:cd&e=f", "password=[redacted]&e=f"),
+    ("login password=hunter2 user=bob", "login password=[redacted] user=bob"),
+    ("token='s3cr3t' ok", "token='[redacted]' ok"),
+    ("next=/a?b=1&csrf_token=t1", "next=/a?b=1&csrf_token=[redacted]"),
+    ("db=postgres://bob:pw@db:5432/app", "db=postgres://bob:%5Bredacted%5D@db:5432/app"),
+    ("GET https://x.io/a?q=1&secret=s", "GET https://x.io/a?q=1&secret=[redacted]"),
+    ("api_key=[redacted] again", "api_key=[redacted] again"),
+    # negatives – nothing secret, text unchanged
+    ("author=bob", "author=bob"),
+    ("authenticated=true", "authenticated=true"),
+    ("author=bob authenticated=true oauth_provider=github", None),
+    ("time=12:30:00 status: ok", None),
+    ("see https://x.io/a?q=1&b=2 now", None),
+    ("plain message without pairs", None),
+    ("", None),
+]
+
+
+def test_text_masks_secret_pairs_table():
+    red = r()
+    for text, expected in TEXT_CASES:
+        assert red.text(text) == (text if expected is None else expected), text
+    leaks = ("SECRET123", "abc123", "XYZ", "hunter2", "dXNlcjpwYXNz", "t1", ":pw@")
+    for text, _ in TEXT_CASES:
+        out = red.text(text)
+        assert not [s for s in leaks if s in out], (text, out)
+
+
+def test_url_masks_userinfo_password():
+    red = r()
+    assert red.url("https://bob:pw@h.io/x") == "https://bob:%5Bredacted%5D@h.io/x"
+    assert red.url("https://bob:pw@h.io/x?token=1&q=2") == (
+        "https://bob:%5Bredacted%5D@h.io/x?token=[redacted]&q=2"
+    )
+    assert red.url("https://bob@h.io/x") == "https://bob@h.io/x"  # no password
+    assert red.url("https://h.io/x?q=a%20b") == "https://h.io/x?q=a%20b"  # untouched
+    from urllib.parse import urlsplit
+
+    assert urlsplit(red.url("https://bob:pw@h.io:8443/x")).hostname == "h.io"  # still parses

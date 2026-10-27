@@ -1,0 +1,67 @@
+<!doctype html>
+<!-- Manual test page for public/badge.js. Not part of the build.
+     Run `npm run dev` in frontend/ and open http://localhost:5173/badge-demo.html
+     (or open it from any static server next to badge.js). -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Redline badge demo</title>
+<style>
+  body { font: 15px/1.5 system-ui, sans-serif; max-width: 640px; margin: 2rem auto; padding: 0 1rem; }
+  label { display: block; margin: .6rem 0 .2rem; font-weight: 600; font-size: 13px; }
+  input, select, textarea { font: inherit; width: 100%; padding: 4px 6px; box-sizing: border-box; }
+  textarea { height: 6.5rem; font-family: ui-monospace, monospace; font-size: 12px; }
+  button { margin: .8rem .4rem 0 0; padding: 4px 12px; font: inherit; }
+  p.hint { color: #777; font-size: 13px; }
+</style>
+</head>
+<body>
+<h1>Redline badge demo</h1>
+<p>A host page with the Redline floating badge injected at the bottom right. Hover it for issue details (fetched from
+<code>&lt;mount&gt;/api/traces/&lt;id&gt;</code>; with no backend it keeps retrying quietly and falls back to the summary), click it to open the
+request, drag it around, press &times; to collapse it (remembered across reloads), and flip your OS theme to check dark mode.</p>
+
+<label for="trace">data-redline-trace</label>
+<input id="trace" value="a1f3c0de000000000000000000000000">
+<label for="mount">data-redline-mount (where Redline is mounted: /_redline for FastAPI, /redline for Django, empty for the Vite dev server)</label>
+<input id="mount" value="">
+<label for="summary">data-redline-summary (JSON)</label>
+<textarea id="summary">{"duration_ms": 142, "query_count": 23, "query_ms": 61.2, "issue_count": 1, "issue_kinds": ["n_plus_one"], "status": 200}</textarea>
+<button id="apply">Re-inject badge</button>
+<button id="reset">Forget collapsed state</button>
+<p class="hint">Try: <code>"issue_count": 0</code> (green dot, no warning), <code>"status": 500</code> (red dot),
+<code>"issue_kinds": ["n_plus_one","slow_query"]</code> (shows "N+1 +1").</p>
+
+<div style="height:120vh"></div>
+
+<script>
+  function inject() {
+    document.querySelectorAll('[data-redline-badge-script]').forEach(function (e) { e.remove(); });
+    var s = document.createElement('script');
+    s.src = 'badge.js';
+    s.setAttribute('data-redline-badge-script', '');
+    s.setAttribute('data-redline-trace', document.getElementById('trace').value);
+    s.setAttribute('data-redline-mount', document.getElementById('mount').value);
+    s.setAttribute('data-redline-summary', document.getElementById('summary').value);
+    document.body.appendChild(s);
+  }
+  document.getElementById('apply').onclick = function () {
+    // The badge adds one host element per injection; drop the old one first.
+    location.reload();
+  };
+  document.getElementById('reset').onclick = function () {
+    try { localStorage.removeItem('redline-badge-collapsed'); } catch (e) {}
+    location.reload();
+  };
+  // Keep the form values across the reload used by "Re-inject".
+  ['trace', 'mount', 'summary'].forEach(function (k) {
+    var el = document.getElementById(k);
+    try { var v = sessionStorage.getItem('demo-' + k); if (v != null) el.value = v; } catch (e) {}
+    el.addEventListener('input', function () { try { sessionStorage.setItem('demo-' + k, el.value); } catch (e) {} });
+  });
+  inject();
+</script>
+</body>
+</html>

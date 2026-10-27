@@ -35,6 +35,7 @@ import logging
 from collections.abc import Iterable, Sequence
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
+from . import detectors
 from . import sql as sqlmod
 from .conf import Settings
 from .model import Callsite, Issue, IssueKind, Severity, Span, Suggestion, Trace
@@ -120,7 +121,52 @@ class GenericSuggester:
                 "and duplicate issues on this request first.",
                 confidence="low",
             )
+        return _generic_v02(issue)
+
+
+_GENERIC_V02: dict[str, tuple[str, str]] = {
+    "large_result": (
+        "Fetch fewer rows: paginate (LIMIT/OFFSET or keyset), stream in chunks, filter in "
+        "SQL instead of in Python, and select only the columns the response uses.",
+        "low",
+    ),
+    "unbounded_query": (
+        "Add a LIMIT (or paginate) so the query cannot grow with the table; if you really "
+        "need every row, process it in chunks.",
+        "low",
+    ),
+    "inefficient_count": (
+        "Ask the database: use a COUNT(*) query to count and an EXISTS / LIMIT 1 query to "
+        "test for any row, instead of loading the rows.",
+        "low",
+    ),
+    "slow_serializer": (
+        "Profile the serializer: remove per-item queries and computed fields, drop unused "
+        "fields, and paginate large collections.",
+        "low",
+    ),
+    "slow_external": (
+        "Set a short timeout, cache the response, or move the call out of the request path "
+        "(background task).",
+        "low",
+    ),
+    "duplicate_external": (
+        "Call the service once per request and reuse the response, or cache it.",
+        "low",
+    ),
+    "retry_storm": (
+        "Cap retries, add exponential backoff with jitter, and use a circuit breaker so a "
+        "failing service cannot multiply your latency.",
+        "low",
+    ),
+}
+
+
+def _generic_v02(issue: Issue) -> Suggestion | None:
+    hint = _GENERIC_V02.get(issue.kind)
+    if hint is None:
         return None
+    return Suggestion(summary=hint[0], confidence="low")
 
 
 class Detector:
@@ -162,21 +208,33 @@ class Detector:
         samples: dict[str, Span] = {}
         n1 = self._n_plus_one(sql_spans, extra, samples)
         covered = {sid for issue in n1 for sid in issue.span_ids}
+        _tag_resolvers(n1, trace.spans)
         issues.extend(n1)
         issues.extend(self._duplicates(sql_spans, covered))
         issues.extend(self._slow(sql_spans, extra, samples))
         too_many = self._too_many(trace, sql_spans)
         if too_many:
             issues.append(too_many)
-        by_id = {s.id: s for s in sql_spans}
+        issues.extend(self._run_registry(trace))
+        by_id = {s.id: s for s in trace.spans}
         for issue in issues:
             spans = [by_id[i] for i in issue.span_ids if i in by_id]
             if not spans and issue.id in samples:
                 spans = [samples[issue.id]]
-            issue.suggestion = self._suggest(issue, spans)
+            # a detector's own suggestion is kept unless a suggester has a better one
+            issue.suggestion = self._suggest(issue, spans) or issue.suggestion
         order = {"critical": 0, "warning": 1, "info": 2}
         issues.sort(key=lambda i: (order[i.severity], -i.total_ms))
         return issues
+
+    def _run_registry(self, trace: Trace) -> list[Issue]:
+        found: list[Issue] = []
+        for fn in list(detectors.REGISTRY):
+            try:
+                found.extend(fn(trace, self.settings))
+            except Exception:  # one broken detector must not hide the others
+                logger.exception("Redline detector %r failed", fn)
+        return found
 
     def _suggest(self, issue: Issue, spans: list[Span]) -> Suggestion | None:
         for suggester in self.suggesters:
@@ -347,6 +405,27 @@ class Detector:
             count=n,
             total_ms=round(total, 3),
         )
+
+
+def _tag_resolvers(issues: list[Issue], spans: Sequence[Span]) -> None:
+    """GraphQL: name the resolver an N+1 comes from (``extra["resolver_path"]``)."""
+    resolvers = {s.id: s for s in spans if s.kind == "resolver"}
+    if not resolvers:
+        return
+    parents = {s.id: s.parent_id for s in spans}
+    for issue in issues:
+        paths = set()
+        for sid in issue.span_ids:
+            pid = parents.get(sid)
+            while pid is not None and pid not in resolvers:
+                pid = parents.get(pid)
+            paths.add(resolvers[pid].data.get("path") if pid else None)
+        path = paths.pop() if len(paths) == 1 else None
+        if path:
+            issue.extra["resolver_path"] = path
+            issue.title = (
+                f"N+1: {issue.count} queries{_on(issue.fingerprint or '')} from resolver {path}"
+            )
 
 
 def detect(

@@ -45,3 +45,11 @@ class OrderItem(models.Model):
     order = models.ForeignKey(Order, models.CASCADE, related_name="items")
     product = models.ForeignKey(Product, models.CASCADE)
     qty = models.IntegerField(default=1)
+
+
+class Article(models.Model):
+    title = models.CharField(max_length=50)
+    body = models.TextField(default="")
+    meta = models.JSONField(default=dict)
+    cover = models.BinaryField(default=b"")
+    views = models.IntegerField(default=0)

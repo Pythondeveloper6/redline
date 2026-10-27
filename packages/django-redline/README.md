@@ -1,3 +1,12 @@
+<p align="center">
+  <a href="https://pythondeveloper6.github.io/redline/">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/assets/logo-dark.svg">
+      <img alt="Redline" src="https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/assets/logo-light.svg" height="56">
+    </picture>
+  </a>
+</p>
+
 # django-redline
 
 A modern request profiler for Django: SQL timelines, **N+1 detection with ready-to-apply
@@ -8,13 +17,21 @@ traces live in their own SQLite file.
 It replaces django-silk. Redline stores redacted data rather than plaintext secrets, never writes to
 your app DB or records itself, supports async, groups N+1s, and adds EXPLAIN and flamegraphs.
 
-> Status: `0.1.0a1`, alpha. Built on [`redline-core`](../redline-core).
+> Status: `0.2.0a1`, alpha. Built on [`redline-core`](../redline-core).
 
 ## Install
 
 ```bash
-pip install django-redline            # or: pip install "django-redline[profile]" for flamegraphs
+pip install \
+  "django-redline @ git+https://github.com/Pythondeveloper6/redline#subdirectory=packages/django-redline" \
+  "redline-core @ git+https://github.com/Pythondeveloper6/redline#subdirectory=packages/redline-core"
 ```
+
+Not on PyPI yet: install from GitHub, naming `redline-core` in the same command (the adapter
+pins it exactly). Docs: <https://pythondeveloper6.github.io/redline/>.
+
+Add the extra to the core requirement for flamegraphs:
+`"redline-core[profile] @ git+https://github.com/Pythondeveloper6/redline#subdirectory=packages/redline-core"`.
 
 ```python
 # settings.py
@@ -37,7 +54,7 @@ urlpatterns = [
 ]
 ```
 
-Run your app, make some requests and open **`/redline/`** as a staff user.
+Run your app, make some requests and open **`/redline/`** as a superuser.
 
 ## What you get
 
@@ -111,7 +128,7 @@ The full list is in the settings reference of the docs (`redline_core.conf.Setti
 
 ## Security
 
-- **Access**: staff only by default (`user.is_active and user.is_staff`). Override it with
+- **Access**: superusers only by default (`user.is_active and user.is_superuser`; staff before 0.2). Override it with
   `REDLINE["PERMISSION"]`, a callable `(request) -> bool` or its dotted path. Anonymous visitors to
   the page are redirected to the admin login. The API answers `403` JSON. Redline's views also
   enforce `ALLOWED_HOSTS` (against DNS rebinding) and the page sends `X-Frame-Options: DENY`.
@@ -168,7 +185,7 @@ with span("render-pdf", pages=3):
   attributed to the project view that handled the request.
 
 Supports Django 5.2, 6.0 and 6.1 on Python 3.12+. A runnable demo is in
-[`examples/django`](../../examples/django).
+[`examples/django`](https://github.com/Pythondeveloper6/redline/blob/main/examples/django).
 
 ## License
 

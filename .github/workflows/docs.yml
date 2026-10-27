@@ -1,0 +1,54 @@
+# Build the MkDocs Material site with --strict and publish it to GitHub Pages
+# (https://pythondeveloper6.github.io/redline/).
+#
+# Pull requests only get the strict build, in ci.yml's `docs` job. This workflow runs on
+# pushes to main and on demand. In the repository settings, Pages must use "GitHub Actions"
+# as its source.
+name: Docs
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deployment at a time; a newer push cancels one that is still queued, but never one
+# that is mid-deploy.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  FORCE_COLOR: "1"
+
+jobs:
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.2
+        with:
+          enable-cache: true
+          python-version: "3.13"
+      - uses: actions/configure-pages@v5
+      - name: Build the site (strict)
+        run: uv run --no-project --with mkdocs-material mkdocs build --strict --site-dir site
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: site
+
+  deploy:
+    name: deploy
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

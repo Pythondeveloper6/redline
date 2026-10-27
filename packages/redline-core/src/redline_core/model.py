@@ -18,7 +18,8 @@ is the wire format in ``CONTRACT.md`` §1–2 and is what the UI reads. Times ar
 
 from __future__ import annotations
 
-import uuid
+import os
+import threading
 from dataclasses import dataclass, field
 from typing import Any, Literal, cast
 
@@ -32,6 +33,7 @@ __all__ = [
     "Framework",
     "Issue",
     "IssueKind",
+    "LogRecord",
     "Severity",
     "Span",
     "SpanKind",
@@ -40,10 +42,38 @@ __all__ = [
     "new_id",
 ]
 
-SpanKind = Literal["sql", "cache", "http_out", "template", "middleware", "view", "custom"]
-IssueKind = Literal["n_plus_one", "duplicate_query", "slow_query", "too_many_queries"]
+SpanKind = Literal[
+    "sql",
+    "cache",
+    "http_out",
+    "template",
+    "middleware",
+    "view",
+    "custom",
+    "serializer",
+    "resolver",
+    "transaction",
+    "blocking",
+    "pool_wait",
+]
+IssueKind = Literal[
+    "n_plus_one",
+    "duplicate_query",
+    "slow_query",
+    "too_many_queries",
+    "blocking_in_async",
+    "large_result",
+    "unbounded_query",
+    "inefficient_count",
+    "slow_serializer",
+    "long_transaction",
+    "external_in_transaction",
+    "slow_external",
+    "duplicate_external",
+    "retry_storm",
+]
 Severity = Literal["info", "warning", "critical"]
-Framework = Literal["django", "fastapi", "other"]
+Framework = Literal["django", "fastapi", "flask", "litestar", "other"]
 Confidence = Literal["high", "medium", "low"]
 
 SPAN_KINDS: tuple[str, ...] = (
@@ -54,15 +84,68 @@ SPAN_KINDS: tuple[str, ...] = (
     "middleware",
     "view",
     "custom",
+    "serializer",
+    "resolver",
+    "transaction",
+    "blocking",
+    "pool_wait",
 )
-ISSUE_KINDS: tuple[str, ...] = ("n_plus_one", "duplicate_query", "slow_query", "too_many_queries")
+ISSUE_KINDS: tuple[str, ...] = (
+    "n_plus_one",
+    "duplicate_query",
+    "slow_query",
+    "too_many_queries",
+    "blocking_in_async",
+    "large_result",
+    "unbounded_query",
+    "inefficient_count",
+    "slow_serializer",
+    "long_transaction",
+    "external_in_transaction",
+    "slow_external",
+    "duplicate_external",
+    "retry_storm",
+)
 SEVERITIES: tuple[str, ...] = ("info", "warning", "critical")
-FRAMEWORKS: tuple[str, ...] = ("django", "fastapi", "other")
+FRAMEWORKS: tuple[str, ...] = ("django", "fastapi", "flask", "litestar", "other")
+
+
+_ID_POOL_BYTES = 4096  # 256 ids per os.urandom() call
+_id_lock = threading.Lock()
+_id_pool = b""
+_id_pos = 0
 
 
 def new_id() -> str:
-    """A fresh 32-character hex id (``uuid4().hex``), used for traces and spans."""
-    return uuid.uuid4().hex
+    """A fresh 32-character hex id (random, in ``uuid4().hex`` format), used for traces
+    and spans.
+
+    The random bytes come from :func:`os.urandom` like ``uuid4()``, but are read in
+    batches: one syscall per id was a measurable share of the per-request cost.
+    """
+    global _id_pool, _id_pos
+    with _id_lock:
+        pos = _id_pos
+        if pos >= len(_id_pool):
+            _id_pool = os.urandom(_ID_POOL_BYTES)
+            pos = 0
+        _id_pos = pos + 16
+        raw = bytearray(_id_pool[pos : pos + 16])
+    raw[6] = (raw[6] & 0x0F) | 0x40  # version 4
+    raw[8] = (raw[8] & 0x3F) | 0x80  # RFC 4122 variant
+    return raw.hex()
+
+
+def _reset_ids() -> None:  # pragma: no cover - runs in forked children
+    """A forked child must not hand out the ids left in its parent's pool."""
+    global _id_lock, _id_pool, _id_pos
+    _id_lock = threading.Lock()
+    _id_pool = b""
+    _id_pos = 0
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_ids)
 
 
 @dataclass(frozen=True)
@@ -217,6 +300,8 @@ class Issue:
     count: int = 0
     total_ms: float = 0.0
     suggestion: Suggestion | None = None
+    #: Kind-specific facts (rows, resolver path, host, ...); JSON-safe.
+    extra: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -231,6 +316,7 @@ class Issue:
             "count": self.count,
             "total_ms": self.total_ms,
             "suggestion": self.suggestion.to_dict() if self.suggestion else None,
+            "extra": dict(self.extra),
         }
 
     @classmethod
@@ -247,6 +333,37 @@ class Issue:
             count=int(data.get("count", 0)),
             total_ms=float(data.get("total_ms", 0.0)),
             suggestion=Suggestion.from_dict(data.get("suggestion")),
+            extra=dict(data.get("extra") or {}),
+        )
+
+
+@dataclass
+class LogRecord:
+    """One log line emitted while a request was being served."""
+
+    t_ms: float
+    level: str
+    logger: str
+    message: str
+    callsite: Callsite | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "t_ms": self.t_ms,
+            "level": self.level,
+            "logger": self.logger,
+            "message": self.message,
+            "callsite": self.callsite.to_dict() if self.callsite else None,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> LogRecord:
+        return cls(
+            t_ms=float(data.get("t_ms", 0.0)),
+            level=str(data.get("level", "INFO")),
+            logger=str(data.get("logger", "")),
+            message=str(data.get("message", "")),
+            callsite=Callsite.from_dict(data.get("callsite")),
         )
 
 
@@ -284,6 +401,12 @@ class Trace:
     #: ``{"dropped_spans": int, "max_spans": int}``. Counters (``query_count``,
     #: ``query_ms``) and the N+1 / slow-query issues still cover every span.
     truncated: dict[str, Any] | None = None
+    #: Log lines emitted during the request (``Settings.capture_logs``), at most
+    #: ``max_logs_per_trace``; the rest are counted in ``logs_dropped``.
+    logs: list[LogRecord] = field(default_factory=list)
+    logs_dropped: int = 0
+    #: The release (git sha, version...) the app was running; ``Settings.release``.
+    release: str | None = None
 
     # derived ---------------------------------------------------------------
     @property
@@ -331,6 +454,9 @@ class Trace:
             "tags": dict(self.tags),
             "error": self.error,
             "truncated": self.truncated,
+            "logs": [r.to_dict() for r in self.logs],
+            "logs_dropped": self.logs_dropped,
+            "release": self.release,
         }
         if include_profile:
             data["profile"] = self.profile
@@ -383,4 +509,7 @@ class Trace:
             profile=data.get("profile"),
             error=data.get("error"),
             truncated=data.get("truncated"),
+            logs=[LogRecord.from_dict(r) for r in data.get("logs") or ()],
+            logs_dropped=int(data.get("logs_dropped") or 0),
+            release=data.get("release"),
         )

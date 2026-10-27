@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { api } from '../api'
+import { useLiveStream } from '../lib/live'
 import { ago, ms } from '../lib/format'
 import { isTyping, useDebounced, useNow } from '../lib/hooks'
 import type { Page, TraceFilters, TraceSummary } from '../types'
+import { feature } from '../lib/meta'
 import { CopyButton, Empty, ErrorBox, I, Icon, IssueBadge, Kbd, Status } from '../components/ui'
 
 const METHODS = ['', 'GET', 'POST', 'PUT', 'PATCH', 'DELETE']
@@ -43,13 +45,21 @@ export function InstallHelp({ framework }: { framework?: string }) {
 
 export default function Requests() {
   const nav = useNavigate()
+  const [sp, setSp] = useSearchParams()
+  const replayOf = sp.get('replay_of') || undefined
+  const routeFilter = sp.get('route') || undefined
+  const [picked, setPicked] = useState<string[]>([])
   const now = useNow()
   const [f, setF] = useState<TraceFilters>({})
   const [qInput, setQInput] = useState('')
   const q = useDebounced(qInput)
-  const filters = useMemo<TraceFilters>(() => ({ ...f, q: q || undefined }), [f, q])
+  const filters = useMemo<TraceFilters>(() => ({ ...f, q: q || undefined, replay_of: replayOf, route: routeFilter }), [f, q, replayOf, routeFilter])
   const hasFilters = Object.values(filters).some(Boolean)
-  const [paused, setPaused] = useState(false)
+  const [live, setLive] = useState(true)
+  const paused = !live
+  const [fresh, setFresh] = useState<TraceSummary[]>([])
+  const [flash, setFlash] = useState<Set<string>>(new Set())
+  const [sse, setSse] = useState(false)
   const [head, setHead] = useState<Page | null>(null)
   const [extra, setExtra] = useState<TraceSummary[]>([])
   const [extraCursor, setExtraCursor] = useState<string | null | undefined>(undefined)
@@ -64,19 +74,31 @@ export default function Requests() {
     try { const p = await api.traces(filters); setHead(p); setErr(null) } catch (e) { setErr(e as Error) }
   }, [filters])
 
-  useEffect(() => { api.meta().then(m => setFw(m.framework), () => {}) }, [])
-  useEffect(() => { setExtra([]); setExtraCursor(undefined); setSel(0); setHead(null); void poll() }, [fkey]) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { api.meta().then(m => { setFw(m.framework); setSse(feature(m, 'sse')) }, () => {}) }, [])
+  useEffect(() => { setExtra([]); setExtraCursor(undefined); setFresh([]); setSel(0); setHead(null); void poll() }, [fkey]) // eslint-disable-line react-hooks/exhaustive-deps
+  const latest = useRef(Date.now() / 1000)
+  const streamMode = live && sse && !hasFilters && head !== null
+  const onTrace = useCallback((t: TraceSummary) => {
+    latest.current = Math.max(latest.current, t.started_at)
+    setFresh(f => (f.some(x => x.id === t.id) ? f : [t, ...f].slice(0, 200)))
+    setHead(h => (h && !h.items.some(x => x.id === t.id) ? { ...h, total: h.total + 1 } : h))
+    setFlash(s => new Set(s).add(t.id))
+    window.setTimeout(() => setFlash(s => { const n = new Set(s); n.delete(t.id); return n }), 2600)
+  }, [])
+  const stream = useLiveStream(streamMode, () => latest.current, onTrace)
+  useEffect(() => { for (const t of head?.items ?? []) latest.current = Math.max(latest.current, t.started_at) }, [head])
+  // Poll when SSE is unavailable, filters are active (the stream is unfiltered) or the stream gave up.
   useEffect(() => {
-    if (paused) return
+    if (paused || (streamMode && stream !== 'polling')) return
     const t = setInterval(poll, 2000)
     return () => clearInterval(t)
-  }, [paused, poll])
+  }, [paused, poll, streamMode, stream])
 
   const items = useMemo(() => {
     const seen = new Set<string>(); const out: TraceSummary[] = []
-    for (const t of [...(head?.items ?? []), ...extra]) if (!seen.has(t.id)) { seen.add(t.id); out.push(t) }
+    for (const t of [...fresh, ...(head?.items ?? []), ...extra]) if (!seen.has(t.id)) { seen.add(t.id); out.push(t) }
     return out
-  }, [head, extra])
+  }, [head, extra, fresh])
   const cursor = extraCursor !== undefined ? extraCursor : head?.next_cursor ?? null
   const max = useMemo(() => Math.max(1, ...items.map(i => i.duration_ms)), [items])
 
@@ -90,16 +112,19 @@ export default function Requests() {
     const h = (e: KeyboardEvent) => {
       if (e.key === '/' && !isTyping(e)) { e.preventDefault(); search.current?.focus(); return }
       if (e.key === 'Escape' && isTyping(e)) { (e.target as HTMLElement).blur(); return }
-      if (isTyping(e) || e.metaKey || e.ctrlKey) return
+      if (isTyping(e) || e.metaKey || e.ctrlKey || e.altKey || document.querySelector('[aria-modal="true"]')) return
       if (e.key === 'j') setSel(s => Math.min(items.length - 1, s + 1))
       else if (e.key === 'k') setSel(s => Math.max(0, s - 1))
       else if (e.key === 'Enter' && items[sel]) nav('/requests/' + items[sel].id)
+      else if (e.key === 'x' && items[sel]) toggle(items[sel].id)
+      else if (e.key === 'c' && picked.length === 2) nav(`/compare/${picked[0]}/${picked[1]}`)
     }
     window.addEventListener('keydown', h)
     return () => window.removeEventListener('keydown', h)
-  }, [items, sel, nav])
+  }, [items, sel, nav, picked]) // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { document.querySelector(`tr[data-sel="true"]`)?.scrollIntoView({ block: 'nearest' }) }, [sel])
 
+  const toggle = (id: string) => setPicked(p => (p.includes(id) ? p.filter(x => x !== id) : p.length >= 2 ? [p[1], id] : [...p, id]))
   const set = (k: keyof TraceFilters) => (v: string) => setF(o => ({ ...o, [k]: v || undefined }))
   const empty = head && head.total === 0 && !hasFilters
 
@@ -126,12 +151,24 @@ export default function Requests() {
         <label className="inline-flex items-center gap-1.5 h-7 px-2 rounded-md border border-line bg-surface text-[12px] cursor-pointer select-none">
           <input type="checkbox" className="accent-[rgb(var(--accent))]" checked={f.has_issues === '1'} onChange={e => set('has_issues')(e.target.checked ? '1' : '')} /> Has issues
         </label>
-        {hasFilters && <button className="btn btn-ghost" onClick={() => { setF({}); setQInput('') }}>Reset</button>}
+        {replayOf && <span className="inline-flex items-center gap-1 h-7 px-2 rounded-md border border-info/40 bg-info/10 text-info text-[12px]">Replays of <span className="mono">{replayOf.slice(0, 8)}</span>
+          <button className="ml-0.5" aria-label="Clear replay filter" onClick={() => { const n = new URLSearchParams(sp); n.delete('replay_of'); setSp(n) }}><Icon d={I.x} size={11} /></button></span>}
+        {routeFilter && <span className="inline-flex items-center gap-1 h-7 px-2 rounded-md border border-info/40 bg-info/10 text-info text-[12px]">Route <span className="mono">{routeFilter}</span>
+          <button className="ml-0.5" aria-label="Clear route filter" onClick={() => { const n = new URLSearchParams(sp); n.delete('route'); setSp(n) }}><Icon d={I.x} size={11} /></button></span>}
+        {hasFilters && <button className="btn btn-ghost" onClick={() => { setF({}); setQInput(''); setSp({}) }}>Reset</button>}
         <div className="flex-1" />
         <span className="text-[12px] text-muted num hidden sm:inline">{head ? `${items.length.toLocaleString()} of ${head.total.toLocaleString()}` : ''}</span>
-        <button className="btn" onClick={() => setPaused(p => !p)} aria-pressed={paused}>
-          {paused ? <Icon d={I.play} size={11} /> : <span className="w-1.5 h-1.5 rounded-full bg-ok live-dot" />}
-          {paused ? 'Resume' : 'Live'}
+        {picked.length > 0 && (
+          <span className="inline-flex items-center gap-1.5">
+            <button className="btn btn-accent" disabled={picked.length !== 2} onClick={() => nav(`/compare/${picked[0]}/${picked[1]}`)} title={picked.length === 2 ? 'Compare the two selected requests' : 'Select one more request to compare'}>Compare {picked.length}/2</button>
+            <button className="btn btn-ghost" onClick={() => setPicked([])}>Clear</button>
+          </span>
+        )}
+        <button className="btn" onClick={() => setLive(l => !l)} aria-pressed={live}
+          title={!live ? 'Live updates are off' : streamMode && stream === 'live' ? 'Streaming new requests' : streamMode && stream === 'connecting' ? 'Connecting…' : 'Refreshing every 2 s'}>
+          {!live ? <Icon d={I.pause} size={11} /> : <span className={`w-1.5 h-1.5 rounded-full live-dot ${streamMode && stream === 'live' ? 'bg-ok' : streamMode && stream === 'connecting' ? 'bg-warn' : 'bg-info'}`} />}
+          Live
+          <span className="text-[10.5px] text-muted font-normal">{!live ? 'off' : streamMode ? (stream === 'live' ? 'stream' : stream === 'connecting' ? '…' : 'polling') : 'polling'}</span>
         </button>
       </div>
 
@@ -148,16 +185,21 @@ export default function Requests() {
           <table className="w-full border-collapse text-[12.5px]">
             <thead className="border-b border-line bg-raised/50">
               <tr>
+                <th className="th w-8"><span className="sr-only">Select for compare</span></th>
                 <th className="th hidden sm:table-cell">Method</th><th className="th">Path</th><th className="th">Status</th><th className="th">Duration</th>
                 <th className="th text-right">Queries</th><th className="th text-right hidden md:table-cell">Query time</th>
                 <th className="th hidden sm:table-cell">Issues</th><th className="th text-right hidden sm:table-cell">When</th>
               </tr>
             </thead>
             <tbody>
-              {!head && Array.from({ length: 8 }, (_, i) => <tr key={i} className="border-b border-line"><td colSpan={4} className="td"><div className="h-3 rounded bg-raised animate-pulse" /></td></tr>)}
+              {!head && Array.from({ length: 8 }, (_, i) => <tr key={i} className="border-b border-line"><td colSpan={5} className="td"><div className="h-3 rounded bg-raised animate-pulse" /></td></tr>)}
               {items.map((t, i) => (
                 <tr key={t.id} data-sel={i === sel} onClick={() => nav('/requests/' + t.id)} onMouseEnter={() => setSel(i)}
-                  className="border-b border-line last:border-0 cursor-pointer hover:bg-raised/60">
+                  className={`border-b border-line last:border-0 cursor-pointer hover:bg-raised/60 ${flash.has(t.id) ? 'row-flash' : ''}`}>
+                  <td className="td !pr-0 w-8" onClick={e => e.stopPropagation()}>
+                    <input type="checkbox" className="accent-[rgb(var(--accent))] cursor-pointer" aria-label={`Select ${t.method} ${t.path} for compare`}
+                      checked={picked.includes(t.id)} onChange={() => toggle(t.id)} />
+                  </td>
                   <td className="td mono font-semibold text-[11.5px] w-[64px] hidden sm:table-cell">{t.method}</td>
                   <td className="td max-w-[150px] sm:max-w-[420px]">
                     <div className="truncate font-medium" title={t.path}><span className="sm:hidden mono text-[11px] font-semibold mr-1.5">{t.method}</span>{t.path}</div>
@@ -182,7 +224,7 @@ export default function Requests() {
         </div>
       )}
       <div className="hidden md:flex gap-4 mt-3 text-[11px] text-faint">
-        <span><Kbd>j</Kbd> <Kbd>k</Kbd> move</span><span><Kbd>Enter</Kbd> open</span><span><Kbd>/</Kbd> search</span>
+        <span><Kbd>j</Kbd> <Kbd>k</Kbd> move</span><span><Kbd>Enter</Kbd> open</span><span><Kbd>/</Kbd> search</span><span><Kbd>x</Kbd> select</span><span><Kbd>?</Kbd> all shortcuts</span>
       </div>
     </div>
   )
