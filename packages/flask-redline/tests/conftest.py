@@ -50,6 +50,15 @@ class Env:
         return self.store.get(items[index]["id"])
 
 
+def _access_given(cfg: dict) -> bool:
+    """Whether a test chose the access policy itself (settings, preset or environment)."""
+    import os
+
+    keys = {k.lower() for k in cfg}
+    env = ("REDLINE_ACCESS", "REDLINE_PRESET", "REDLINE_CONFIG")
+    return bool({"access", "preset"} & keys) or any(e in os.environ for e in env)
+
+
 @pytest.fixture
 def make_env(tmp_path):
     created = []
@@ -60,6 +69,10 @@ def make_env(tmp_path):
             "project_root": str(ROOT),
             **(settings or {}),
         }
+        # Set explicitly, as an application must: an unset `access` answers 404 outside
+        # debug mode (CONTRACT.md §18).
+        if not kw.get("permission") and not _access_given(cfg):
+            cfg["access"] = "local"
         engine = create_engine(f"sqlite:///{tmp_path / 'shop.db'}")
         Base.metadata.create_all(engine)
         holder.sync = sessionmaker(engine, expire_on_commit=False)

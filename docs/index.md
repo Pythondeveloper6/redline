@@ -63,7 +63,7 @@ load at it and see what breaks first.</p>
     ]
     ```
 
-    Run your app, make a few requests, and open `/redline/` as a staff user.
+    Run your app, make a few requests, and open `/redline/` as a superuser.
 
 === "FastAPI"
 
@@ -81,7 +81,8 @@ load at it and see what breaks first.</p>
     app = FastAPI()
     engine = create_async_engine("sqlite+aiosqlite:///app.db")
 
-    install(app, engine=engine)   # UI at http://localhost:8000/_redline/
+    # access="local": localhost only (unset, Redline answers 404 outside debug mode)
+    install(app, engine=engine, settings={"access": "local"})  # UI at http://localhost:8000/_redline/
     ```
 
 === "Flask"
@@ -100,7 +101,8 @@ load at it and see what breaks first.</p>
     app = Flask(__name__)
     engine = create_engine("sqlite:///app.db")
 
-    Redline(app, engine=engine)   # UI at http://localhost:5000/_redline/
+    # access="local": localhost only (unset, Redline answers 404 outside debug mode)
+    Redline(app, engine=engine, settings={"access": "local"})  # UI at http://localhost:5000/_redline/
     ```
 
     With Flask-SQLAlchemy, omit the engine.
@@ -122,7 +124,8 @@ load at it and see what breaks first.</p>
 
     app = Litestar(
         route_handlers=[...],
-        plugins=[RedlinePlugin(engine=engine)],   # UI at http://localhost:8000/_redline/
+        # access="local": localhost only (unset, Redline answers 404 outside debug mode)
+        plugins=[RedlinePlugin(engine=engine, settings={"access": "local"})],  # UI at http://localhost:8000/_redline/
     )
     ```
 

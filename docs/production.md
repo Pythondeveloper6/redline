@@ -35,8 +35,9 @@ REDLINE_TOKEN=...                 # from your secret store
 | Read-only | on: every non-GET `api/` call is refused with `403 read_only`, and so is EXPLAIN ANALYZE |
 | Floating badge, `Server-Timing` | both off |
 | Load tests from the UI, `explain_analyze` | off |
+| Profiling | `profile = "off"`: `X-Redline-Profile` / `?_redline=profile` do nothing |
 
-Django keeps its staff check under the preset (a preset does not change `access` there).
+Django keeps its superuser (`PERMISSION`) check under the preset (a preset does not change `access` there).
 Also set `secret_key` (`REDLINE_SECRET_KEY`) when you run several workers, and
 `trusted_proxies` when a proxy is in front.
 
@@ -192,9 +193,12 @@ a trace with no queries, **31 KiB** with 20 queries and **260 KiB** with 200, ro
 
 ## What NOT to do
 
-- **Do not leave the default `local` access in front of a proxy.** The loopback check
-  sees the proxy as localhost. Use `access = "token"`, and set `trusted_proxies` if you need
-  real client addresses. See [Access control](access-control.md#behind-a-reverse-proxy).
+- **Do not use `local` access in front of a proxy.** The loopback check sees a proxy on
+  the same host as localhost. Use `access = "token"`, and set `trusted_proxies` if you need
+  real client addresses (and so that each client gets its own login rate-limit bucket and
+  `X-Forwarded-Proto` marks the cookie `Secure`). Since 0.2 an unset `access` answers `404`
+  outside debug mode, so this only happens if you set `local` yourself. See
+  [Access control](access-control.md#behind-a-reverse-proxy).
 - **Do not run load tests against production.** `redline load` is for environments you own and
   can afford to saturate.
 - **Do not skip authentication** on the grounds that it is "just a profiler". It shows

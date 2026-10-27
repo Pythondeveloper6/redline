@@ -114,10 +114,11 @@ def test_default_is_loopback_only(make_env):
 def test_loopback_client_addresses(make_env):
     env = make_env()
     c = env.client()
-    for addr in ("127.0.0.1", "127.5.5.5", "::1", "::ffff:127.0.0.1", ""):
+    for addr in ("127.0.0.1", "127.5.5.5", "::1", "::ffff:127.0.0.1"):
         r = c.get("/_redline/api/meta", environ_overrides={"REMOTE_ADDR": addr})
         assert r.status_code == 200, addr
-    for addr in ("203.0.113.9", "10.0.0.5", "2001:db8::1", "evil.com"):
+    # "" (a unix socket) is not local unless trust_unix_socket is on
+    for addr in ("203.0.113.9", "10.0.0.5", "2001:db8::1", "evil.com", ""):
         r = c.get("/_redline/api/meta", environ_overrides={"REMOTE_ADDR": addr})
         assert r.status_code == 403, addr
 
@@ -168,11 +169,11 @@ def test_warning_logged_without_permission(make_env, caplog):
 
     with caplog.at_level(logging.WARNING, logger="redline"):
         make_env()
-    assert "no permission check" in caplog.text
+    assert "with access='local'" in caplog.text
     caplog.clear()
     with caplog.at_level(logging.WARNING, logger="redline"):
         make_env(permission=lambda request: True)
-    assert "no permission check" not in caplog.text
+    assert "with access='local'" not in caplog.text
 
 
 def test_permission_replaces_the_loopback_default(make_env):

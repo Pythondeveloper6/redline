@@ -702,7 +702,9 @@ def test_run_bottlenecks_edge_cases(store):
     empty = Run(name="empty")
     store.save_run(empty)
     assert store.run_bottlenecks(empty.id).to_dict() == {"steps": [], "items": []}
-    # traces without a stored run: steps come from the tags; a zero first mean is guarded
+    # a run without step rows: steps come from the tags; a zero first mean is guarded
+    store.save_run(Run(id="cli"))
+    store.save_run(Run(id="single"))
     for step, ms in ((0, 0.0), (1, 5.0)):
         store.save(n1_trace(n=1, ms=ms, tags={"run_id": "cli", "step": str(step)}))
     b = store.run_bottlenecks("cli")

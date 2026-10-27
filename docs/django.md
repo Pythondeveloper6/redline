@@ -176,10 +176,20 @@ Every view, page, assets and API, first checks `ALLOWED_HOSTS` (it calls
 
 | | Default | |
 |---|---|---|
-| Who | active staff: `user.is_active and user.is_staff` | |
+| Who | active superusers: `user.is_active and user.is_superuser` | changed in 0.2 (was staff) |
 | Anonymous, on the page | redirected to `admin:login` (or `LOGIN_URL` if the admin is not installed), with `?next=` | |
 | Signed in without access, on the page | `403` plain text | |
 | On the API | `403` JSON `{"error": {"code": "forbidden", ...}}` | |
+
+!!! warning "Changed in 0.2: superusers, not staff"
+
+    Until 0.1 any active **staff** user could open Redline. Staff status is often given
+    for the admin of a single model, while Redline shows every user's requests (headers,
+    SQL, bodies), so the default now asks for a superuser. To keep the 0.1 rule:
+
+    ```python
+    REDLINE = {"PERMISSION": "django_redline.conf.staff_permission"}
+    ```
 
 Override it with a callable `(request) -> bool`, or its dotted path:
 
@@ -187,7 +197,7 @@ Override it with a callable `(request) -> bool`, or its dotted path:
 # myproject/redline.py
 def can_view(request):
     user = request.user
-    return user.is_active and user.is_superuser
+    return user.is_active and user.groups.filter(name="performance").exists()
 ```
 
 ```python
@@ -267,8 +277,8 @@ Details worth knowing:
 | Response status, headers | `Set-Cookie` values from `response.cookies` are included, then redacted |
 | Response body | only for non-streaming responses; **streaming and file responses are never consumed**. The size comes from `Content-Length` |
 | Exceptions | `process_exception` remembers a view's exception for the trace and returns `None`: it **never handles or swallows** it. It becomes the trace's `error` only when the final response is a 5xx: `Http404`, `PermissionDenied`, `BadRequest` and friends turn into 4xx responses and are **not errors** (no `error` on the trace, not kept by `ALWAYS_KEEP_ERRORS`). An exception that escapes the stack is recorded as a 500 and re-raised |
-| `X-Redline-Run` | becomes `run_id` and `step` tags |
-| `?_redline=profile` (or `1`, `true`, `yes`, `on`) / `X-Redline-Profile: 1` | starts the [profiler](flamegraphs.md); the same values as FastAPI |
+| `X-Redline-Run` | becomes `run_id` and `step` tags (kept only for a run that is running in the store) |
+| `?_redline=profile` (or `1`, `true`, `yes`, `on`) / `X-Redline-Profile: 1` | starts the [profiler](flamegraphs.md); the same values as FastAPI. Honoured with `DEBUG = True`, or when the request carries Redline credentials under `token`/`basic` (a `PERMISSION` cannot run in the middleware) |
 
 With `DEBUG = True`, a **kept** response gets an `X-Redline-Trace: <trace id>` header so you
 can find it. It is never sent in production.

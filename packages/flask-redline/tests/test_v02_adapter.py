@@ -209,12 +209,12 @@ def test_runs_post_launches_against_the_app_origin(make_env, monkeypatch):
     r = c.post("/_redline/api/runs", json=RUN_BODY)
     assert r.status_code == 202, r.json
     assert r.json == {"id": "run123", "name": "smoke", "status": "running"}
-    assert seen["base_url"] == "http://localhost"
+    assert seen["base_url"] == "http://127.0.0.1:80"  # SERVER_PORT, never the Host header
     assert "base_url" not in seen["config"]
     assert seen["store_path"] == env.redline.store.path
     assert c.get("/_redline/api/runs/run123").json["status"] == "running"
     sub = c.post("/_redline/api/runs", json=RUN_BODY, environ_overrides={"SCRIPT_NAME": "/app"})
-    assert sub.status_code == 202 and seen["base_url"] == "http://localhost/app"
+    assert sub.status_code == 202 and seen["base_url"] == "http://127.0.0.1:80/app"
     cross = c.post("/_redline/api/runs", json=RUN_BODY, headers={"Origin": "http://evil.example"})
     assert cross.status_code == 403 and cross.json["error"]["code"] == "csrf_failed"
 

@@ -231,7 +231,7 @@ def test_sse_stream_sends_trace_and_ping(make_app, monkeypatch):
 
 
 def test_sse_stream_is_guarded(tmp_path):
-    plugin = RedlinePlugin(settings={"storage_path": str(tmp_path / "g.db")})  # local_only
+    plugin = RedlinePlugin(settings={"storage_path": str(tmp_path / "g.db"), "access": "local"})
     app = Litestar(route_handlers=[page], plugins=[plugin])
     with TestClient(app, base_url="http://example.com") as c:
         assert c.get("/_redline/api/stream").status_code == 403
@@ -282,7 +282,7 @@ def test_runs_post_launches_against_app_origin(make_app, monkeypatch):
         r = c.post("/_redline/api/runs", json=RUN_BODY)
         assert r.status_code == 202, r.text
         assert r.json() == {"id": "run42", "name": "smoke", "status": "running"}
-        assert seen["base_url"] == "http://localhost"
+        assert seen["base_url"] == "http://127.0.0.1:80"  # scope["server"], never Host
         assert "base_url" not in seen["config"]
         assert seen["store_path"] == str(plugin.store.path)
         assert c.get("/_redline/api/runs/run42").json()["status"] == "running"

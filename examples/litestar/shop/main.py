@@ -13,8 +13,9 @@ app = Litestar(
         # "default" = async, the sync one gets its own alias
         RedlinePlugin(
             engine=[async_engine, sync_engine],
-            settings={"slow_query_ms": 40, "always_keep_slower_than_ms": 300},
-            # No `guards=`: the UI is reachable from localhost only.
+            settings={"slow_query_ms": 40, "always_keep_slower_than_ms": 300, "access": "local"},
+            # No `guards=`; access="local" (set explicitly – unset, Redline answers 404
+            # outside debug mode): the UI is reachable from localhost only.
         ),
     ],
 )

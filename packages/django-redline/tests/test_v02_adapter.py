@@ -167,7 +167,7 @@ async def test_stream_async_generator_under_asgi(async_client, latest, fast_stre
     from django.contrib.auth import get_user_model
 
     user = await sync_to_async(get_user_model().objects.create_user)(
-        "astaff", password="pw", is_staff=True
+        "astaff", password="pw", is_staff=True, is_superuser=True
     )
     await async_client.aforce_login(user)
     response = await async_client.get("/redline/api/stream?since=0")
@@ -241,7 +241,8 @@ def test_runs_post_launches_against_own_origin(client, staff, tmp_path, monkeypa
         response = _post_run(client, staff)
         assert response.status_code == 202, response.content
         assert response.json() == {"id": "run42", "name": "ui", "status": "running"}
-        assert seen["base_url"] == "http://testserver"
+        # the server's own listening port (SERVER_PORT), never the Host header (M5)
+        assert seen["base_url"] == "http://127.0.0.1:80"
         assert "base_url" not in seen["config"]
         assert seen["store_path"] == str(db)
         run = client.get("/redline/api/runs/run42").json()

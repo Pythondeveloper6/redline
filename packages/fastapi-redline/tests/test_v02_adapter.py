@@ -195,7 +195,8 @@ def test_runs_post_launches_against_app_origin(make_env, monkeypatch):
         r = c.post("/_redline/api/runs", json={**RUN, "base_url": "http://evil.example"})
         assert r.status_code == 202, r.text
         assert r.json()["id"] == "run42"
-        assert seen["base_url"] == "http://localhost:8000/app"
+        # the server's listening port (scope["server"]), never the Host header
+        assert seen["base_url"] == "http://127.0.0.1:8000/app"
         assert seen["store_path"] == env.redline.store.path
         assert c.get("/_redline/api/runs/run42").json()["status"] == "running"
         # cross-site POST is refused by the CSRF guard

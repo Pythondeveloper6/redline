@@ -13,7 +13,7 @@ uv run --project ../.. python seed.py                                # creates s
 uv run --project ../.. flask --app shop.main run --port 8000         # http://127.0.0.1:8000/
 ```
 
-Open **http://127.0.0.1:8000/_redline/** (localhost only: no `permission` is configured),
+Open **http://127.0.0.1:8000/_redline/** (localhost only: `access="local"` is set in `shop/main.py` and no `permission` is configured; without an explicit `access`, Redline answers 404 outside debug mode),
 then hit the endpoints:
 
 | Endpoint | What Redline shows |

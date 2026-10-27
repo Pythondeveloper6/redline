@@ -55,10 +55,41 @@ __all__ = [
     "RunLauncher",
     "RunStopper",
     "error",
+    "own_base_url",
     "snapshot_html",
 ]
 
 logger = logging.getLogger("redline")
+
+
+def own_base_url(scheme: str | None, server: Any, root_path: str = "") -> str | None:
+    """The application's own root URL for UI-started load runs, built from the port the
+    server is *listening* on – ASGI ``scope["server"]`` ``(host, port)``, WSGI
+    ``SERVER_PORT`` – never from the ``Host`` header (which a client chooses: it could aim a
+    run at any other service on this machine).
+
+    ``server`` is ``(host, port)``, a bare port, or ``None`` (unix socket / unknown →
+    ``None``: the ``base_url`` setting is then required). The host is always loopback:
+    ``127.0.0.1``, or ``[::1]`` when the server listens on an IPv6 address.
+    """
+    host: Any = None
+    port: Any = server
+    if isinstance(server, (tuple, list)):
+        if len(server) != 2:
+            return None
+        host, port = server
+    try:
+        number = int(port)
+    except (TypeError, ValueError):
+        return None
+    if not 0 < number < 65536:
+        return None
+    loopback = "[::1]" if isinstance(host, str) and ":" in host else "127.0.0.1"
+    scheme = (scheme or "http").lower()
+    if scheme not in ("http", "https"):
+        scheme = "http"
+    return f"{scheme}://{loopback}:{number}{(root_path or '').rstrip('/')}"
+
 
 Response = tuple[int, Any]
 ExecutorFactory = Callable[[str, str], "ExplainExecutor | None"]
@@ -645,8 +676,8 @@ class RedlineAPI:
             return error(
                 400,
                 "invalid_body",
-                "Cannot tell where to send the load run: the request's Host is not a "
-                "loopback name or one in allowed_hosts. Set the base_url setting (e.g. "
+                "Cannot tell where to send the load run: the server's listening port is "
+                "unknown (e.g. a unix socket). Set the base_url setting (e.g. "
                 "'http://127.0.0.1:8000') to the application's own URL.",
             )
         try:
@@ -657,8 +688,9 @@ class RedlineAPI:
 
     def _run_target(self, derived: str | None) -> str | None:
         """Where a UI-started run goes: the ``base_url`` setting, else the URL the adapter
-        derived from the request – only when its host is loopback or in ``allowed_hosts``
-        (a ``Host`` header must never aim a load test at another machine)."""
+        derived from the server's own listening port (:func:`own_base_url`) – only when its
+        host is loopback or in ``allowed_hosts``. The ``Host`` header is never used: it
+        could aim a load test at another machine or another local service."""
         if self.settings.base_url:
             return self.settings.base_url.rstrip("/")
         if not derived:

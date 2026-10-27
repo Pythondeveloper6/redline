@@ -129,11 +129,15 @@ class RedlineMiddleware:
         recorder: Recorder | None = None,
         prefix: str = "/_redline",
         debug: Callable[[], bool] | None = None,
+        force_ok: Callable[[Any], bool] | None = None,
     ) -> None:
         self.app = app
         self.recorder = recorder
         self.prefix = prefix
         self.debug = debug or (lambda: False)
+        #: ``force_ok(scope)``: may this request force profiling (``X-Redline-Profile``,
+        #: ``?_redline=profile``)? Called only when such a flag is present.
+        self.force_ok = force_ok or (lambda scope: self.debug())
 
     async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
         if scope["type"] != "http":
@@ -156,7 +160,7 @@ class RedlineMiddleware:
             headers=headers,
             query=query,
             client=client[0] if client else None,
-            profile_requested=_wants_profile(headers, query),
+            profile_requested=_wants_profile(headers, query) and self.force_ok(scope),
         )
         root_path = scope.get("root_path", "")
         limit = settings.max_body_bytes
