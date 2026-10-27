@@ -17,7 +17,14 @@ from typing import Any
 
 from sqlalchemy import event
 from sqlalchemy.engine import Engine
-from sqlalchemy.ext.asyncio import AsyncEngine
+
+try:
+    from sqlalchemy.ext.asyncio import AsyncEngine
+except ImportError:  # no greenlet: sync-only install (e.g. a Flask app), so no async engines
+
+    class AsyncEngine:  # type: ignore[no-redef]
+        """Placeholder so ``isinstance(engine, AsyncEngine)`` is simply False."""
+
 
 from redline_core import record_query
 from redline_core.blocking import note_sync_call
