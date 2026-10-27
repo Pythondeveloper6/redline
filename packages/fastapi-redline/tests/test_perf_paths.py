@@ -7,6 +7,8 @@ from fastapi.testclient import TestClient
 
 from fastapi_redline import install
 
+from .conftest import allow_all
+
 
 def test_redline_routes_are_not_matched_for_app_requests(tmp_path):
     """Redline's routes sit first; FastAPI's per-route matching of them is skipped unless
@@ -21,7 +23,7 @@ def test_redline_routes_are_not_matched_for_app_requests(tmp_path):
     async def catch_all(rest: str):
         return {"rest": rest}
 
-    install(app, settings={"storage_path": str(tmp_path / "r.db")}, dependencies=[])
+    install(app, settings={"storage_path": str(tmp_path / "r.db")}, dependencies=[allow_all])
     redline_route = app.router.routes[0]
     inner = type(redline_route).matches
     seen = []
@@ -51,7 +53,7 @@ def test_prefix_guard_honours_root_path(tmp_path):
     async def x():
         return {"ok": True}
 
-    install(app, settings={"storage_path": str(tmp_path / "r.db")}, dependencies=[])
+    install(app, settings={"storage_path": str(tmp_path / "r.db")}, dependencies=[allow_all])
     with TestClient(app, root_path="/app") as c:
         assert c.get("/_redline/api/meta").status_code == 200
         assert c.get("/x").json() == {"ok": True}

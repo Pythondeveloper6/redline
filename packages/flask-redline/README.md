@@ -22,7 +22,8 @@ from flask_redline import Redline
 app = Flask(__name__)
 engine = create_engine("sqlite:///app.db")
 
-Redline(app, engine=engine)      # UI at http://localhost:5000/_redline/
+# access="local": localhost only (unset, Redline answers 404 outside debug mode)
+Redline(app, engine=engine, settings={"access": "local"})  # UI at http://localhost:5000/_redline/
 ```
 
 With **Flask-SQLAlchemy** you do not even pass the engine: its engines (including
@@ -191,7 +192,7 @@ code hint with lower confidence instead.
 
 The UI exposes your SQL, request bodies and EXPLAIN, so treat it like an admin tool.
 
-**Default.** With no `permission`, the `access` setting decides (default `local`): only loopback clients (127.0.0.0/8, `::1`, unix sockets)
+**Default.** With no `permission`, the `access` setting decides (default `local`, served only in debug mode until you set `access`): only loopback clients (127.0.0.0/8, `::1`; unix sockets only with `trust_unix_socket`)
 that address the server by a loopback name (`Host: localhost`, `127.0.0.1`, `[::1]`, any
 port; this blocks DNS rebinding) are served, and a warning is logged at startup. Refusals
 are JSON `{"error": {"code": "forbidden", "message"}}`. Add other host names with the

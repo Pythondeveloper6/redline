@@ -15,12 +15,13 @@ export default function ReplayModal({ trace, open, onClose }: { trace: Trace; op
   const [values, setValues] = useState<Record<string, string>>({})
   const [removed, setRemoved] = useState<Set<string>>(new Set())
   const [profile, setProfile] = useState(false)
+  const [sendCookies, setSendCookies] = useState(false)
   const canProfile = useFeatures().has('profile')
   const [busy, setBusy] = useState(false)
   const [out, setOut] = useState<Outcome | null>(null)
   const [err, setErr] = useState<string | null>(null)
 
-  useEffect(() => { if (open) { setValues({}); setRemoved(new Set()); setOut(null); setErr(null); setBusy(false) } }, [open, trace.id])
+  useEffect(() => { if (open) { setValues({}); setRemoved(new Set()); setSendCookies(false); setOut(null); setErr(null); setBusy(false) } }, [open, trace.id])
 
   const missing = missingFields(fields, values, removed)
   const body = trace.request.body
@@ -30,7 +31,7 @@ export default function ReplayModal({ trace, open, onClose }: { trace: Trace; op
     setBusy(true); setErr(null); setOut(null)
     const t0 = performance.now()
     try {
-      const { url, init } = buildReplay(trace, values, removed, { profile: profile && canProfile, replayOf: trace.id, origin: location.origin })
+      const { url, init } = buildReplay(trace, values, removed, { profile: profile && canProfile, replayOf: trace.id, origin: location.origin, sendCookies })
       const res = await fetch(url, init)
       setOut({ status: res.status, ms: performance.now() - t0, statusText: res.statusText })
       void res.body?.cancel()
@@ -49,9 +50,9 @@ export default function ReplayModal({ trace, open, onClose }: { trace: Trace; op
           <Status code={trace.status} /><span className="text-[11px] text-faint">original</span>
         </div>
         <p className="m-0 text-muted text-[12px]">
-          Sends this request again from your browser to this same site, using your own session cookies. It will run for real, so side effects (writes, emails, payments) happen again.
+          Sends this request again from your browser to this same site, without your cookies unless you allow them below. It will run for real, so side effects (writes, emails, payments) happen again.
         </p>
-        {hadRedactedCookie(trace) && <p className="m-0 text-[12px] text-muted">The recorded Cookie header was redacted; your browser attaches its current cookies instead.</p>}
+        {hadRedactedCookie(trace) && <p className="m-0 text-[12px] text-muted">The recorded Cookie header was redacted; it is never replayed.</p>}
         {truncated && <div className="rounded-md border border-warn/30 bg-warn/5 p-2 text-[12px] text-warn">The recorded body was truncated; the replay will send only the captured part.</div>}
 
         {fields.length > 0 && (
@@ -81,6 +82,12 @@ export default function ReplayModal({ trace, open, onClose }: { trace: Trace; op
         {body && !truncated && fields.every(f => f.kind !== 'body') && (
           <details className="text-[12px]"><summary className="cursor-pointer text-muted">Request body</summary><pre className="m-0 mt-1 rounded bg-raised p-2 overflow-auto max-h-40 whitespace-pre-wrap break-words">{body}</pre></details>
         )}
+
+        <label className="flex items-start gap-2 cursor-pointer select-none">
+          <input type="checkbox" className="mt-0.5 accent-[rgb(var(--accent))]" checked={sendCookies} onChange={e => setSendCookies(e.target.checked)} />
+          <span>Send my cookies <span className="text-muted">(off by default)</span></span>
+        </label>
+        {sendCookies && <div role="note" className="rounded-md border border-warn/30 bg-warn/5 p-2 text-[12px] text-warn">The request runs as you, with your session on this site. Only do this for a request you have read and trust: anyone whose traffic was recorded chose its method, path and body.</div>}
 
         {canProfile && <label className="flex items-start gap-2 cursor-pointer select-none">
           <input type="checkbox" className="mt-0.5 accent-[rgb(var(--accent))]" checked={profile} onChange={e => setProfile(e.target.checked)} />

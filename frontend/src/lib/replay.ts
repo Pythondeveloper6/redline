@@ -1,5 +1,6 @@
-// Pure helpers for the Replay modal. A replay is a plain `fetch` from the browser (same origin,
-// the viewer's own cookies). Redacted values are never sent: the user must re-enter them or drop them.
+// Pure helpers for the Replay modal. A replay is a plain `fetch` from the browser to the same origin.
+// It sends no cookies unless the viewer opts in (`sendCookies`): a stored request replayed with the
+// viewer's session would be a stored CSRF. Redacted values are never sent: re-enter them or drop them.
 import { isMasked, tokenizeBody } from './curl.ts'
 import { sameOriginUrl } from './url.ts'
 
@@ -41,8 +42,9 @@ export function missingFields(fields: ReplayField[], values: Record<string, stri
   return fields.filter(f => !removed.has(f.key) && !(values[f.key] ?? '').length)
 }
 
-/** `origin` is the page's own origin (`location.origin`): the replay never leaves it. */
-export interface ReplayOpts { profile: boolean; replayOf: string; origin: string }
+/** `origin` is the page's own origin (`location.origin`): the replay never leaves it.
+ *  `sendCookies` (off unless the viewer ticks "Send my cookies") attaches the viewer's own cookies. */
+export interface ReplayOpts { profile: boolean; replayOf: string; origin: string; sendCookies?: boolean }
 
 /** Thrown by {@link buildReplay} when the recorded path would resolve to another origin. */
 export class CrossOriginReplay extends Error {
@@ -82,5 +84,5 @@ export function buildReplay(t: ReplayTrace, values: Record<string, string>, remo
       return mode === 'json' ? JSON.stringify(val).slice(1, -1) : mode === 'form' ? encodeURIComponent(val) : val
     }).join('')
   }
-  return { url, init: { method, headers, body, credentials: 'same-origin' } }
+  return { url, init: { method, headers, body, credentials: opts.sendCookies ? 'same-origin' : 'omit' } }
 }

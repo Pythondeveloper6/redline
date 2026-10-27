@@ -85,6 +85,7 @@ PRESETS: dict[str, dict[str, Any]] = {
         "server_timing": False,
         "load_from_ui": False,
         "explain_analyze": False,
+        "profile": "off",
     },
 }
 #: Settings never shown in clear (``GET api/config``, ``redline config``).
@@ -231,6 +232,13 @@ class Settings:
     session_ttl_s: int = 43_200
     #: Failed logins allowed per client IP per 5 minutes.
     max_login_attempts: int = 10
+    #: ``access="local"``: count a unix-socket peer (no client address) as local. Off by
+    #: default: a reverse proxy on this machine talking to the app over a unix socket would
+    #: otherwise make every visitor "local".
+    trust_unix_socket: bool = False
+    #: ``Secure`` attribute of the login cookie: ``"auto"`` = when the request's scheme is
+    #: https (``X-Forwarded-Proto`` counts only from ``trusted_proxies``); True/False force it.
+    cookie_secure: bool | str = "auto"
 
     def __post_init__(self) -> None:
         for name in (
@@ -240,6 +248,7 @@ class Settings:
             "log_level",
             "badge",
             "server_timing",
+            "cookie_secure",
             "preset",
             "access",
             "mount_path",
@@ -346,7 +355,7 @@ def _coerce(name: str, value: Any) -> Any:
         return "/" + value.strip().strip("/")
     if name in _MAP_FIELDS:
         return _coerce_mapping(name, value)
-    if name in ("badge", "server_timing") and isinstance(value, str):
+    if name in ("badge", "server_timing", "cookie_secure") and isinstance(value, str):
         return value.strip().lower() if value.strip().lower() == "auto" else value
     if name in _SEQ_FIELDS:
         if isinstance(value, str):
@@ -400,6 +409,7 @@ def _validate(s: Settings) -> None:
         "load_from_ui",
         "read_only",
         "ui_enabled",
+        "trust_unix_socket",
     ):
         _check_type(s, name, (bool,), "True or False")
     for name in (
@@ -463,7 +473,7 @@ def _validate(s: Settings) -> None:
             f"Redline setting 'log_level' must be one of {', '.join(LOG_LEVELS)} "
             f"(case-insensitive); got {s.log_level!r}."
         )
-    for name in ("badge", "server_timing"):
+    for name in ("badge", "server_timing", "cookie_secure"):
         value = getattr(s, name)
         if not isinstance(value, bool) and value != "auto":
             raise SettingsError(

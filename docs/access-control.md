@@ -25,22 +25,37 @@ Set `access` to one of:
 
 | `access` | Who gets in | Typical use |
 |---|---|---|
-| `local` (default) | loopback clients using a loopback `Host`, plus anything in `allowed_ips` | your laptop |
+| `local` (default, see below) | loopback clients using a loopback `Host`, plus anything in `allowed_ips` | your laptop |
 | `token` | a request with `Authorization: Bearer <token>`, or a browser that logged in with the token | staging, production, a shared server |
 | `basic` | a user from `basic_users` (`Authorization: Basic`, or the login form) | a small team, behind a proxy that cannot do SSO |
-| `framework` | the framework's own check: Django `is_staff` or `PERMISSION`, FastAPI `dependencies`, Flask `permission`, Litestar `guards` | you already have an admin login |
+| `framework` | the framework's own check: Django superusers or `PERMISSION`, FastAPI `dependencies`, Flask `permission`, Litestar `guards` | you already have an admin login |
 | `custom` | whatever your `access_check(request_info) -> bool` returns | anything else |
 | `open` | everyone | **refused** unless `REDLINE_ALLOW_OPEN=1` is also set |
 
 The default is `local` for FastAPI, Flask and Litestar. In Django the default is
-`framework`, meaning active **staff** users, exactly as in 0.1. Passing a native hook
-(FastAPI `dependencies=`, Flask `permission=`, Litestar `guards=`) switches the default to
-`framework` for you, unless you set `access` yourself in the file, the environment or the
-framework settings (a preset does not count).
+`framework`, meaning active **superusers** (staff in 0.1; see
+[Django: access control](django.md#access-control)). Passing a native hook (a non-empty
+FastAPI `dependencies=` or Litestar `guards=` list, a Flask `permission=` callable) switches
+the default to `framework` for you, unless you set `access` yourself in the file, the
+environment or the framework settings (a preset does not count). An empty list is the same
+as no hook.
+
+!!! warning "Set `access` explicitly (FastAPI, Flask, Litestar)"
+
+    While `access` is not set anywhere (code, `redline.toml`, `REDLINE_ACCESS`), Redline
+    serves the `local` default **only when the framework is in debug mode** (`app.debug`,
+    for example `FastAPI(debug=True)`, `flask --debug run` or `Litestar(debug=True)`).
+    Otherwise every Redline URL answers `404` and an error is logged at startup. The
+    reason: a reverse proxy on the same host that adds no `X-Forwarded-For`
+    (`proxy_pass http://127.0.0.1:8000;` with no `proxy_set_header`) makes every visitor a
+    loopback client addressing a loopback `Host`, so `local` would let the whole internet
+    in. Choose: `access = "token"` or `"basic"` on any server, or `access = "local"` on a
+    development machine where you accept that risk.
+
 
 ### Local
 
-Only loopback clients (`127.0.0.0/8`, `::1`, unix sockets) that address the server by a
+Only loopback clients (`127.0.0.0/8`, `::1`) that address the server by a
 loopback name (`localhost`, `*.localhost`, `127.0.0.1`, `[::1]`, any port) are served. The
 `Host` check defeats DNS rebinding: a malicious page cannot make your browser talk to
 `evil.example`, resolve it to `127.0.0.1`, and read your traces. `allowed_ips` adds client
@@ -52,6 +67,10 @@ warning. A reverse proxy running on the same host would otherwise make every vis
 local. Set `trusted_proxies` (see [Network restrictions](#network-restrictions)) or use
 `token`.
 
+A **unix-socket** peer (the app listens on a socket, so there is no client address) is not
+local: a proxy on the same machine is the usual reason for one. Set
+`trust_unix_socket = true` if only you can reach that socket.
+
 ### Token
 
 ```bash
@@ -61,7 +80,8 @@ REDLINE_TOKEN=$(openssl rand -hex 32)       # or token_file=/run/secrets/redline
 
 Clients send `Authorization: Bearer <token>`. In a browser, the UI shows a **login screen**
 when the API answers `401 login_required`; you paste the token once, and Redline sets an
-HttpOnly, SameSite=Strict cookie (`Secure` when the effective scheme is https) scoped to
+HttpOnly, SameSite=Strict cookie (`Secure` when the effective scheme is https, see
+`cookie_secure`) scoped to
 its own mount path, valid for `session_ttl_s` (12 hours by default). The token is compared
 as SHA-256 digests in constant time and is never logged or shown, not even on the Settings
 page. The page shell and its assets (and `badge.js`) are public because they hold no data;
@@ -79,7 +99,8 @@ A failed credential (login body, Bearer or Basic) counts against the client addr
 After `max_login_attempts` (10) within 300 seconds, further credential attempts from that
 address answer `429 too_many_requests` with `Retry-After`; a success resets it, and
 requests carrying a valid session cookie are never limited. The counters are in memory and
-per process. Behind a proxy without `trusted_proxies` all clients share one bucket.
+per process. Behind a proxy without `trusted_proxies` all clients share one bucket
+(`redline doctor` warns).
 
 !!! warning "Several worker processes need `secret_key`"
 
@@ -87,8 +108,16 @@ per process. Behind a proxy without `trusted_proxies` all clients share one buck
     random key, so a login only works on the worker that issued it and every restart logs
     everyone out. Set `secret_key` (16 characters or more, for example
     `REDLINE_SECRET_KEY`) for any multi-worker deployment. Rotating the key, the token or
-    a password revokes all sessions. Logout clears the cookie in that browser only (there
-    is no server-side session store).
+    a password revokes all sessions. Logout clears the cookie **and revokes that session**
+    in the process that answered: the cookie is refused there until it would have expired.
+    The revocation list lives in memory, so with several worker processes another worker
+    still accepts a copy of the cookie until it expires (or until you rotate
+    `secret_key`).
+
+`cookie_secure` decides the cookie's `Secure` attribute: `"auto"` (default) sets it when
+the request is https, which includes `X-Forwarded-Proto: https` from a peer in
+`trusted_proxies`; `true` always sets it (use it when TLS ends at a proxy you have not
+listed); `false` never does.
 
 A refused API call answers `401 login_required` (no credentials) or `401
 invalid_credentials` (wrong ones). Both carry a `WWW-Authenticate` header, unless the
@@ -129,7 +158,7 @@ and passing it implies `access = "framework"`:
     REDLINE = {"ACCESS": "framework", "PERMISSION": "myproject.redline.can_view"}
     ```
 
-    Default: `user.is_active and user.is_staff`. See [Django: access control](django.md#access-control).
+    Default: `user.is_active and user.is_superuser` (staff before 0.2). See [Django: access control](django.md#access-control).
 
 === "FastAPI"
 
@@ -246,8 +275,13 @@ UI reacts by showing its login screen. See [HTTP API](http-api.md#authentication
 
 ### Local development
 
-Nothing to do. The default `local` policy serves `http://localhost:8000/_redline/` to you
-and nobody else.
+Run the app in debug mode and the default `local` policy serves
+`http://localhost:8000/_redline/` to you and nobody else. Without debug mode (for example a
+plain `uvicorn main:app`), set it yourself:
+
+```python
+install(app, engine=engine, settings={"access": "local"})   # or REDLINE_ACCESS=local
+```
 
 ### Behind a VPN
 
@@ -295,7 +329,8 @@ trusted_proxies = ["10.0.0.0/8"]       # your load balancer's network, not "0.0.
 
 The proxy must set `X-Forwarded-For` and overwrite any value the client sent. Also set
 `X-Forwarded-Proto` and `X-Forwarded-Host` (or pass the original `Host`) so the CSRF
-`Origin` comparison sees the public host name and the login cookie gets `Secure`. Set
+`Origin` comparison sees the public host name and the login cookie gets `Secure` (or set
+`cookie_secure = true`). Set
 `secret_key` when you run several workers. Optionally, restrict `/_redline/` at the proxy to your office or VPN range, so the
 app's check is the second line of defence:
 
@@ -311,8 +346,8 @@ location /_redline/ {
 
 Do not expose Redline through a public Ingress. Options, safest first:
 
-1. **`kubectl port-forward`**. Reach it from your machine only, with the default `local`
-   policy:
+1. **`kubectl port-forward`**. Reach it from your machine only, with `access = "local"`
+   (set explicitly):
 
    ```bash
    kubectl port-forward deploy/shop 8000:8000

@@ -18,10 +18,13 @@ The helpers below are kept for explicit use as dependencies:
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Iterable
+import inspect
+from collections.abc import Awaitable, Callable, Iterable, Sequence
+from typing import Any
 from urllib.parse import urlsplit
 
-from fastapi import HTTPException, Request
+from fastapi import Depends, HTTPException, Request
+from fastapi.params import Depends as DependsParam
 
 from redline_core.access import (
     LOCAL_HOST_NAMES,
@@ -40,6 +43,7 @@ __all__ = [
     "local_only",
     "loopback_guard",
     "redline_guard",
+    "refuse_false",
     "request_info",
 ]
 
@@ -90,6 +94,20 @@ def is_local_host_header(header: str | None, extra: Iterable[str] = ()) -> bool:
     return is_local_host(header, extra)
 
 
+def scope_info(scope: Any) -> RequestInfo:
+    """A :class:`RequestInfo` from a raw ASGI scope (for the profile-flag check)."""
+    client = scope.get("client")
+    host = client[0] if client else None
+    return RequestInfo.build(
+        method=scope.get("method", "GET"),
+        path="",
+        client_ip="127.0.0.1" if host == _TESTCLIENT else host,
+        headers=scope.get("headers") or [],
+        scheme=scope.get("scheme", "http"),
+        mount=scope.get("root_path", "") or "/",
+    )
+
+
 def request_info(request: Request, mount: str) -> RequestInfo:
     """The framework-neutral description of a request under ``mount`` (e.g. ``/_redline``)."""
     root = request.scope.get("root_path", "") or ""
@@ -117,6 +135,36 @@ def redline_guard(access: Access, mount: str) -> Callable[[Request], Awaitable[N
 
     guard.__name__ = "redline_guard"
     return guard
+
+
+def refuse_false(dependencies: Sequence[Any]) -> Any:
+    """One dependency that runs the user's ``dependencies`` and refuses with 403 when any
+    of them *returns* ``False``.
+
+    Raising ``HTTPException`` is the normal way for a FastAPI dependency to refuse; this
+    catches the easy mistake of a check that returns a bool (``return user.is_admin``),
+    which FastAPI would otherwise ignore – letting everyone in. Only ``False`` itself
+    refuses: ``None`` (no return value) and other values pass. The dependencies are
+    resolved by FastAPI as usual (sub-dependencies, ``yield``, ``Security`` scopes).
+    """
+    params = [
+        inspect.Parameter(
+            f"_redline_dep_{i}",
+            inspect.Parameter.KEYWORD_ONLY,
+            default=d if isinstance(d, DependsParam) else Depends(d),
+        )
+        for i, d in enumerate(dependencies)
+    ]
+
+    async def check(**results: Any) -> None:
+        if any(value is False for value in results.values()):
+            raise RedlineHTTPError(
+                403, "forbidden", "Redline refused this request (a dependency returned False)."
+            )
+
+    check.__signature__ = inspect.Signature(params)  # type: ignore[attr-defined]
+    check.__name__ = "redline_dependencies"
+    return Depends(check)
 
 
 def loopback_guard(*, allowed_hosts: Iterable[str] = ()) -> Callable[[Request], Awaitable[None]]:

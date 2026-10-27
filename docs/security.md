@@ -138,43 +138,54 @@ sections below describe the defaults and the threats.
 
 === "Django"
 
-    **Default: active staff users.** The check is
-    `request.user.is_active and request.user.is_staff`.
+    **Default: active superusers** (staff before 0.2: staff status is often handed out for
+    one model's admin, and Redline shows every user's requests). The check is
+    `request.user.is_active and request.user.is_superuser`.
 
     - An **anonymous** visitor to the page is redirected to the admin login (or
       `LOGIN_URL`).
-    - A **signed-in non-staff** user gets `403`.
+    - A **signed-in non-superuser** (staff included) gets `403`.
     - The **API** answers `403` JSON `{"error": {"code": "forbidden", ...}}`.
 
-    Tighten it with `REDLINE["PERMISSION"]`, a callable `(request) -> bool` or a dotted
+    Change it with `REDLINE["PERMISSION"]`, a callable `(request) -> bool` or a dotted
     path to one:
 
     ```python
     # myproject/redline.py
-    def is_superuser(request):
+    def is_performance_team(request):
         user = request.user
-        return user.is_active and user.is_superuser
+        return user.is_active and user.groups.filter(name="performance").exists()
 
     # settings.py
-    REDLINE = {"PERMISSION": "myproject.redline.is_superuser"}
+    REDLINE = {"PERMISSION": "myproject.redline.is_performance_team"}
+    # the 0.1 rule: "django_redline.conf.staff_permission"
     ```
 
     The callable is wrapped: an exception in it denies access (it **fails closed**).
 
 === "FastAPI, Flask and Litestar"
 
-    **Default: `local`, loopback only.** Without `dependencies` (FastAPI), `permission`
-    (Flask) or `guards` (Litestar), a request is served only when
-    **both** hold, and a warning is logged at startup:
+    **Default: `local`, loopback only, and only in debug mode until you set `access`.**
+    While `access` is not set anywhere and the app is not in debug mode (`app.debug`),
+    every Redline URL answers `404` and an error is logged at startup: a reverse proxy on
+    the same host that adds no `X-Forwarded-For` would otherwise make every visitor
+    local. Set `access = "local"` to accept that risk on a development machine, or
+    `token`/`basic` on a server.
 
-    - the client is loopback (`127.0.0.0/8`, `::1`, unix sockets);
+    With `local` in force and without `dependencies` (FastAPI), `permission` (Flask) or
+    `guards` (Litestar), a request is served only when **both** hold, and a warning is
+    logged at startup:
+
+    - the client is loopback (`127.0.0.0/8`, `::1`; a unix-socket peer only with
+      `trust_unix_socket = true`);
     - the `Host` header names loopback: `localhost`, `*.localhost`, `127.x.x.x` or
       `[::1]`, with any port. This defeats DNS rebinding (below).
 
     A loopback peer that sends `X-Forwarded-For`, `X-Real-IP` or `Forwarded` without being
     in `trusted_proxies` is refused too (it is almost certainly a reverse proxy on the same
-    host). Pass your own hook (it implies `access = "framework"`), or set `access`, for
-    anything else. A refusal is `403` JSON `{"error": {"code": "forbidden", ...}}`. See
+    host). Pass your own hook (it implies `access = "framework"`; an empty list is no hook),
+    or set `access`, for anything else. A FastAPI dependency should raise
+    `HTTPException` to refuse; one that returns `False` is refused with `403` as well. A refusal is `403` JSON `{"error": {"code": "forbidden", ...}}`. See
     [FastAPI](fastapi.md#access-control), [Flask](flask.md#access-control) and
     [Litestar](litestar.md#access-control).
 
@@ -192,7 +203,22 @@ Reads are `GET`. Every other method (`DELETE` on traces and runs, `POST api/expl
   applies whatever access policy you chose. A request with no `Origin` is not a browser and
   passes.
 - **Token and basic access** use an HttpOnly, SameSite=Strict session cookie scoped to the
-  mount (`Secure` over https), so a cross-site request does not carry it.
+  mount (`Secure` over https, see `cookie_secure`), so a cross-site request does not carry
+  it. Logging out revokes the session in that process (in memory).
+- **Replay** sends the recorded request **without your cookies** unless you tick "Send my
+  cookies": the method, path and body were chosen by whoever made the recorded request,
+  and replaying them with your session would be a stored CSRF.
+
+### Forcing capture
+
+`?_redline=profile` and `X-Redline-Profile: 1` start the profiler and make Redline keep the
+trace whatever `sample_rate` says. They are honoured only in framework debug mode or when
+the request itself carries valid Redline credentials (a login cookie, a Bearer token or
+Basic credentials, a client the `local` policy lets in, or `access_check`); anyone else
+could make you profile and store their requests at will. With `access = "framework"` (a
+hook that only runs inside Redline's own routes) only debug mode honours them. The
+`production` preset turns profiling off. `X-Redline-Run` (the load tester's header) tags a
+trace only when that run exists in the store and is running.
 
 ### DNS rebinding
 
@@ -209,7 +235,7 @@ header, which still says `evil.example`.
 - **Django:** every Redline view calls `request.get_host()`, so `ALLOWED_HOSTS` is enforced
   on them even without `CommonMiddleware` (an unknown host gets Django's `400`). With
   `DEBUG = True` and an empty `ALLOWED_HOSTS`, Django only accepts `localhost`,
-  `127.0.0.1` and `[::1]`. The staff session cookie is not sent to the attacker's host name
+  `127.0.0.1` and `[::1]`. The admin session cookie is not sent to the attacker's host name
   either. Do not combine `ALLOWED_HOSTS = ["*"]` with a `PERMISSION` that returns `True`.
 
 ### Framing
@@ -273,16 +299,19 @@ In order of preference:
    check, restricted to a small group.
 3. Serve it only on an internal network or a VPN.
 
-Never expose it with `dependencies=[]`, a permission that returns `True`, or `access = "open"`
+Never expose it with a dependency or permission that lets everyone in, or `access = "open"`
 (which Redline refuses without `REDLINE_ALLOW_OPEN=1` and warns about on every request).
 
 ## Data on disk
 
-- The file is **not encrypted** and has the default permissions of the process that
-  created it (your umask). On a shared machine restrict the directory
-  (`chmod 700 .redline`).
-- **Never commit it.** Add `.redline/` to `.gitignore`. Check your Docker build context
-  and your backups too.
+- The file is **not encrypted**. On POSIX systems the store directory Redline creates is
+  `0700`, and the database, its `-wal`/`-shm` files and the load-run files (`runs/`) are
+  `0600`; an older, world-readable database is tightened when it is opened. A directory
+  that already existed (for example when `storage_path` is in your project root) keeps its
+  permissions. Nothing changes on Windows.
+- **Never commit it.** A store directory Redline creates (and `.redline/`) gets a
+  `.gitignore` containing `*`; an existing `.gitignore` is never overwritten. Check your
+  Docker build context and your backups too.
 - It is **not your application database**: separate file, separate lifetime. Deleting it is
   always safe (`manage.py redline_clear` or **Clear all** in the UI).
 - Traces live as long as `max_age_days` and `max_rows` say, **and no longer**: retention is
@@ -320,9 +349,10 @@ repository, and pin a tag or a commit in your lock file.
 
 | Attacker | Wants | Stopped by |
 |---|---|---|
-| Anonymous internet user | Read traces | Django: login and staff check. Others: the loopback default, a token or your own hook. **Not stopped** if you expose it open |
+| Anonymous internet user | Read traces | Django: login and superuser check. Others: `404` until `access` is set (outside debug mode), the loopback policy, a token or your own hook. **Not stopped** if you expose it open |
+| Anonymous internet user | Force profiling and storage of their requests | `X-Redline-Profile` / `?_redline=profile` honoured only in debug mode or with Redline credentials; `production` turns profiling off |
 | Logged-in non-admin user | Read other users' request data | `PERMISSION`, `dependencies`, `permission`, `guards` or a token |
-| A logged-in user who may start load runs | Make the server hit someone else, or overload it | Paths only (no host), `load_from_ui` off by default, `read_only`, the `load` switch |
+| A logged-in user who may start load runs | Make the server hit someone else (or another local service), or overload it | Paths only (no host); the target is the server's own listening port, never the `Host` header; `load_from_ui` off by default, `read_only`, the `load` switch |
 | Someone who guesses or sniffs a token | Read everything | A long random token, HTTPS, login rate limit, constant-time comparison. Use a VPN as well |
 | A malicious website the admin visits | Delete traces, trigger EXPLAIN | CSRF protections; `X-Frame-Options: DENY` |
 | A malicious website (DNS rebinding) | Read `GET` endpoints of a local instance | FastAPI: the `Host` check of the loopback default, or real auth. Django: `ALLOWED_HOSTS` (enforced on Redline's views) and the session cookie |

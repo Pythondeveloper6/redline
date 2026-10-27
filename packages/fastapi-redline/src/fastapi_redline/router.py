@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Streamin
 from fastapi.routing import APIRoute
 
 from redline_core import stream, ui
-from redline_core.api import RawResponse
+from redline_core.api import RawResponse, own_base_url
 from redline_core.storage import FilterError
 
 from ._security import RedlineHTTPError, request_info
@@ -136,7 +136,11 @@ def build_router(redline: Any, dependencies: Sequence[Any]) -> APIRouter:
             else:
                 params[key] = value
         body = await request.body() if request.method == "POST" else None
-        base_url = str(request.base_url).rstrip("/")  # scheme://host[:port] + root_path
+        # the server's own listening port, never the Host header (CONTRACT.md §18)
+        scope = request.scope
+        base_url = own_base_url(
+            scope.get("scheme"), scope.get("server"), scope.get("root_path", "")
+        )
         status, payload = await run_in_threadpool(
             redline.api.dispatch, request.method, f"api/{path}", params, body, base_url=base_url
         )

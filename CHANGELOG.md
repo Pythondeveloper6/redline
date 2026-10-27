@@ -93,7 +93,7 @@ store is migrated in place when 0.2 first opens it, and every new field has a de
 - Settings: `preset`, `access`, `access_check`, `allowed_ips` (widens `local`, restricts the
   other policies), `allowed_hosts`, `trusted_proxies`, `token`, `token_file`, `basic_users`,
   `secret_key`, `read_only`, `features`, `ui_enabled`, `mount_path`, `session_ttl_s`,
-  `max_login_attempts`, `base_url`.
+  `max_login_attempts`, `base_url`, `trust_unix_socket`, `cookie_secure`.
 - `redline config`, `redline doctor`, `redline hash-password`; `GET api/config`,
   `POST api/login` and `POST api/logout` (both answer `200` JSON), `X-Redline-UI: 1`; a
   login screen and a Settings page. Under `token` and `basic` the UI shell is public and
@@ -107,19 +107,44 @@ store is migrated in place when 0.2 first opens it, and every new field has a de
 ### Changed
 
 - **Behaviour changes to know about when upgrading from 0.1:**
+  - FastAPI, Flask and Litestar: when `access` is not set anywhere (code, `redline.toml`,
+    `REDLINE_ACCESS`) and the app is **not in debug mode** (`app.debug`), every Redline URL
+    answers `404` and an error is logged at startup. A same-host reverse proxy that adds no
+    `X-Forwarded-For` (`proxy_pass http://127.0.0.1:8000;`) used to make every visitor
+    "local". Set `access` explicitly: `"token"`/`"basic"` on a server, or `"local"` to
+    accept that risk on a development machine. In debug mode the `local` default still
+    applies.
+  - Under `local`, a unix-socket peer (no client address) is no longer local unless
+    `trust_unix_socket = true`.
+  - FastAPI `install(dependencies=[])` and Litestar `RedlinePlugin(guards=[])` are the same
+    as not passing them (the normal default rules), no longer `access = "framework"` with
+    nothing to check. A FastAPI dependency that *returns* `False` now refuses with `403`
+    (raising `HTTPException` remains the normal way).
+  - Django: the default `PERMISSION` is **active superusers** (was: active staff). Use
+    `"PERMISSION": "django_redline.conf.staff_permission"` for the old rule.
+  - `X-Redline-Profile: 1` / `?_redline=profile` are honoured only in debug mode or when
+    the request carries valid Redline credentials (login cookie, `Authorization` header,
+    or a client the `local` policy lets in); `framework` hooks cannot run there, so with
+    that policy only debug mode forces profiling. The `production` preset sets
+    `profile = "off"`.
+  - `X-Redline-Run` tags a trace only when the run exists in the store and is running (or
+    ended less than a minute ago); a run started with `redline load --no-store` (or into
+    another store) no longer tags the app's traces.
+  - UI-started load runs target the server's own listening port (ASGI `scope["server"]`,
+    WSGI `SERVER_PORT`) on `127.0.0.1`, never the `Host` header; without a known port (a
+    unix socket) the `base_url` setting is required.
+  - Replay sends no cookies unless "Send my cookies" is ticked.
   - `server_timing` now defaults to `"auto"` (on in debug mode only). It used to be on
     whenever recording was; set `server_timing = True` to keep the old behaviour.
   - `Sec-Fetch-Site: same-site` is refused on non-GET requests, like `cross-site`.
   - Under `local`, a loopback peer that sends `X-Forwarded-For`, `X-Real-IP` or `Forwarded`
     without being in `trusted_proxies` is refused (`403 forbidden`), so a reverse proxy on
     the same host no longer makes every visitor local.
-  - `POST api/runs` needs the `base_url` setting unless the request's host is loopback or in
-    `allowed_hosts` (`400 invalid_body` otherwise).
+  - `POST api/runs` needs the `base_url` setting unless the server's listening port is known
+    (`400 invalid_body` otherwise).
   - FastAPI's `install(prefix=)`, Flask's `url_prefix` and Litestar's `path` default to
     `None` (then `mount_path`, then `/_redline`).
   - Under `token` and `basic` the API needs credentials on every `api/` call.
-  - Starlette's `TestClient` addresses `http://testserver`, which is not a loopback name:
-    set `base_url` in tests that start a load run through the UI API.
   - `GET api/stream` events carry an `id` (the trace's `seq`) and the server closes the
     stream periodically.
   - Log capture uses a log-record factory and follows your loggers' levels; Redline never
@@ -148,6 +173,25 @@ store is migrated in place when 0.2 first opens it, and every new field has a de
   containers to a depth of four and through the free-text rule; secrets in a stored load
   run's config are masked.
 - `Server-Timing` is off outside debug mode by default, since it is a side channel.
+- An unset `access` no longer exposes Redline behind a same-host reverse proxy: outside
+  debug mode the UI and API answer `404` until `access` is set (FastAPI, Flask, Litestar);
+  unix-socket peers are not local unless `trust_unix_socket`. `redline doctor` warns.
+- Empty `dependencies=[]` / `guards=[]` no longer turn the gate into an unchecked
+  `framework` policy; a FastAPI dependency returning `False` refuses.
+- Anonymous clients can no longer force profiling and storage with `X-Redline-Profile` /
+  `?_redline=profile`, nor attach traffic to a load run with a made-up `X-Redline-Run`.
+- A load run started from the UI can no longer be aimed at another loopback service
+  through the `Host` header.
+- Replay no longer sends the viewer's cookies by default (a recorded request replayed with
+  the viewer's session would be a stored CSRF).
+- The store directory Redline creates is `0700` with a `.gitignore` of `*`; the database,
+  its `-wal`/`-shm` files and load-run files are `0600` (POSIX).
+- `cookie_secure` (`"auto"`, `true`, `false`): `"auto"` sets `Secure` for https, including
+  `X-Forwarded-Proto: https` from a `trusted_proxies` peer. Logging out revokes that session
+  cookie in the process that answered (in memory until it expires). `redline doctor` warns
+  when `trusted_proxies` is empty with `token`/`basic` (one shared login rate-limit bucket
+  behind a proxy).
+- `GET api/config` masks userinfo in `base_url`.
 
 ## 0.1.0a1
 

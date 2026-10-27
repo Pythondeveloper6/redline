@@ -16,6 +16,7 @@ Every Redline route runs :func:`redline_guard` first: the core access gate
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Iterable
+from typing import Any
 from urllib.parse import urlsplit
 
 from litestar.connection import ASGIConnection
@@ -83,6 +84,20 @@ def is_local_host_header(header: str | None, extra: Iterable[str] = ()) -> bool:
     """Whether a ``Host`` header names this machine's loopback interface (see
     :func:`redline_core.access.is_local_host`)."""
     return is_local_host(header, extra)
+
+
+def scope_info(scope: Any) -> RequestInfo:
+    """A :class:`RequestInfo` from a raw ASGI scope (for the profile-flag check)."""
+    client = scope.get("client")
+    host = client[0] if client else None
+    return RequestInfo.build(
+        method=scope.get("method", "GET"),
+        path="",
+        client_ip="127.0.0.1" if host == _TESTCLIENT else host,
+        headers=scope.get("headers") or [],
+        scheme=scope.get("scheme", "http"),
+        mount=scope.get("root_path", "") or "/",
+    )
 
 
 def request_info(connection: ASGIConnection, mount: str) -> RequestInfo:

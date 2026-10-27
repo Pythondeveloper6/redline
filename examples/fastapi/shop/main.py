@@ -15,7 +15,8 @@ install(
     app,
     engine=[async_engine, sync_engine],  # "default" = async, the sync one gets its own alias
     models=Base,
-    settings={"slow_query_ms": 40, "always_keep_slower_than_ms": 300},
-    # No `dependencies=`: the UI is reachable from localhost only.
+    settings={"slow_query_ms": 40, "always_keep_slower_than_ms": 300, "access": "local"},
+    # No `dependencies=`; access="local" (set explicitly – unset, Redline answers 404
+    # outside debug mode): the UI is reachable from localhost only.
 )
 instrument_httpx()  # outbound httpx calls become `http_out` spans

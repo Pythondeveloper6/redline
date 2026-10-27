@@ -568,6 +568,27 @@ def _doctor_checks(resolved: Any) -> list[tuple[str, str, str]]:
             )
         )
     elif policy == "local":
+        if not resolved.access_explicit:
+            checks.append(
+                (
+                    "warn",
+                    "access",
+                    "access is not set (in the config file or REDLINE_ACCESS): unless the "
+                    "application sets it in code, the UI and API answer 404 outside framework "
+                    "debug mode. Set access='token'/'basic', or access='local' to accept "
+                    "that a reverse proxy on this machine without X-Forwarded-For makes every "
+                    "visitor local",
+                )
+            )
+        if s.trust_unix_socket:
+            checks.append(
+                (
+                    "warn",
+                    "access",
+                    "trust_unix_socket: a reverse proxy reaching the app over a unix socket "
+                    "makes every visitor local",
+                )
+            )
         if s.preset == "dev":
             checks.append(("ok", "access", "local: loopback clients only"))
         else:
@@ -624,7 +645,17 @@ def _doctor_checks(resolved: Any) -> list[tuple[str, str, str]]:
                 "secret_key unset: UI logins are per worker process (set REDLINE_SECRET_KEY)",
             )
         )
-    if policy != "local" and not s.trusted_proxies and s.preset != "dev":
+    if policy in ("token", "basic") and not s.trusted_proxies:
+        checks.append(
+            (
+                "warn",
+                "proxies",
+                "trusted_proxies is empty: behind a reverse proxy all clients share its "
+                "address – one login rate-limit bucket for everyone, and no Secure cookie "
+                "from X-Forwarded-Proto",
+            )
+        )
+    elif policy != "local" and not s.trusted_proxies and s.preset != "dev":
         checks.append(
             (
                 "warn",

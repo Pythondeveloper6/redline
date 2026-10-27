@@ -43,7 +43,16 @@ test('replay of a same-origin path targets this origin', () => {
   const { url, init } = replay('/orders/1')
   assert.equal(url, ORIGIN + '/orders/1?q=1')
   assert.equal(init.headers.Authorization, 'secret')
-  assert.equal(init.credentials, 'same-origin')
+  assert.equal(init.credentials, 'omit')
+})
+
+test('replay sends no cookies unless the viewer opts in', () => {
+  const t = trace('/orders/1', { method: 'POST' })
+  const base = { profile: false, replayOf: 't1', origin: ORIGIN }
+  const secret = { 'header:authorization': 'secret' }
+  assert.equal(buildReplay(t, secret, new Set(), base).init.credentials, 'omit')
+  assert.equal(buildReplay(t, secret, new Set(), { ...base, sendCookies: false }).init.credentials, 'omit')
+  assert.equal(buildReplay(t, secret, new Set(), { ...base, sendCookies: true }).init.credentials, 'same-origin')
 })
 
 test('replay refuses paths that would leave the origin', () => {

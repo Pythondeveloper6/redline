@@ -161,7 +161,8 @@ uv sync --all-packages        # every package, editable, plus the dev tools
 
     # ... your routers ...
 
-    install(app, engine=engine)      # UI at /_redline/
+    # access="local": localhost only (unset, Redline answers 404 outside debug mode)
+    install(app, engine=engine, settings={"access": "local"})  # UI at /_redline/
     ```
 
     `engine` takes a sync `Engine`, an `AsyncEngine`, a list of them, or a dict of
@@ -186,7 +187,8 @@ uv sync --all-packages        # every package, editable, plus the dev tools
 
     # ... your blueprints ...
 
-    Redline(app, engine=engine)      # UI at /_redline/
+    # access="local": localhost only (unset, Redline answers 404 outside debug mode)
+    Redline(app, engine=engine, settings={"access": "local"})  # UI at /_redline/
     ```
 
     With **Flask-SQLAlchemy** omit the engine: `db = SQLAlchemy(app); Redline(app)` finds
@@ -206,7 +208,8 @@ uv sync --all-packages        # every package, editable, plus the dev tools
 
     app = Litestar(
         route_handlers=[...],
-        plugins=[RedlinePlugin(engine=engine)],   # UI at /_redline/
+        # access="local": localhost only (unset, Redline answers 404 outside debug mode)
+        plugins=[RedlinePlugin(engine=engine, settings={"access": "local"})],  # UI at /_redline/
     )
     ```
 
@@ -222,8 +225,8 @@ Start your server, make a few requests, then open the UI.
     python manage.py runserver
     ```
 
-    Open `http://127.0.0.1:8000/redline/` while signed in as a **staff** user. An
-    anonymous visitor is redirected to the admin login; a signed-in non-staff user gets a
+    Open `http://127.0.0.1:8000/redline/` while signed in as a **superuser**. An
+    anonymous visitor is redirected to the admin login; a signed-in non-superuser gets a
     403. See [Django: access control](django.md#access-control).
 
 === "FastAPI"

@@ -150,7 +150,11 @@ def _fsa(tmp_path, *, before_db: bool = True, **kw):
     audit = f"sqlite:///{tmp_path / 'audit.db'}"
     app = fsa_app.create_app(uri, audit)
     app.test_client_class = BufferedClient
-    cfg = {"storage_path": str(tmp_path / "redline.db"), "project_root": str(ROOT)}
+    cfg = {
+        "storage_path": str(tmp_path / "redline.db"),
+        "project_root": str(ROOT),
+        "access": "local",  # set explicitly: unset answers 404 outside debug mode
+    }
     redline = Redline(settings=cfg, **kw)
     if before_db:  # Redline first: the engines do not exist yet
         redline.init_app(app)

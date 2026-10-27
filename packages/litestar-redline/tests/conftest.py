@@ -61,16 +61,34 @@ class Env:
         return self.store.get(items[index]["id"])
 
 
+async def allow_all(connection, handler) -> None:
+    """A guard that lets every request in: the tests' default ``framework`` hook (an empty
+    ``guards=[]`` is no hook since 0.2, and no longer opens Redline)."""
+
+
+def _access_given(cfg: dict) -> bool:
+    """Whether a test chose the access policy itself (settings, preset or environment)."""
+    import os
+
+    keys = {k.lower() for k in cfg}
+    env = ("REDLINE_ACCESS", "REDLINE_PRESET", "REDLINE_CONFIG")
+    return bool({"access", "preset"} & keys) or any(e in os.environ for e in env)
+
+
 @pytest.fixture
 def make_env(tmp_path):
     created = []
 
-    def _make(*, settings: dict | None = None, guards=(), engine_mode="both", **kw):
+    def _make(*, settings: dict | None = None, guards=(allow_all,), engine_mode="both", **kw):
         cfg = {
             "storage_path": str(tmp_path / f"redline{len(created)}.db"),
             "project_root": str(ROOT),
             **(settings or {}),
         }
+        # Set explicitly, as an application must: an unset `access` answers 404 outside
+        # debug mode (CONTRACT.md §18).
+        if not guards and not _access_given(cfg):
+            cfg["access"] = "local"
         sync_engine = create_engine(f"sqlite:///{tmp_path / 'sync.db'}")
         async_engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'sync.db'}")
         Base.metadata.create_all(sync_engine)

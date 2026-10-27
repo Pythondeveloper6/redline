@@ -22,6 +22,7 @@ from redline_core.storage import SQLiteStore, Store
 
 from ._hooks import install_hooks
 from ._middleware import RedlineMiddleware
+from ._security import environ_info
 from ._sqlalchemy import (
     EngineLike,
     alias_for,
@@ -66,7 +67,11 @@ class _Runtime:
         self.suggester = suggester
         self.permission = permission
         self.config = config
-        self.access = Access(settings)
+        self.access = Access(
+            settings,
+            access_explicit=config.access_explicit if config is not None else True,
+            debug=lambda: bool(app.debug),
+        )
         self.engines: dict[str, EngineLike] = {}
         self._discover = not explicit_engines
         self._lock = threading.Lock()
@@ -158,8 +163,9 @@ class Redline:
         ``callable(request) -> bool`` protecting the UI and API, e.g.
         ``lambda request: current_user.is_admin``; giving it implies ``access="framework"``
         unless the ``access`` setting is set explicitly. When omitted, the ``access``
-        setting decides (default ``local``: loopback clients addressing
-        ``localhost``/``127.0.0.1``/``[::1]``, with a warning logged). Raise
+        setting decides; when that is not set either, Redline answers 404 unless
+        ``app.debug`` is on (then ``local``: loopback clients addressing
+        ``localhost``/``127.0.0.1``/``[::1]``). Raise
         ``werkzeug.exceptions.HTTPException`` (``abort(401)``) to answer with another
         status; it is rendered in the API's error shape.
     ``store``
@@ -251,13 +257,6 @@ class Redline:
         recorder = configure(cfg, store, [suggester])
 
         permission = self.permission
-        if cfg.access == "local":
-            logger.warning(
-                "Redline is mounted at %s with no permission check (access='local'): only "
-                "loopback clients are allowed. Set access='token' or 'basic', or pass "
-                "Redline(app, permission=...) before exposing it.",
-                prefix,
-            )
         runtime = _Runtime(
             app=app,
             prefix=prefix,
@@ -271,6 +270,7 @@ class Redline:
         )
         for alias, eng in name_engines(self._engine).items():
             runtime.add_engine(eng, alias)
+        runtime.access.log_startup(prefix, "pass Redline(app, permission=...)")
         app.extensions["redline"] = runtime
         self.app = app
 
@@ -283,6 +283,9 @@ class Redline:
                 prefix,
                 badge=runtime.badge_on,
                 debug=lambda: bool(app.debug),
+                force_ok=lambda environ: runtime.access.may_force(
+                    environ_info(environ), debug=bool(app.debug)
+                ),
             )
             install_hooks(app, runtime.discover_engines)
             runtime.discover_engines()

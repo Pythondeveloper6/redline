@@ -136,7 +136,7 @@ See [Flamegraphs](flamegraphs.md). Needs `redline-core[profile]`.
 
 | Setting | Type | Default | Description |
 |---|---|---|---|
-| `profile` | `"off"`, `"opt_in"`, `"sampled"`, `"all"` | `"opt_in"` | Who gets profiled. Anything else is an error |
+| `profile` | `"off"`, `"opt_in"`, `"sampled"`, `"all"` | `"opt_in"` (`production` preset: `"off"`) | Who gets profiled. Anything else is an error. In `opt_in`/`sampled`, `?_redline=profile` / `X-Redline-Profile: 1` count only in framework debug mode or from a request with valid Redline credentials |
 | `profile_sample_rate` | `float`, 0 to 1 | `0.0` | In `"sampled"` mode, the fraction of untriggered requests to profile |
 
 ## EXPLAIN
@@ -178,7 +178,9 @@ Who may open the UI and API, and how. The policies, recipes and reasoning are on
 
 | Setting | Type | Default | Description |
 |---|---|---|---|
-| `access` | `"local"`, `"token"`, `"basic"`, `"framework"`, `"custom"` or `"open"` | `"local"` (Django: `"framework"`, staff users) | The access policy. `"open"` is refused (`403 open_refused`) unless `REDLINE_ALLOW_OPEN=1` is set too. A native hook (FastAPI `dependencies=`, Flask `permission=`, Litestar `guards=`) implies `"framework"` when you did not set `access` yourself |
+| `access` | `"local"`, `"token"`, `"basic"`, `"framework"`, `"custom"` or `"open"` | `"local"` (Django: `"framework"`, superusers) | The access policy. `"open"` is refused (`403 open_refused`) unless `REDLINE_ALLOW_OPEN=1` is set too. A native hook (non-empty FastAPI `dependencies=` / Litestar `guards=`, a Flask `permission=`) implies `"framework"` when you did not set `access` yourself. **Not set at all** (FastAPI, Flask, Litestar): `local` applies only in framework debug mode; otherwise every Redline URL answers `404` |
+| `trust_unix_socket` | `bool` | `False` | Under `local`, count a unix-socket peer (no client address) as loopback. Off because a same-host reverse proxy is the usual such peer |
+| `cookie_secure` | `"auto"`, `True` or `False` | `"auto"` | `Secure` attribute of the login cookie. `"auto"`: when the request is https (`X-Forwarded-Proto` counts only from `trusted_proxies`) |
 | `access_check` | callable `(request_info) -> bool`, or a dotted path (`pkg.mod:fn` or `pkg.mod.fn`) | `None` | For `access = "custom"`. An exception counts as a refusal and is logged |
 | `allowed_ips` | list of IPs or CIDRs (v4 or v6) | `[]` | With `local`: clients allowed **besides** loopback. With every other policy: when non-empty the client **must also** be in it (loopback is not implicit) |
 | `allowed_hosts` | list of `str` | `[]` | Extra `Host` names accepted by `local`'s DNS-rebinding check (ports ignored). Also accepted as targets of UI-started load runs |
@@ -193,7 +195,7 @@ Who may open the UI and API, and how. The policies, recipes and reasoning are on
 | `mount_path` | `str` | `None` | Where FastAPI (`prefix`), Flask (`url_prefix`) and Litestar (`path`) serve the UI when that argument is not given; those arguments now default to `None`, and the final default is `/_redline`. Django ignores it (the URLconf decides). Also the default for `redline load --ui-url` |
 | `session_ttl_s` | `int`, 1 or more | `43200` | Login cookie lifetime in seconds |
 | `max_login_attempts` | `int`, 1 or more | `10` | Failed credential attempts per client IP per 300 seconds before `429 too_many_requests` |
-| `base_url` | http(s) URL | `None` | Target of load runs started from the UI. Unset: the URL the request addressed, accepted only for a loopback host or one in `allowed_hosts` |
+| `base_url` | http(s) URL | `None` | Target of load runs started from the UI. Unset: `127.0.0.1` on the port the server listens on (ASGI `scope["server"]`, WSGI `SERVER_PORT`), never the `Host` header; required when that is unknown (a unix socket). `GET api/config` masks userinfo in it |
 
 ## Presets
 
@@ -231,7 +233,7 @@ framework's own settings. `redline config` prints the result and the layer of ev
 
 | Setting | Type | Default | Description |
 |---|---|---|---|
-| `PERMISSION` | callable `(request) -> bool` or a dotted path to one | active staff users (`user.is_active and user.is_staff`). Used when `access = "framework"` | Who may open the UI and the API. See [Django: access control](django.md#access-control) |
+| `PERMISSION` | callable `(request) -> bool` or a dotted path to one | active superusers (`user.is_active and user.is_superuser`; staff before 0.2, kept as `django_redline.conf.staff_permission`). Used when `access = "framework"` | Who may open the UI and the API. See [Django: access control](django.md#access-control) |
 | `STORE` | a `Store` instance, a callable (or class) taking the core `Settings` and returning one, or a dotted path to either | `None` (`SQLiteStore.from_settings(settings)`) | Where traces are kept: Django's counterpart of FastAPI's `install(store=...)`. See [Extending: the Store protocol](extending.md#the-store-protocol) |
 
 `PERMISSION` and `STORE` are read by the Django adapter before the rest is handed to the
@@ -248,7 +250,7 @@ Their counterparts are FastAPI's `dependencies` and `store=`, Flask's `permissio
 | `storage_path` | `<BASE_DIR>/.redline/redline.db` | `.redline/redline.db` (working directory) | same as FastAPI | same as FastAPI |
 | `project_root` | `BASE_DIR` | working directory | working directory | working directory |
 | Mount prefix | wherever you `include()` the URLs (e.g. `/redline/`) | `prefix`, else `mount_path`, else `/_redline` | `url_prefix`, else `mount_path`, else `/_redline` | `path`, else `mount_path`, else `/_redline` |
-| Access | `PERMISSION`, default staff (`framework`) | `local` (loopback only); `dependencies=` implies `framework` | `local`; `permission=` implies `framework` | `local`; `guards=` implies `framework` |
+| Access | `PERMISSION`, default superusers (`framework`) | `local` (loopback only, debug mode only while `access` is unset); `dependencies=` implies `framework` | `local` (same); `permission=` implies `framework` | `local` (same); `guards=` implies `framework` |
 
 ## A complete example
 

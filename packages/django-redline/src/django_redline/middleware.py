@@ -36,6 +36,7 @@ from django.http import HttpRequest, HttpResponse, HttpResponseBase
 from django.urls import NoReverseMatch, reverse
 
 from redline_core import ui
+from redline_core.access import RequestInfo
 from redline_core.blocking import track_request
 from redline_core.recorder import SpanContext, TraceBuilder
 from redline_core.sampling import profile_requested
@@ -70,9 +71,24 @@ def _reset_mount(**kwargs: Any) -> None:
 
 
 def _profile_requested(request: HttpRequest) -> bool:
-    return profile_requested(
+    """``?_redline=profile`` / ``X-Redline-Profile: 1`` – honoured only with ``DEBUG`` or
+    when the request would be let into Redline's API without ``PERMISSION`` (a token,
+    Basic credentials, a login cookie…): anyone else could force profiling and storage."""
+    if not profile_requested(
         request.META.get("QUERY_STRING", ""), request.headers.get("X-Redline-Profile")
+    ):
+        return False
+    if settings.DEBUG:
+        return True
+    info = RequestInfo.build(
+        method="GET",
+        path="",
+        client_ip=request.META.get("REMOTE_ADDR"),
+        headers=list(request.headers.items()),
+        host=request.META.get("HTTP_HOST"),
+        scheme=request.scheme or "http",
     )
+    return get_runtime().access.may_force(info)
 
 
 class RedlineMiddleware:

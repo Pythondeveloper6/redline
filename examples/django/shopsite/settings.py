@@ -66,7 +66,7 @@ STATIC_URL = "static/"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 # Redline: everything has a sensible default. Traces go to BASE_DIR/.redline/redline.db
-# and the UI is at /redline/ (staff only – log in as admin/admin after `seed`).
+# and the UI is at /redline/ (superusers only – log in as admin/admin after `seed`).
 # SLOW_QUERY_MS is lowered from 100 so the 400k-row review scan counts as slow on a laptop.
 REDLINE = {
     "SLOW_QUERY_MS": 25,

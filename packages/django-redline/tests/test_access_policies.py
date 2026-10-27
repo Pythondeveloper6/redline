@@ -32,8 +32,11 @@ def basic(user="ann", password="pw"):
     return {"HTTP_AUTHORIZATION": f"Basic {raw}"}
 
 
-def test_framework_staff_is_the_default(redline, staff_client, db):
+def test_framework_superuser_is_the_default(redline, staff_client, staff_only, db):
     rt = redline()
+    plain_staff = Client()
+    plain_staff.force_login(staff_only)  # L4: is_staff alone no longer gets in
+    assert plain_staff.get("/redline/api/meta").json()["error"]["code"] == "forbidden"
     assert rt.access.policy == "framework"
     assert rt.config.sources["access"] == "adapter"
     client = Client()
@@ -46,7 +49,7 @@ def test_framework_staff_is_the_default(redline, staff_client, db):
         "read_only": False,
         "preset": "dev",
     }
-    # the preset does not replace the staff check (a native hook counts as explicit-ish)
+    # the preset does not replace the permission check (a native hook counts as explicit-ish)
     rt = redline(PRESET="production", TOKEN=TOKEN)
     assert rt.access.policy == "framework" and rt.settings.read_only is True
 

@@ -183,6 +183,7 @@ class RedlineMiddleware:
         prefix: str = "/_redline",
         badge: Callable[[], bool] | None = None,
         debug: Callable[[], bool] | None = None,
+        force_ok: Callable[[dict[str, Any]], bool] | None = None,
     ) -> None:
         self.wsgi_app = wsgi_app
         self.recorder = recorder
@@ -190,6 +191,9 @@ class RedlineMiddleware:
         self.badge = badge
         #: ``app.debug`` right now (``server_timing="auto"``).
         self.debug = debug or (lambda: False)
+        #: ``force_ok(environ)``: may this request force profiling? Only called when
+        #: ``X-Redline-Profile`` / ``?_redline=profile`` is present.
+        self.force_ok = force_ok or (lambda environ: self.debug())
 
     def __call__(self, environ: dict[str, Any], start_response: Any) -> Any:
         recorder = self.recorder
@@ -215,7 +219,10 @@ class RedlineMiddleware:
             headers=headers,
             query=query,
             client=environ.get("REMOTE_ADDR") or None,
-            profile_requested=profile_requested(query, headers.get("X-Redline-Profile")),
+            profile_requested=(
+                profile_requested(query, headers.get("X-Redline-Profile"))
+                and self.force_ok(environ)
+            ),
         )
         limit = settings.max_body_bytes
         req_type = headers.get("Content-Type")
