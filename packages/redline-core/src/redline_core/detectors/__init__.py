@@ -19,3 +19,7 @@ Detect = Callable[[Trace, Settings], list[Issue]]
 
 #: Detector functions, in run order. Filled in by the detector modules' owners.
 REGISTRY: list[Detect] = []
+
+from . import external, results, serializers  # noqa: E402
+
+REGISTRY.extend([results.detect, serializers.detect, external.detect])
