@@ -384,7 +384,12 @@ _MANY_OPS = ("set_many", "delete_many")
 
 
 def _key_text(key: Any) -> str:
+    """The key as recorded: session ids and secret-looking parts masked
+    (:meth:`~redline_core.redact.Redactor.cache_key`), then capped at 200 characters."""
     text = key if isinstance(key, str) else repr(key)
+    builder = current()
+    if builder is not None:
+        text = builder.recorder.redactor.cache_key(text)
     return text[:200]
 
 
