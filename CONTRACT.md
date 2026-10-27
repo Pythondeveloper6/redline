@@ -964,3 +964,159 @@ badge.js) sends `X-Redline-UI: 1`. Replay uses `credentials: "omit"` unless the 
 overwritten; a pre-existing directory's mode is never changed). The database is pre-created `0600` (SQLite gives
 `-wal`/`-shm` the database's mode) and an existing world-readable database, `-wal` or `-shm` is tightened to `0600`
 when opened. `runs/` is `0700`; scenario, log, pid and stop files are `0600`. No-op on Windows.
+
+## 19. Refactor check (`redline_core.check`, v0.3; extra `redline-core[load]` = httpx; CLI `redline check`)
+
+Purpose: prove a refactor is safe and show what it gained. Pick a set of **read-only** endpoints, record a
+**baseline** against the old code, run the same requests against the new code, and get a per-endpoint report
+of **performance** changes and **response** changes, plus an overall summary. Usable from the UI and the CLI;
+the CLI's exit code makes it a CI gate.
+
+**Non-goals (v0.3):** write endpoints (anything but `GET`/`HEAD`/`OPTIONS` is refused with a clear message),
+load/concurrency (that is `redline load`), comparing two *live* servers side by side, automatic code checkout.
+
+### 19.1 Suite (what to run)
+
+A suite is TOML (3.11+) or JSON, or stored in the Redline store when created in the UI (exportable to TOML):
+
+```toml
+name = "orders refactor"
+base_url = "http://127.0.0.1:8000"     # optional; CLI --base-url wins
+headers = { Authorization = "Bearer ${env:API_TOKEN}" }   # ${env:NAME} expanded at run time, never stored
+timeout_s = 10
+repeat = 20          # timed calls per request (perf); 1..1000
+warmup = 3           # untimed calls first; 0..100
+[thresholds]         # a request is "slower" only if BOTH hold and the change is significant (19.4)
+slower_pct = 10      # median slower by more than this %
+slower_ms = 2        # ... and by more than this many ms
+max_query_increase = 0   # more queries than baseline -> "slower" (queries) regardless of time
+
+[[requests]]
+name = "list orders"             # unique within the suite; default "<METHOD> <path>"
+method = "GET"                   # GET | HEAD | OPTIONS only
+path = "/orders?page=1"          # path + query, same origin as base_url (absolute URLs refused)
+headers = {}                     # merged over suite headers
+perf = true                      # default true
+response = true                  # default true
+ignore = ["data[*].created_at", "meta.request_id"]   # JSON paths excluded from the response diff
+ignore_headers = []              # response headers to compare: content-type always; add names here to drop
+expect_status = 200              # optional
+```
+
+- JSON path syntax (ignore rules and diff output): dotted keys, `[n]` indexes, `[*]` any index, `*` any key;
+  keys with dots or brackets are written `["a.b"]`.
+- Validation errors are reported with the suite file and request name; unknown keys are errors.
+- Suites are generated from what Redline has seen: `redline check init --from-traces [--store PATH]
+  [--route PATTERN ...] [--limit N]` writes a suite of the read-only endpoints (one concrete recorded path per
+  route, most recent; redacted header values are never copied; `${env:...}` placeholders are suggested for
+  `Authorization`/`Cookie` when the recorded request had them). The UI builder does the same (19.6).
+
+### 19.2 Runner
+
+- Sequential, single connection (httpx, keep-alive), no concurrency: the goal is a stable comparison, not
+  load. Per request: `warmup` untimed calls, then `repeat` timed calls. Requests are **interleaved round-robin**
+  across the suite (r1,r2,…,rN, r1,r2,…) so drift (CPU throttling, cache warm-up) spreads evenly.
+- Every call carries `X-Redline-Check: <check_run_id>;req=<index>;n=<call#>`. The store keeps these tags only
+  when that check run exists in it and is `running` or ended < 60 s ago (same rule and writer-thread cache as
+  `X-Redline-Run`, §13), so app-side traces of the check are tagged `check_run_id`, `check_req`, `check_n`.
+- Client-side per call: status, wall time (ms, `perf_counter`), response size, and for **two** of the timed calls
+  (first and last) the full response (status, content-type, headers subset, body ≤ 1 MiB; larger bodies are
+  compared by SHA-256 and size only).
+- Server-side per request (when the store is reachable – CLI `--store`, or always for UI runs): from the tagged
+  traces, median server duration, query count (median and max), query time, the set of SQL fingerprints with
+  counts, and the issues (kind + fingerprint/title) seen. If no tagged traces arrive (app not instrumented,
+  different store, sampled out — check calls are always kept: the recorder forces keep for a valid check tag),
+  server-side metrics are `null` and the report says so; client-side metrics still work.
+- Errors: connection errors/timeouts count as failed calls (status `null`); a request with ≥ 50 % failed calls
+  is `broken` in both baseline and compare.
+
+### 19.3 Baseline
+
+- `redline check record SUITE [--base-url URL] [--store PATH] [--out FILE] [--label TEXT]` runs the suite and
+  writes a baseline: JSON `{format: "redline-check-baseline", version: 1, suite (resolved, redacted like
+  §13 run configs — `${env:..}` stay as placeholders), label, git: {sha, branch, dirty} (best effort),
+  release, created_at, requests: [{name, method, path, perf: {samples_ms: [...], median, p95, mean, stdev,
+  failed}, server: {...19.2...}|null, response: {status, content_type, headers, body_kind: "json"|"text"|
+  "hash", body|sha256, size}, volatile: [paths]}]}`. Default `--out`: `<suite stem>.baseline.json` next to the
+  suite. Baseline bodies go through the redactor (`Redactor.body`/`text`) before writing.
+- **Volatile fields:** during `record`, the two captured responses of each request are diffed; every JSON path
+  that differs (and, for text bodies, every differing line) is recorded in `volatile` and excluded from later
+  comparisons, together with the user's `ignore` rules. The report lists them ("ignored: changes on every call").
+- Baselines are also stored (store table `check_runs`, `kind="baseline"`) when a store is available, so the UI can
+  compare against them.
+
+### 19.4 Compare and verdicts
+
+`redline check compare SUITE [--baseline FILE | --baseline-id ID] [--base-url URL] [--store PATH]
+[--json OUT] [--markdown OUT] [--junit OUT] [--fail-on slower,changed,broken] [--slower-pct X] [--slower-ms Y]`
+runs the suite again and compares with the baseline. `redline check run SUITE` = record if no baseline file
+exists, else compare.
+
+Per request:
+- **Performance verdict** (`perf=true`): `faster` | `slower` | `same` | `noisy` | `n/a`.
+  - Change = after median vs before median (ms and %). Significance: two-sided Mann–Whitney U on the
+    timed samples, p < 0.01 (normal approximation with tie correction; pure Python). `slower` requires
+    significance AND both thresholds; `faster` requires significance AND the mirrored thresholds; otherwise
+    `same`. `noisy` when either side's coefficient of variation > 0.5 (advise more `repeat`).
+  - Query check (server-side available): `after.queries_median > before.queries_median + max_query_increase`
+    makes the verdict `slower` with reason `queries` even if time is `same`. New N+1/duplicate issues are listed
+    as `new_issues`; disappeared ones as `fixed_issues`.
+- **Response verdict** (`response=true`): `same` | `changed` | `broken` | `n/a`.
+  - `broken`: status class changed to 4xx/5xx from 2xx/3xx, or `expect_status` not met, or ≥ 50 % failed calls.
+  - `changed`: status changed otherwise, content-type changed, or a body difference outside ignored/volatile
+    paths. JSON diff = list of `{path, kind: "added"|"removed"|"changed"|"type", before, after}` (values
+    truncated to 200 chars, at most 50 entries per request + a count); text diff = unified diff (≤ 200 lines).
+  - Arrays are compared index by index (no reordering heuristics in v0.3).
+- **Summary:** counts per verdict; **overall speed change** = geometric mean of after/before median ratios over
+  requests with `perf` and no failures, shown as a % (negative = faster), plus total query change; the biggest
+  wins and regressions (top 5 each).
+- **Exit code:** 0 if nothing matches `--fail-on` (default `slower,changed,broken`), 1 otherwise, 2 for usage/
+  suite errors, 3 if the app could not be reached at all.
+- **Outputs:** terminal table (colour when a TTY), `--json` (full report, schema below), `--markdown` (PR
+  comment: summary line, table, collapsible diffs), `--junit` (one testcase per request; failures for verdicts in
+  `--fail-on`).
+- Report JSON: `{format: "redline-check-report", version: 1, suite, baseline: {id|file, label, git, created_at},
+  run: {id, git, created_at, base_url}, summary: {...}, requests: [{name, method, path, perf: {verdict, before,
+  after, change_ms, change_pct, p_value, reason}, server: {before, after, queries_change, new_issues,
+  fixed_issues, new_sql, gone_sql}, response: {verdict, status: [before, after], diff: [...], text_diff,
+  ignored: [...]}}]}`.
+
+### 19.5 Storage and API (schema version 4, additive)
+
+- Tables: `check_suites(id, name, suite_json, created_at, updated_at)`,
+  `check_runs(id, suite_id NULL, kind "baseline"|"compare", baseline_id NULL, status "running"|"done"|"failed"|
+  "stopped", label, git_json, created_at, finished_at, summary_json, error)`,
+  `check_results(run_id, idx, name, data_json)` (per-request baseline data or comparison result).
+  Retention: keep the 50 most recent runs per suite; baselines referenced by a kept compare run are kept.
+- API (§5 rules, access gate §18; feature switch `checks`, default on; every non-GET refused under
+  `read_only`; starting runs from the UI also requires `load_from_ui`-style opt-in `checks_from_ui`, default
+  **true in debug mode, false otherwise**):
+  - `GET api/checks/suites` → `{items: [{id, name, requests, updated_at, last_baseline, last_compare}]}`;
+    `POST api/checks/suites` `{name, suite}` → created; `GET|PUT|DELETE api/checks/suites/{id}`;
+    `GET api/checks/suites/{id}/export` → TOML text (`text/plain`).
+  - `POST api/checks/suites/draft` `{routes?: [route], limit?}` → a suite object built from seen traffic
+    (19.1 rules) for the builder UI, not saved.
+  - `POST api/checks/runs` `{suite_id, kind: "baseline"|"compare", baseline_id?, label?}` → 202 `{id}`;
+    runs in a background process like UI load runs (§13 process control, `runs/<id>.*` files, own target =
+    `own_base_url()`, caps: ≤ 200 requests × `repeat` ≤ 5000 calls, ≤ 15 min).
+  - `GET api/checks/runs?suite_id=` → list; `GET api/checks/runs/{id}` → run + results (report JSON for
+    compares); `POST api/checks/runs/{id}/stop`; `DELETE api/checks/runs/{id}`.
+  - `POST api/checks/baselines/import` (baseline JSON body, ≤ 10 MiB) → stored baseline id, so a CI-produced
+    baseline can be viewed in the UI.
+
+### 19.6 UI (`#/checks`)
+
+- Nav: "Checks" in the More menu (hidden when the `checks` feature is off).
+- **Suites list**: name, requests, last baseline (label, git sha, age), last compare verdict badges; New suite.
+- **Builder**: pick endpoints from the routes Redline has seen (search, method filter: read-only only, with a
+  sample path per route and its last p50/queries), or add a request by hand; per request toggles Perf/Response,
+  ignore paths (with suggestions from volatile fields once a baseline exists), headers (values with `${env:…}`
+  hint; secret headers never pre-filled). Suite settings: repeat, warmup, thresholds. Save / Export TOML.
+- **Suite page**: Record baseline / Compare buttons (disabled with an explanation when not allowed), runs
+  history, baseline picker.
+- **Report page** (`#/checks/runs/{id}`): summary cards (passed / changed / broken / faster / slower, overall
+  speed change %, query change), sortable table (request, perf verdict, before → after median, Δ%, queries
+  before → after, response verdict); row expand: latency distribution of both runs (small box/strip plot),
+  response diff (JSON path list with before/after, or unified text diff), new/fixed issues and SQL with links to
+  sample traces, ignored fields. Copy as Markdown.
+- Live progress while a run is `running` (poll `GET api/checks/runs/{id}` every second).

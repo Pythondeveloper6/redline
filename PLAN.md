@@ -140,3 +140,14 @@ Scope agreed with the owner on 2026-10-27: every analysis/UX feature from the fo
 | 3 | UI pages: History + Load · UI pages: Database/Cache/External/logs/exception/live · litestar-redline + Django Ninja · static N+1 scan |
 | 3b | **configuration and access control** (contract §18: presets dev/staging/production, `redline.toml` + `REDLINE_*` env, one access policy for all adapters — local/token/basic/framework/custom, IP allow-lists, trusted proxies, read-only mode, per-feature switches, login screen, Settings page, `redline config` / `doctor` / `hash-password`) (Opus) |
 | 4 | docs · examples + CI matrix · security/code review (Opus) · browser verification, version 0.2.0a1 |
+
+
+## v0.3 build (branch `release/v0.3`)
+
+| Wave | Work | Owner model |
+|---|---|---|
+| 1 | Check engine: suite parsing, runner, stats, volatile detection, diff, baseline/report formats, CLI `redline check` (CONTRACT §19.1–19.4) | opus |
+| 1 | Storage schema v4 + check tags in the writer + API routes + UI-launched check runs (§19.2 tags, §19.5) | opus |
+| 1 | UI Checks pages against the §19.5 API with mocks (§19.6) | sonnet |
+| 2 | Docs page, CLI reference, examples' suites, CHANGELOG; browser E2E on the examples | sonnet |
+| later | `redline analyze`: static analysis of Python code for DB/logic bottlenecks (roadmap) | – |
