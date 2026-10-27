@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { api } from '../api'
+import { useLiveStream } from '../lib/live'
 import { ago, ms } from '../lib/format'
 import { isTyping, useDebounced, useNow } from '../lib/hooks'
 import type { Page, TraceFilters, TraceSummary } from '../types'
@@ -53,7 +54,11 @@ export default function Requests() {
   const q = useDebounced(qInput)
   const filters = useMemo<TraceFilters>(() => ({ ...f, q: q || undefined, replay_of: replayOf, route: routeFilter }), [f, q, replayOf, routeFilter])
   const hasFilters = Object.values(filters).some(Boolean)
-  const [paused, setPaused] = useState(false)
+  const [live, setLive] = useState(true)
+  const paused = !live
+  const [fresh, setFresh] = useState<TraceSummary[]>([])
+  const [flash, setFlash] = useState<Set<string>>(new Set())
+  const [sse, setSse] = useState(false)
   const [head, setHead] = useState<Page | null>(null)
   const [extra, setExtra] = useState<TraceSummary[]>([])
   const [extraCursor, setExtraCursor] = useState<string | null | undefined>(undefined)
@@ -68,19 +73,31 @@ export default function Requests() {
     try { const p = await api.traces(filters); setHead(p); setErr(null) } catch (e) { setErr(e as Error) }
   }, [filters])
 
-  useEffect(() => { api.meta().then(m => setFw(m.framework), () => {}) }, [])
-  useEffect(() => { setExtra([]); setExtraCursor(undefined); setSel(0); setHead(null); void poll() }, [fkey]) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { api.meta().then(m => { setFw(m.framework); setSse(m.features?.sse !== false && m.features?.sse !== undefined) }, () => {}) }, [])
+  useEffect(() => { setExtra([]); setExtraCursor(undefined); setFresh([]); setSel(0); setHead(null); void poll() }, [fkey]) // eslint-disable-line react-hooks/exhaustive-deps
+  const latest = useRef(Date.now() / 1000)
+  const streamMode = live && sse && !hasFilters && head !== null
+  const onTrace = useCallback((t: TraceSummary) => {
+    latest.current = Math.max(latest.current, t.started_at)
+    setFresh(f => (f.some(x => x.id === t.id) ? f : [t, ...f].slice(0, 200)))
+    setHead(h => (h && !h.items.some(x => x.id === t.id) ? { ...h, total: h.total + 1 } : h))
+    setFlash(s => new Set(s).add(t.id))
+    window.setTimeout(() => setFlash(s => { const n = new Set(s); n.delete(t.id); return n }), 2600)
+  }, [])
+  const stream = useLiveStream(streamMode, () => latest.current, onTrace)
+  useEffect(() => { for (const t of head?.items ?? []) latest.current = Math.max(latest.current, t.started_at) }, [head])
+  // Poll when SSE is unavailable, filters are active (the stream is unfiltered) or the stream gave up.
   useEffect(() => {
-    if (paused) return
+    if (paused || (streamMode && stream !== 'polling')) return
     const t = setInterval(poll, 2000)
     return () => clearInterval(t)
-  }, [paused, poll])
+  }, [paused, poll, streamMode, stream])
 
   const items = useMemo(() => {
     const seen = new Set<string>(); const out: TraceSummary[] = []
-    for (const t of [...(head?.items ?? []), ...extra]) if (!seen.has(t.id)) { seen.add(t.id); out.push(t) }
+    for (const t of [...fresh, ...(head?.items ?? []), ...extra]) if (!seen.has(t.id)) { seen.add(t.id); out.push(t) }
     return out
-  }, [head, extra])
+  }, [head, extra, fresh])
   const cursor = extraCursor !== undefined ? extraCursor : head?.next_cursor ?? null
   const max = useMemo(() => Math.max(1, ...items.map(i => i.duration_ms)), [items])
 
@@ -146,9 +163,11 @@ export default function Requests() {
             <button className="btn btn-ghost" onClick={() => setPicked([])}>Clear</button>
           </span>
         )}
-        <button className="btn" onClick={() => setPaused(p => !p)} aria-pressed={paused}>
-          {paused ? <Icon d={I.play} size={11} /> : <span className="w-1.5 h-1.5 rounded-full bg-ok live-dot" />}
-          {paused ? 'Resume' : 'Live'}
+        <button className="btn" onClick={() => setLive(l => !l)} aria-pressed={live}
+          title={!live ? 'Live updates are off' : streamMode && stream === 'live' ? 'Streaming new requests' : streamMode && stream === 'connecting' ? 'Connecting…' : 'Refreshing every 2 s'}>
+          {!live ? <Icon d={I.pause} size={11} /> : <span className={`w-1.5 h-1.5 rounded-full live-dot ${streamMode && stream === 'live' ? 'bg-ok' : streamMode && stream === 'connecting' ? 'bg-warn' : 'bg-info'}`} />}
+          Live
+          <span className="text-[10.5px] text-muted font-normal">{!live ? 'off' : streamMode ? (stream === 'live' ? 'stream' : stream === 'connecting' ? '…' : 'polling') : 'polling'}</span>
         </button>
       </div>
 
@@ -175,7 +194,7 @@ export default function Requests() {
               {!head && Array.from({ length: 8 }, (_, i) => <tr key={i} className="border-b border-line"><td colSpan={5} className="td"><div className="h-3 rounded bg-raised animate-pulse" /></td></tr>)}
               {items.map((t, i) => (
                 <tr key={t.id} data-sel={i === sel} onClick={() => nav('/requests/' + t.id)} onMouseEnter={() => setSel(i)}
-                  className="border-b border-line last:border-0 cursor-pointer hover:bg-raised/60">
+                  className={`border-b border-line last:border-0 cursor-pointer hover:bg-raised/60 ${flash.has(t.id) ? 'row-flash' : ''}`}>
                   <td className="td !pr-0 w-8" onClick={e => e.stopPropagation()}>
                     <input type="checkbox" className="accent-[rgb(var(--accent))] cursor-pointer" aria-label={`Select ${t.method} ${t.path} for compare`}
                       checked={picked.includes(t.id)} onChange={() => toggle(t.id)} />

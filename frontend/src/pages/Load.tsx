@@ -187,7 +187,7 @@ const Stat = ({ k, v, tone }: { k: string; v: string; tone?: string }) => (
   <div className="card px-3 py-2"><div className="text-[11px] text-muted">{k}</div><div className={`text-[18px] font-semibold num ${tone ?? ''}`}>{v}</div></div>
 )
 
-function BottleneckTable({ items, targets }: { items: Bottleneck[]; targets: Record<number, number> }) {
+function BottleneckTable({ items, targets }: { items: Bottleneck[]; targets: Record<number, number | null> }) {
   const [open, setOpen] = useState<string | null>(null)
   const rows = [...items].sort((a, b) => b.growth - a.growth)
   return (
