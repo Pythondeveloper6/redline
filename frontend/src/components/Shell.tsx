@@ -68,6 +68,8 @@ export default function Shell() {
             <NavLink to="/requests" className={link}>Requests</NavLink>
             <NavLink to="/endpoints" className={link}>Endpoints</NavLink>
             <NavLink to="/issues" className={link}>Issues</NavLink>
+            <NavLink to="/history" className={link}>History</NavLink>
+            <NavLink to="/load" className={link}>Load</NavLink>
           </nav>
           <div className="flex-1" />
           {meta.data && (

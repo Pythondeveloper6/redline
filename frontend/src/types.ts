@@ -83,3 +83,41 @@ export interface CompareResult {
   sql: { fingerprint: string; sql: string; a_count: number; b_count: number; a_ms: number; b_ms: number }[]
   issues: { only_a: unknown[]; only_b: unknown[]; both: unknown[] }
 }
+
+// ---- History / releases / load runs (CONTRACT §12) ----
+export interface HistoryPoint { t: number; count: number; p50_ms: number; p95_ms: number; p99_ms: number; error_rate: number; avg_queries: number }
+export interface ReleaseMark { release: string; first_seen: number }
+export interface HistoryResp { series: HistoryPoint[]; releases: ReleaseMark[] }
+export interface ReleaseInfo { release: string; first_seen: number; last_seen: number; requests: number }
+export interface PeriodStats { count: number; error_rate: number; p50_ms: number; p95_ms: number; p99_ms: number; avg_queries: number }
+export type Verdict = 'regressed' | 'improved' | 'same' | 'new' | 'gone'
+export interface CompareEndpoint {
+  route: string; method: string; a: PeriodStats | null; b: PeriodStats | null
+  delta_p95_pct: number | null; delta_queries: number | null; verdict: Verdict
+}
+export interface CompareIssue {
+  id?: string; issue_id?: string; kind: IssueKind; severity?: Severity; title: string; route?: string | null; occurrences?: number
+}
+export interface CompareResp {
+  a: unknown; b: unknown; endpoints: CompareEndpoint[]
+  issues: { new: CompareIssue[]; resolved: CompareIssue[]; persisting: CompareIssue[] }
+}
+export interface RunStep {
+  step: number; target_rps: number; achieved_rps: number; sent: number; ok: number; errors: number; dropped: number
+  p50_ms: number; p95_ms: number; p99_ms: number; max_ms: number; error_rate: number; error_breakdown: Record<string, number>
+}
+export interface RunSummary { knee_step: number | null; max_ok_rps: number | null; verdict: string | null }
+export interface RunConfig { requests?: { method: string; path: string; weight?: number; name?: string }[]; profile?: Record<string, any>; [k: string]: any }
+export interface RunItem {
+  id: string; name: string; status: string; config?: RunConfig; created_at: number; finished_at: number | null
+  summary?: RunSummary | null; steps?: RunStep[]
+}
+export interface Run extends RunItem { steps: RunStep[] }
+export interface BottleneckStep { step: number; mean_ms: number; p95_ms: number; count: number }
+export interface Bottleneck { key: string; kind: string; label: string; callsite: Callsite | null | string; per_step: BottleneckStep[]; growth: number }
+export interface Bottlenecks { steps: { step: number; target_rps: number }[]; items: Bottleneck[] }
+export interface NewRunBody {
+  name: string
+  requests: { method: string; path: string; weight: number }[]
+  profile: { mode: 'constant' | 'ramp' | 'steps'; rps?: number; start_rps?: number; end_rps?: number; step_rps?: number; duration_s: number; step_duration_s?: number }
+}
