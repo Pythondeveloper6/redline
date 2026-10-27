@@ -1,11 +1,13 @@
 import { useState } from 'react'
 import { isRedacted } from '../lib/format'
 import type { ErrorFrame, TraceError } from '../types'
+import { useFeatures } from '../lib/meta'
 import CallsiteLink from './CallsiteLink'
 import { CopyButton, Icon, I, Redacted } from './ui'
 
 function Frame({ f, last, n }: { f: ErrorFrame; last: boolean; n: number }) {
-  const locals = Object.entries(f.locals ?? {})
+  const showLocals = useFeatures().has('locals')
+  const locals = showLocals ? Object.entries(f.locals ?? {}) : []
   const [open, setOpen] = useState(last)
   return (
     <div className={`border-b border-line last:border-0 ${last ? 'bg-bad/5' : ''}`}>
@@ -42,6 +44,7 @@ function Frame({ f, last, n }: { f: ErrorFrame; last: boolean; n: number }) {
 
 export default function ExceptionTab({ error }: { error: TraceError }) {
   const frames = error.frames ?? []
+  const showLocals = useFeatures().has('locals')
   return (
     <div className="space-y-3">
       <div className="rounded-lg border border-bad/30 bg-bad/5 p-3">
@@ -58,7 +61,7 @@ export default function ExceptionTab({ error }: { error: TraceError }) {
         <div className="flex items-center mb-1.5"><span className="text-[12px] font-semibold flex-1">Traceback</span><CopyButton text={error.traceback} className="h-6" /></div>
         <pre className="m-0 rounded-lg border border-line bg-surface p-3 overflow-auto max-h-96">{error.traceback}</pre>
       </div>
-      {frames.length === 0 && <div className="text-[11.5px] text-muted">Local variables are only captured when <code>capture_locals</code> is enabled.</div>}
+      {frames.length === 0 && showLocals && <div className="text-[11.5px] text-muted">Local variables are only captured when <code>capture_locals</code> is enabled.</div>}
     </div>
   )
 }

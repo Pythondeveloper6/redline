@@ -233,14 +233,30 @@ def test_start_run(store):
 
     api = RedlineAPI(store, enabled, run_launcher=launcher)
     data = ok(
-        api.dispatch("POST", "api/runs", body=json.dumps(RUN_BODY), base_url="http://app:8000/"),
+        api.dispatch(
+            "POST", "api/runs", body=json.dumps(RUN_BODY), base_url="http://localhost:8000/"
+        ),
         202,
     )
     assert data == {"id": "run123", "name": "checkout", "status": "running"}
     config, base = calls[0]
-    assert base == "http://app:8000/" and config["requests"][0]["method"] == "GET"
+    assert base == "http://localhost:8000" and config["requests"][0]["method"] == "GET"
+    # a Host header must not aim the run at another machine (CONTRACT section 18)
+    for target in ("http://app:8000/", "http://10.0.0.5:6379", "http://localhost@evil:80"):
+        res = api.dispatch("POST", "api/runs", body=RUN_BODY, base_url=target)
+        assert res[0] == 400 and "base_url" in res[1]["error"]["message"], target
+    pinned = RedlineAPI(store, enabled.replace(base_url="http://app:8000/"), run_launcher=launcher)
+    ok(pinned.dispatch("POST", "api/runs", body=RUN_BODY, base_url="http://evil:1/"), 202)
+    assert calls[-1][1] == "http://app:8000"
+    hosts = RedlineAPI(store, enabled.replace(allowed_hosts=["devbox"]), run_launcher=launcher)
+    ok(hosts.dispatch("POST", "api/runs", body=RUN_BODY, base_url="http://devbox:8000"), 202)
     assert config["profile"]["mode"] == "steps"
-    err(api.dispatch("POST", "api/runs", body={**RUN_BODY, "name": "boom"}), 400, "invalid_body")
+    boom = {**RUN_BODY, "name": "boom"}
+    err(
+        api.dispatch("POST", "api/runs", body=boom, base_url="http://[::1]:8000"),
+        400,
+        "invalid_body",
+    )
     err(api.dispatch("POST", "api/runs", body=b"{nope"), 400, "invalid_json")
     bad_bodies = [
         [],
@@ -258,7 +274,7 @@ def test_start_run(store):
     ]
     for body in bad_bodies:
         err(api.dispatch("POST", "api/runs", body=body), 400, "invalid_body")
-    assert len(calls) == 2
+    assert len(calls) == 4
 
 
 def test_stop_run(store):

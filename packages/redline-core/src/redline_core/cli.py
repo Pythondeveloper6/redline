@@ -396,6 +396,271 @@ def _cmd_init(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
     return EXIT_OK
 
 
+# ============================================================================ config
+def _configure_config(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--json", action="store_true", help="print JSON")
+    p.add_argument(
+        "--project-root",
+        metavar="DIR",
+        help="where to look for redline.toml / pyproject.toml (default: the current directory)",
+    )
+
+
+def _resolve(args: argparse.Namespace, err: TextIO) -> Any:
+    from .conf import SettingsError
+    from .config import resolve_settings
+
+    try:
+        return resolve_settings(None, project_root=args.project_root or os.getcwd())
+    except SettingsError as exc:
+        err.write(f"redline: invalid configuration: {exc}\n")
+        return None
+
+
+def _show(value: Any) -> str:
+    import json
+
+    if isinstance(value, str):
+        return value
+    return json.dumps(value)
+
+
+def _cmd_config(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
+    resolved = _resolve(args, err)
+    if resolved is None:
+        return EXIT_USAGE
+    data = resolved.public()
+    if args.json:
+        import json
+
+        out.write(json.dumps(data, indent=2) + "\n")
+        return EXIT_OK
+    out.write(f"preset: {data['preset']}\n")
+    out.write(f"config file: {data['file'] or '(none)'}\n")
+    out.write(
+        "note: settings given in code (REDLINE = {...}, install(settings=...)) are not "
+        "visible here; GET <mount>/api/config shows the running app's.\n"
+    )
+    for group, names in data["groups"].items():
+        if not names:
+            continue
+        out.write(f"\n[{group}]\n")
+        width = max(len(n) for n in names)
+        for name in names:
+            source = data["sources"].get(name, "default")
+            env = resolved.env_names.get(name)
+            where = f"env {env}" if env and source == "env" else source
+            out.write(f"  {name.ljust(width)}  {_show(data['settings'][name])}  ({where})\n")
+    out.write("\nwarnings:\n" if data["warnings"] else "\nno warnings\n")
+    for warning in data["warnings"]:
+        out.write(f"  - {warning}\n")
+    return EXIT_OK
+
+
+def _doctor_checks(resolved: Any) -> list[tuple[str, str, str]]:
+    """``[(status, check, detail)]`` with status ``ok`` / ``warn`` / ``fail``."""
+    import importlib.util
+
+    from . import ui
+    from .access import _parse_hash, _read_token
+    from .conf import MIN_TOKEN_LENGTH, SettingsError
+
+    s = resolved.settings
+    checks: list[tuple[str, str, str]] = []
+
+    # storage
+    path = s.storage_path
+    if path == ":memory:":
+        checks.append(("ok", "storage", "in memory"))
+    else:
+        target = os.path.abspath(path)
+        parent = os.path.dirname(target)
+        probe = parent
+        while probe and not os.path.exists(probe):
+            probe = os.path.dirname(probe) if os.path.dirname(probe) != probe else ""
+        if os.path.exists(target) and not os.access(target, os.W_OK):
+            checks.append(("fail", "storage", f"{target} is not writable"))
+        elif probe and os.access(probe, os.W_OK | os.X_OK):
+            checks.append(("ok", "storage", f"{target} is writable"))
+        else:
+            checks.append(("fail", "storage", f"cannot create or write {target}"))
+
+    # UI bundle
+    if ui.is_built():
+        checks.append(("ok", "ui bundle", str(ui.static_dir())))
+    else:
+        checks.append(("fail", "ui bundle", "missing: build it with scripts/build_ui.sh"))
+
+    # access
+    policy = s.access
+    if policy == "open":
+        allowed = os.environ.get("REDLINE_ALLOW_OPEN", "").strip() == "1"
+        checks.append(
+            (
+                "warn" if allowed else "fail",
+                "access",
+                "access='open' exposes every captured request to anyone"
+                + ("" if allowed else " (and is refused without REDLINE_ALLOW_OPEN=1)"),
+            )
+        )
+    elif policy == "local":
+        if s.preset == "dev":
+            checks.append(("ok", "access", "local: loopback clients only"))
+        else:
+            checks.append(
+                (
+                    "warn",
+                    "access",
+                    f"access='local' with the {s.preset!r} preset: behind a reverse proxy "
+                    "nobody can reach Redline (proxied requests are refused); use 'token' or "
+                    "'basic'",
+                )
+            )
+    elif policy == "token":
+        try:
+            token = _read_token(s) or ""
+        except SettingsError as exc:
+            checks.append(("fail", "token", str(exc)))
+        else:
+            if len(token) < MIN_TOKEN_LENGTH:
+                checks.append(
+                    ("warn", "token", f"only {len(token)} characters (use {MIN_TOKEN_LENGTH}+)")
+                )
+            else:
+                checks.append(("ok", "token", f"{len(token)} characters"))
+            if s.token_file and os.name == "posix":
+                try:
+                    mode = os.stat(os.path.expanduser(s.token_file)).st_mode
+                except OSError:
+                    mode = 0
+                if mode & 0o077:
+                    checks.append(
+                        ("warn", "token", f"{s.token_file} is readable by other users (chmod 600)")
+                    )
+    elif policy == "basic":
+        for user, encoded in s.basic_users.items():
+            try:
+                iterations, _, _ = _parse_hash(encoded)
+            except SettingsError as exc:
+                checks.append(("fail", "basic", f"{user}: {exc}"))
+                continue
+            if iterations < 100_000:
+                checks.append(
+                    ("warn", "basic", f"{user}: weak hash ({iterations} PBKDF2 iterations)")
+                )
+        if not any(c[1] == "basic" for c in checks):
+            checks.append(("ok", "basic", f"{len(s.basic_users)} user(s)"))
+    else:
+        checks.append(("ok", "access", f"access={policy!r}"))
+    if policy in ("token", "basic") and not s.secret_key:
+        checks.append(
+            (
+                "warn",
+                "sessions",
+                "secret_key unset: UI logins are per worker process (set REDLINE_SECRET_KEY)",
+            )
+        )
+    if policy != "local" and not s.trusted_proxies and s.preset != "dev":
+        checks.append(
+            (
+                "warn",
+                "proxies",
+                "trusted_proxies is empty: behind a proxy all clients share its address",
+            )
+        )
+
+    # capture
+    if s.preset == "production":
+        captured = [
+            n
+            for n in ("capture_request_body", "capture_response_body", "capture_locals")
+            if getattr(s, n)
+        ]
+        if captured:
+            checks.append(("warn", "capture", "production preset captures " + ", ".join(captured)))
+        else:
+            checks.append(("ok", "capture", "no bodies or locals captured"))
+
+    # retention
+    if not s.history_retention_days:
+        checks.append(("warn", "retention", "history_retention_days off: history grows forever"))
+    elif not s.max_rows and not s.max_age_days:
+        checks.append(("warn", "retention", "max_rows and max_age_days off: traces never pruned"))
+    else:
+        checks.append(
+            (
+                "ok",
+                "retention",
+                f"traces: {s.max_rows or '∞'} rows / {s.max_age_days or '∞'} days; "
+                f"history: {s.history_retention_days} days",
+            )
+        )
+
+    # load extra
+    if s.load_from_ui and s.feature("load"):
+        if importlib.util.find_spec("httpx") is None:
+            checks.append(
+                ("warn", "load", "load_from_ui is on but httpx is missing: redline-core[load]")
+            )
+        else:
+            checks.append(("ok", "load", "load tester available"))
+    return checks
+
+
+def _cmd_doctor(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
+    resolved = _resolve(args, err)
+    if resolved is None:
+        out.write("FAIL  config      the configuration does not load (see above)\n")
+        return EXIT_FAIL
+    checks = _doctor_checks(resolved)
+    if args.json:
+        import json
+
+        out.write(
+            json.dumps([{"status": st, "check": c, "detail": d} for st, c, d in checks], indent=2)
+            + "\n"
+        )
+    else:
+        out.write(f"preset {resolved.settings.preset}, config file {resolved.file or '(none)'}\n")
+        for status, check, detail in checks:
+            out.write(f"{status.upper():<5} {check:<11} {detail}\n")
+    return EXIT_FAIL if any(c[0] == "fail" for c in checks) else EXIT_OK
+
+
+def _configure_hash(p: argparse.ArgumentParser) -> None:
+    p.add_argument(
+        "--iterations",
+        type=int,
+        default=None,
+        metavar="N",
+        help="PBKDF2-SHA256 iterations (default 600000)",
+    )
+
+
+def _cmd_hash_password(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
+    import getpass
+
+    from .access import PBKDF2_ITERATIONS, hash_password
+
+    iterations = args.iterations or PBKDF2_ITERATIONS
+    if iterations < 1_000:
+        err.write("redline hash-password: --iterations must be at least 1000\n")
+        return EXIT_USAGE
+    if sys.stdin is not None and not sys.stdin.isatty():
+        password = sys.stdin.readline().rstrip("\r\n")  # scripted: one line on stdin
+    else:
+        password = getpass.getpass("Password: ")
+        again = getpass.getpass("Password (again): ")
+        if password != again:
+            err.write("redline hash-password: the passwords do not match\n")
+            return EXIT_USAGE
+    if not password:
+        err.write("redline hash-password: the password must not be empty\n")
+        return EXIT_USAGE
+    out.write(hash_password(password, iterations=iterations) + "\n")
+    return EXIT_OK
+
+
 # ============================================================================ dispatch
 Handler = Callable[[argparse.Namespace, TextIO, TextIO], int]
 
@@ -406,6 +671,24 @@ COMMANDS: dict[str, tuple[str, Callable[[argparse.ArgumentParser], None], Handle
         _configure_load,
         _cmd_load,
         {"init": ("write a scenario file", _configure_init, _cmd_init)},
+    ),
+    "config": (
+        "print the effective configuration, where each value comes from, and warnings",
+        _configure_config,
+        _cmd_config,
+        {},
+    ),
+    "doctor": (
+        "check storage, the UI bundle and the access settings",
+        _configure_config,
+        _cmd_doctor,
+        {},
+    ),
+    "hash-password": (
+        "hash a password for basic_users (asks twice; reads one line when piped)",
+        _configure_hash,
+        _cmd_hash_password,
+        {},
     ),
 }
 

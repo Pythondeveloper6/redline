@@ -23,6 +23,9 @@ from django.core.checks import Error, Tags, Warning, register
 from django.core.exceptions import ImproperlyConfigured
 from django.urls import NoReverseMatch, reverse
 
+from redline_core.access import Access
+from redline_core.conf import SettingsError
+
 from .conf import get_core_settings, get_options
 
 MIDDLEWARE_PATH = "django_redline.middleware.RedlineMiddleware"
@@ -42,6 +45,9 @@ def check_redline(app_configs: Any = None, **kwargs: Any) -> list:
     try:
         core = get_core_settings()
         get_options()
+        Access(core)  # a missing token_file, a weak token, a bad access_check path...
+    except SettingsError as exc:
+        return [Error(f"settings.REDLINE: {exc}", id="django_redline.E001")]
     except ImproperlyConfigured as exc:
         return [Error(str(exc), id="django_redline.E001")]
     problems: list = []

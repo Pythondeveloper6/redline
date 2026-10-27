@@ -13,7 +13,7 @@ from redline_core import stream, ui
 from redline_core.api import RawResponse
 from redline_core.storage import FilterError
 
-from ._security import RedlineHTTPError, check_csrf
+from ._security import request_info
 
 __all__ = ["build_blueprint", "error_response"]
 
@@ -35,11 +35,17 @@ _CODES = {
 
 
 def error_response(
-    status: int, code: str, message: str, headers: dict[str, str] | None = None
+    status: int,
+    code: str,
+    message: str,
+    headers: dict[str, str] | None = None,
+    extra: dict[str, Any] | None = None,
 ) -> Response:
     """A JSON error in the API's shape (``CONTRACT.md`` §5)."""
     return json_response(
-        {"error": {"code": code, "message": message}}, status, headers={**(headers or {})}
+        {"error": {"code": code, "message": message, **(extra or {})}},
+        status,
+        headers={**(headers or {})},
     )
 
 
@@ -87,20 +93,33 @@ def build_blueprint(runtime: Any, url_prefix: str) -> Blueprint:
 
     @bp.before_request
     def guard() -> Response | None:
-        permission: Callable[[Any], Any] = runtime.permission
+        """Every Redline URL: the core access check (``CONTRACT.md`` §18)."""
+        permission: Callable[[Any], Any] | None = runtime.permission
+        info = request_info(request, url_prefix)
         try:
-            if not permission(request):
-                refusal = getattr(permission, "refusal", None)
+            decision = runtime.access.check(
+                info, framework_ok=(lambda: permission(request)) if permission else None
+            )
+        except HTTPException as exc:  # e.g. abort(401) inside a permission callable
+            return _http_error(exc)
+        if not decision.allowed:
+            message = decision.message
+            refusal = getattr(permission, "refusal", None)
+            if decision.code == "forbidden" and runtime.access.policy == "framework":
                 message = (refusal(request) if refusal else None) or (
                     "Redline refused this request (the permission check returned False)."
                 )
-                raise RedlineHTTPError(403, "forbidden", message)
-            if request.endpoint == "redline.api":
-                check_csrf(request)
-        except RedlineHTTPError as exc:
-            return error_response(exc.status_code, exc.code, exc.message, exc.headers)
-        except HTTPException as exc:  # e.g. abort(401) inside a permission callable
-            return _http_error(exc)
+            return error_response(
+                decision.status,
+                decision.code,
+                message,
+                dict(decision.headers),
+                dict(decision.extra),
+            )
+        if info.path.strip("/") in ("api/login", "api/logout"):
+            handled = runtime.access.handle(info, request.get_data())
+            if handled is not None:  # POST api/login, api/logout
+                return json_response(handled.body(), handled.status, headers=dict(handled.headers))
         return None
 
     @bp.get("/")

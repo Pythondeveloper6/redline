@@ -1,4 +1,6 @@
+import { useSyncExternalStore } from 'react'
 import { Navigate, Route, Routes } from 'react-router-dom'
+import { getLoginRequired, subscribeLoginRequired } from './api'
 import Shell from './components/Shell'
 import Requests from './pages/Requests'
 import RequestDetail from './pages/RequestDetail'
@@ -10,11 +12,15 @@ import Load from './pages/Load'
 import Database from './pages/Database'
 import Cache from './pages/Cache'
 import External from './pages/External'
+import Settings from './pages/Settings'
+import Login from './pages/Login'
 import SnapshotApp from './SnapshotApp'
 import { getSnapshot } from './lib/snapshot'
 
 export default function App() {
+  const login = useSyncExternalStore(subscribeLoginRequired, getLoginRequired)
   if (getSnapshot()) return <SnapshotApp />
+  if (login) return <Login kind={login} />
   return (
     <Routes>
       <Route element={<Shell />}>
@@ -27,6 +33,7 @@ export default function App() {
         <Route path="/database" element={<Database />} />
         <Route path="/cache" element={<Cache />} />
         <Route path="/external" element={<External />} />
+        <Route path="/settings" element={<Settings />} />
         <Route path="/history" element={<History />} />
         <Route path="/load" element={<Load />} />
         <Route path="/load/:id" element={<Load />} />

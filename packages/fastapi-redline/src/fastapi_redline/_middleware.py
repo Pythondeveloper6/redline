@@ -162,7 +162,7 @@ class RedlineMiddleware:
         res = _Capture(limit)
         capture_res = settings.capture_response_body
         state: dict[str, Any] = {"status": None, "headers": [], "done": False}
-        server_timing = settings.server_timing and builder.active
+        server_timing = builder.active and ui.server_timing_enabled(settings, self.debug())
         badge = builder.active and ui.badge_enabled(settings, self.debug())
         held: list[Any] = []  # a response start held back for badge injection
 
