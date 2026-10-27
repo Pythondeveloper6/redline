@@ -4,8 +4,9 @@ Subcommands are registered in :data:`COMMANDS`; each is a module-level ``(config
 handler)`` pair so new ones (``scan``, …) plug in without touching the dispatcher. Heavy
 imports happen inside the handlers, so ``redline --help`` stays instant.
 
-Exit codes: 0 ok, 1 a ``--fail-*`` threshold was breached or the run failed, 2 usage or
-scenario error, 130 interrupted (Ctrl-C).
+Exit codes: 0 ok, 1 a ``--fail-*`` threshold was breached, a ``redline check`` verdict
+matched ``--fail-on``, or the run failed, 2 usage or scenario/suite error, 3 the app could
+not be reached (``redline check``), 130 interrupted (Ctrl-C).
 """
 
 from __future__ import annotations
@@ -756,6 +757,536 @@ def _cmd_hash_password(args: argparse.Namespace, out: TextIO, err: TextIO) -> in
     return EXIT_OK
 
 
+# ============================================================================ check
+EXIT_UNREACHABLE = 3
+
+
+def _fail_on_arg(value: str) -> tuple[str, ...]:
+    from .check.report import parse_fail_on
+
+    try:
+        return parse_fail_on(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from None
+
+
+def _check_common(p: argparse.ArgumentParser) -> None:
+    p.add_argument("suite", help="suite file (.toml or .json)")
+    p.add_argument("--base-url", metavar="URL", help="override the suite's base_url")
+    p.add_argument(
+        "--store",
+        metavar="PATH",
+        help="the app's Redline store, for server-side metrics (default: the configured "
+        "storage_path when that file exists)",
+    )
+    p.add_argument("--no-store", action="store_true", help="client-side metrics only")
+    p.add_argument("--label", metavar="TEXT", help="a label for this run (e.g. 'before')")
+    p.add_argument("--quiet", "-q", action="store_true", help="no progress line")
+
+
+def _check_compare_args(p: argparse.ArgumentParser) -> None:
+    src = p.add_mutually_exclusive_group()
+    src.add_argument(
+        "--baseline", metavar="FILE", help="baseline JSON (default <suite>.baseline.json)"
+    )
+    src.add_argument("--baseline-id", metavar="ID", help="a baseline stored in --store")
+    p.add_argument("--json", metavar="OUT", help="write the full report as JSON")
+    p.add_argument("--markdown", metavar="OUT", help="write a Markdown PR comment")
+    p.add_argument("--junit", metavar="OUT", help="write JUnit XML (one testcase per request)")
+    p.add_argument(
+        "--fail-on",
+        type=_fail_on_arg,
+        default=None,
+        metavar="LIST",
+        help="verdicts that make the exit code 1 (default slower,changed,broken; 'none')",
+    )
+    p.add_argument("--slower-pct", type=float, metavar="X", help="override thresholds.slower_pct")
+    p.add_argument("--slower-ms", type=float, metavar="Y", help="override thresholds.slower_ms")
+    p.add_argument("--no-color", action="store_true", help="no ANSI colours")
+
+
+def _configure_check(p: argparse.ArgumentParser) -> None:
+    p.add_argument("rest", nargs="*", help=argparse.SUPPRESS)
+
+
+def _configure_check_record(p: argparse.ArgumentParser) -> None:
+    _check_common(p)
+    p.add_argument("--out", metavar="FILE", help="baseline file (default <suite>.baseline.json)")
+
+
+def _configure_check_compare(p: argparse.ArgumentParser) -> None:
+    _check_common(p)
+    _check_compare_args(p)
+
+
+def _configure_check_run(p: argparse.ArgumentParser) -> None:
+    _check_common(p)
+    _check_compare_args(p)
+    p.add_argument("--out", metavar="FILE", help="baseline file to write when recording")
+
+
+def _configure_check_init(p: argparse.ArgumentParser) -> None:
+    p.add_argument(
+        "--from-traces", action="store_true", required=True, help="recorded traffic in the store"
+    )
+    p.add_argument("--store", metavar="PATH", help="Redline store (default: configured path)")
+    p.add_argument(
+        "--route",
+        action="append",
+        default=[],
+        metavar="PATTERN",
+        help="only routes matching this pattern (fnmatch; repeatable)",
+    )
+    p.add_argument("--limit", type=int, default=20, metavar="N", help="at most N requests (20)")
+    p.add_argument("--base-url", metavar="URL")
+    p.add_argument("-o", "--out", default="check.toml", help="output (.toml/.json, - = stdout)")
+    p.add_argument("--force", action="store_true", help="overwrite an existing file")
+
+
+def _configure_check_show(p: argparse.ArgumentParser) -> None:
+    p.add_argument("report", help="report JSON written by `redline check compare --json`")
+    p.add_argument("--fail-on", type=_fail_on_arg, default=None, metavar="LIST")
+    p.add_argument("--markdown", metavar="OUT", help="also write the Markdown PR comment")
+    p.add_argument("--junit", metavar="OUT", help="also write JUnit XML")
+    p.add_argument("--no-color", action="store_true")
+
+
+def _cmd_check(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
+    err.write(
+        "usage: redline check {record,compare,run,init,show} …\n\n"
+        + "".join(f"  redline check {n:<8} {h}\n" for n, (h, _, _) in CHECK_COMMANDS.items())
+    )
+    return EXIT_USAGE
+
+
+def _configured_store_path() -> str:
+    from .config import resolve_settings
+
+    try:
+        return resolve_settings(None, project_root=os.getcwd()).settings.storage_path
+    except Exception:
+        return DEFAULT_STORE
+
+
+def _project_redactor() -> Any:
+    """A ``Redactor`` with the project's redaction settings (defaults when unreadable)."""
+    from .config import resolve_settings
+    from .redact import Redactor
+
+    try:
+        return Redactor(resolve_settings(None, project_root=os.getcwd()).settings)
+    except Exception:
+        return Redactor()
+
+
+class _CheckStore:
+    """The store, its check sink and server metrics; all ``None`` when unavailable."""
+
+    def __init__(self, args: argparse.Namespace, err: TextIO, *, needed: bool = False) -> None:
+        self.store: Any = None
+        self.sink: Any = None
+        self.metrics: Any = None
+        self.module: Any = None
+        if getattr(args, "no_store", False):
+            return
+        path = args.store or _configured_store_path()
+        if path == ":memory:" or not os.path.exists(path):
+            if args.store or needed:
+                err.write(f"redline check: no store at {path}; server-side metrics off\n")
+            return
+        try:
+            from .check import sink as module
+        except ImportError:
+            err.write(
+                "redline check: server-side metrics need redline-core with check storage; "
+                "continuing client-side only\n"
+            )
+            return
+        from .storage import SQLiteStore
+
+        try:
+            self.store = SQLiteStore(path, background=False)
+            self.sink = module.StoreCheckSink(self.store)
+            self.metrics = module.StoreServerMetrics(self.store)
+            self.module = module
+        except Exception as exc:
+            err.write(f"redline check: cannot use the store {path}: {exc}; client-side only\n")
+            self.close()
+
+    def close(self) -> None:
+        if self.store is not None:
+            try:
+                self.store.close()
+            except Exception:  # pragma: no cover - best effort
+                pass
+        self.store = self.sink = self.metrics = None
+
+
+class _CheckProgress:
+    """``[done/total] request`` on one line, TTY only."""
+
+    def __init__(self, out: TextIO, *, quiet: bool) -> None:
+        self.out = out
+        self.enabled = not quiet and bool(getattr(out, "isatty", lambda: False)())
+        self.width = 0
+
+    def __call__(self, event: dict) -> None:
+        if not self.enabled:
+            return
+        text = f"  [{event['done']}/{event['total']}] {event['phase']:<6} {event['name']}"[:100]
+        self.out.write("\r" + text.ljust(self.width))
+        self.out.flush()
+        self.width = len(text)
+
+    def clear(self) -> None:
+        if self.enabled and self.width:
+            self.out.write("\r" + " " * self.width + "\r")
+            self.out.flush()
+            self.width = 0
+
+
+def _load_suite_for(args: argparse.Namespace, err: TextIO) -> tuple[Any, str] | None:
+    from dataclasses import replace
+
+    from .check.suite import Suite, SuiteError, validate_base_url
+
+    try:
+        suite = Suite.from_file(args.suite)
+        base_url = args.base_url or suite.base_url
+        if not base_url:
+            raise SuiteError("is required (in the suite or via --base-url)", "base_url")
+        base_url = validate_base_url(base_url, "--base-url" if args.base_url else "base_url")
+        th = suite.thresholds
+        for name in ("slower_pct", "slower_ms"):
+            value = getattr(args, name, None)
+            if value is not None:
+                if not math.isfinite(value) or value < 0:
+                    raise SuiteError(f"must be a number ≥ 0 (got {value!r})", f"--{name}")
+                th = replace(th, **{name: float(value)})
+        suite = suite.replace(thresholds=th)
+    except SuiteError as exc:
+        err.write(f"redline check: {exc}\n")
+        return None
+    return suite, base_url
+
+
+def _run_check(
+    args: argparse.Namespace,
+    out: TextIO,
+    *,
+    err: TextIO,
+    suite: Any,
+    base_url: str,
+    kind: str,
+    baseline: Any,
+    store: _CheckStore,
+) -> Any:
+    """``run_suite`` with progress and SIGTERM → Ctrl-C; the result, or an exit code."""
+    from .check.runner import CheckUnreachable, run_suite
+    from .check.suite import SuiteError
+
+    progress = _CheckProgress(out, quiet=args.quiet)
+    previous_term = _graceful_sigterm()
+    if not args.quiet:
+        what = "recording a baseline" if kind == "baseline" else "comparing with the baseline"
+        out.write(
+            f"redline check: {suite.name} → {base_url} ({what}; {len(suite.requests)} requests "
+            f"× {suite.repeat}, warmup {suite.warmup})\n"
+        )
+        out.flush()
+    try:
+        return run_suite(
+            suite,
+            base_url=base_url,
+            kind=kind,  # type: ignore[arg-type]
+            baseline=baseline,
+            label=args.label,
+            sink=store.sink,
+            server_metrics=store.metrics,
+            on_progress=progress,
+            redactor=_project_redactor(),
+        )
+    except SuiteError as exc:
+        progress.clear()
+        err.write(f"redline check: {exc}\n")
+        return EXIT_USAGE
+    except CheckUnreachable as exc:
+        progress.clear()
+        err.write(f"redline check: {exc}\n")
+        return EXIT_UNREACHABLE
+    except Exception as exc:
+        progress.clear()
+        err.write(f"redline check: {type(exc).__name__}: {exc}\n")
+        return EXIT_FAIL
+    finally:
+        progress.clear()
+        if previous_term is not None:
+            signal.signal(signal.SIGTERM, previous_term)
+
+
+def _print_baseline(out: TextIO, baseline: Any) -> None:
+    rows = []
+    for r in baseline.requests:
+        perf = r.get("perf") or {}
+        srv = r.get("server") or {}
+        status = ",".join(f"{k}×{v}" for k, v in sorted((r.get("statuses") or {}).items()))
+        rows.append(
+            (
+                r["name"][:40],
+                status or "-",
+                f"{r.get('failed', 0)}/{r.get('calls', 0)}",
+                fmt_ms(perf["median"]) if perf.get("median") is not None else "-",
+                fmt_ms(perf["p95"]) if perf.get("p95") is not None else "-",
+                f"{perf['cv']:.2f}" if perf.get("cv") is not None else "-",
+                f"{srv['queries_median']:g}" if srv.get("queries_median") is not None else "-",
+                str(len(r.get("volatile") or []) + len(r.get("volatile_headers") or [])),
+                "  BROKEN" if r.get("broken") else "",
+            )
+        )
+    w = max([7, *(len(r[0]) for r in rows)])
+    out.write(
+        f"\n{'request'.ljust(w)}  {'status':<10} {'failed':>7} {'median':>8} {'p95':>8} "
+        f"{'cv':>5} {'queries':>7} {'volatile':>8}\n"
+    )
+    for name, st, failed, med, p95, cv, q, vol, broken in rows:
+        out.write(
+            f"{name.ljust(w)}  {st:<10} {failed:>7} {med:>8} {p95:>8} {cv:>5} {q:>7} "
+            f"{vol:>8}{broken}\n"
+        )
+
+
+def _cmd_check_record(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
+    from .check.baseline import default_baseline_path
+
+    loaded = _load_suite_for(args, err)
+    if loaded is None:
+        return EXIT_USAGE
+    suite, base_url = loaded
+    target = args.out or str(default_baseline_path(args.suite))
+    store = _CheckStore(args, err)
+    try:
+        result = _run_check(
+            args,
+            out,
+            err=err,
+            suite=suite,
+            base_url=base_url,
+            kind="baseline",
+            baseline=None,
+            store=store,
+        )
+    finally:
+        store.close()
+    if isinstance(result, int):
+        return result
+    if result.status == "stopped":
+        err.write("redline check: stopped – baseline not written\n")
+        return EXIT_INTERRUPTED
+    result.write(target, redactor=_project_redactor())
+    _print_baseline(out, result)
+    s = result.summary()
+    git = result.git or {}
+    sha = (git.get("sha") or "")[:8]
+    where = f", git {sha}{' (dirty)' if git.get('dirty') else ''}" if sha else ""
+    out.write(
+        f"\nwrote baseline {target}: {s['requests']} requests, {s['calls']} timed calls{where}"
+        + ("" if s["server_side"] else "; server-side metrics: unavailable")
+        + "\n"
+    )
+    if s["broken"]:
+        err.write(
+            f"warning: {s['broken']} request(s) are broken in the baseline (≥ 50% failed calls)\n"
+        )
+    return EXIT_OK
+
+
+def _load_baseline(args: argparse.Namespace, err: TextIO, store: _CheckStore) -> Any:
+    from .check.baseline import Baseline, BaselineError, default_baseline_path
+
+    if args.baseline_id:
+        loader = getattr(store.module, "load_baseline", None) if store.module else None
+        if loader is None:
+            err.write("redline check: --baseline-id needs --store with check storage\n")
+            return None
+        try:
+            data = loader(store.store, args.baseline_id)
+        except Exception as exc:
+            err.write(f"redline check: cannot load baseline {args.baseline_id}: {exc}\n")
+            return None
+        if data is None:
+            err.write(f"redline check: no baseline {args.baseline_id} in the store\n")
+            return None
+        try:
+            return data if isinstance(data, Baseline) else Baseline.from_dict(data)
+        except BaselineError as exc:
+            err.write(f"redline check: {exc}\n")
+            return None
+    path = args.baseline or str(default_baseline_path(args.suite))
+    if not os.path.exists(path):
+        err.write(
+            f"redline check: no baseline at {path}; record one first: redline check record "
+            f"{args.suite}\n"
+        )
+        return None
+    try:
+        return Baseline.from_file(path)
+    except BaselineError as exc:
+        err.write(f"redline check: {exc}\n")
+        return None
+
+
+def _write_report_outputs(args: argparse.Namespace, report: Any, out: TextIO) -> None:
+    for attr, render in (
+        ("json", report.to_json),
+        ("markdown", report.to_markdown),
+        ("junit", report.to_junit),
+    ):
+        target = getattr(args, attr, None)
+        if target:
+            with open(target, "w", encoding="utf-8") as fh:
+                fh.write(render())
+            out.write(f"wrote {attr}: {target}\n")
+
+
+def _use_color(args: argparse.Namespace, out: TextIO) -> bool:
+    return (
+        not getattr(args, "no_color", False)
+        and not os.environ.get("NO_COLOR")
+        and bool(getattr(out, "isatty", lambda: False)())
+    )
+
+
+def _cmd_check_compare(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
+    from .check.report import DEFAULT_FAIL_ON
+
+    loaded = _load_suite_for(args, err)
+    if loaded is None:
+        return EXIT_USAGE
+    suite, base_url = loaded
+    store = _CheckStore(args, err, needed=bool(args.baseline_id))
+    try:
+        baseline = _load_baseline(args, err, store)
+        if baseline is None:
+            return EXIT_USAGE
+        result = _run_check(
+            args,
+            out,
+            err=err,
+            suite=suite,
+            base_url=base_url,
+            kind="compare",
+            baseline=baseline,
+            store=store,
+        )
+    finally:
+        store.close()
+    if isinstance(result, int):
+        return result
+    report = result.with_fail_on(args.fail_on if args.fail_on is not None else DEFAULT_FAIL_ON)
+    out.write("\n" + report.to_terminal(color=_use_color(args, out)))
+    _write_report_outputs(args, report, out)
+    if report.status == "stopped":
+        err.write("redline check: stopped – partial report\n")
+        return EXIT_INTERRUPTED
+    return report.exit_code()
+
+
+def _cmd_check_run(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
+    from .check.baseline import default_baseline_path
+
+    if args.baseline_id:
+        return _cmd_check_compare(args, out, err)
+    path = args.baseline or args.out or str(default_baseline_path(args.suite))
+    if os.path.exists(path):
+        args.baseline = path
+        return _cmd_check_compare(args, out, err)
+    args.out = path
+    out.write(f"no baseline at {path}: recording one\n")
+    return _cmd_check_record(args, out, err)
+
+
+def _cmd_check_init(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
+    from .check.generate import from_traces
+    from .check.suite import Suite
+    from .storage import SQLiteStore
+
+    path = args.store or _configured_store_path()
+    if path == ":memory:" or not os.path.exists(path):
+        err.write(f"redline check init: no store at {path}\n")
+        return EXIT_USAGE
+    if args.limit < 1:
+        err.write("redline check init: --limit must be ≥ 1\n")
+        return EXIT_USAGE
+    try:
+        store = SQLiteStore(path, background=False)
+        try:
+            data = from_traces(store, routes=args.route, limit=args.limit, base_url=args.base_url)
+        finally:
+            store.close()
+        suite = Suite.from_dict(data)
+    except Exception as exc:
+        err.write(f"redline check init: {exc}\n")
+        return EXIT_USAGE
+    text = suite.to_json() if args.out.endswith(".json") else suite.to_toml()
+    if args.out == "-":
+        out.write(text)
+        return EXIT_OK
+    if os.path.exists(args.out) and not args.force:
+        err.write(f"redline check init: {args.out} exists (use --force to overwrite)\n")
+        return EXIT_USAGE
+    with open(args.out, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    env = suite.env_names()
+    out.write(
+        f"wrote {args.out}: {len(suite.requests)} read-only requests, base_url {suite.base_url}\n"
+        + (f"set {', '.join(env)} in the environment before running it\n" if env else "")
+    )
+    return EXIT_OK
+
+
+def _cmd_check_show(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
+    import json
+
+    from .check.report import Report, ReportError
+
+    try:
+        with open(args.report, encoding="utf-8") as fh:
+            report = Report.from_dict(json.load(fh))
+    except FileNotFoundError:
+        err.write(f"redline check show: {args.report}: file not found\n")
+        return EXIT_USAGE
+    except (OSError, ValueError, ReportError) as exc:
+        err.write(f"redline check show: {args.report}: {exc}\n")
+        return EXIT_USAGE
+    if args.fail_on is not None:
+        report = report.with_fail_on(args.fail_on)
+    out.write(report.to_terminal(color=_use_color(args, out)))
+    _write_report_outputs(args, report, out)
+    return report.exit_code() if args.fail_on is not None else EXIT_OK
+
+
+CHECK_COMMANDS: dict[str, tuple[str, Callable[[argparse.ArgumentParser], None], Any]] = {
+    "record": ("run a suite and write a baseline", _configure_check_record, _cmd_check_record),
+    "compare": (
+        "run a suite again and compare it with a baseline (exit 1 on --fail-on verdicts, "
+        "2 usage/suite error, 3 app unreachable)",
+        _configure_check_compare,
+        _cmd_check_compare,
+    ),
+    "run": (
+        "record when there is no baseline file yet, else compare",
+        _configure_check_run,
+        _cmd_check_run,
+    ),
+    "init": (
+        "write a suite from recorded read-only traffic",
+        _configure_check_init,
+        _cmd_check_init,
+    ),
+    "show": ("print a saved report (JSON) again", _configure_check_show, _cmd_check_show),
+}
+
+
 # ============================================================================ dispatch
 Handler = Callable[[argparse.Namespace, TextIO, TextIO], int]
 
@@ -766,6 +1297,12 @@ COMMANDS: dict[str, tuple[str, Callable[[argparse.ArgumentParser], None], Handle
         _configure_load,
         _cmd_load,
         {"init": ("write a scenario file", _configure_init, _cmd_init)},
+    ),
+    "check": (
+        "refactor check: record a baseline of read-only requests, then compare a new version",
+        _configure_check,
+        _cmd_check,
+        CHECK_COMMANDS,
     ),
     "config": (
         "print the effective configuration, where each value comes from, and warnings",

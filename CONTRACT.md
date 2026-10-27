@@ -1081,6 +1081,38 @@ Per request:
   fixed_issues, new_sql, gone_sql}, response: {verdict, status: [before, after], diff: [...], text_diff,
   ignored: [...]}}]}`.
 
+### 19.4a Engine details (as implemented; additive to 19.1–19.4)
+
+- **Call numbering.** Warmup calls carry `n=0` (server metrics must skip them); timed calls `n=1…repeat`. A
+  request with `perf = false` only takes part in the first and last timed rounds (2 calls: enough for the
+  response and volatile fields).
+- **Report fields.** `perf.reason` ∈ `"time"` | `"queries"` | `"cv"` (= `noisy`) | `null`; free text goes to
+  `perf.note` (e.g. "not in the baseline", "≥ 50% failed calls"). `response.diff_total` = number of diff entries
+  before the cut at 50. `server.before`/`server.after` are the `ServerMetrics.for_check` dicts as returned
+  (`duration_ms_median`, `queries_median`, `queries_max`, `query_ms_median`, `sql`, `issues`,
+  `sample_trace_id`). `server.new_issues`/`fixed_issues` items: `{kind, title, fingerprint, sample_trace_id}`;
+  `new_sql`/`gone_sql` items: `{fingerprint, sql, count, sample_trace_id}` (trace id of the side the item comes
+  from). Summary also has `faster/slower/changed/broken/passed/failed/failing/fail_on`, `speed_ratio`,
+  `speed_change_pct`, `queries_before/after/change`, `wins`, `regressions`, `server_side`, `not_in_baseline`,
+  `not_in_suite`.
+- **Progress.** `run_suite(on_progress=)` receives `{done, total, current: "<request name>", run_id, phase:
+  "warmup"|"timed", idx, n, status, ms}` after every call.
+- **Headers.** Compared: `content-type` (always) plus `location`, `cache-control`, `content-encoding`,
+  `content-language`, `content-disposition`, `vary`, `allow`, `access-control-allow-origin` minus
+  `ignore_headers`. Header differences appear in `diff` with path `header:<name>`.
+- **Volatile.** Baseline entries have `volatile` (JSON paths for JSON bodies, `line:<n>` for text bodies, `$` for a
+  changed hash or body kind) and `volatile_headers`. Fields that differ between the compare run's own first and
+  last responses are ignored too (also reported as `volatile`).
+- **Redaction.** Both sides of a comparison go through the same redactor (JSON keys at any depth, without the
+  500-char string cut of `Redactor.mapping`; text through `Redactor.text`), so a masked secret never diffs.
+- `≥ 50 %` failed calls make the response verdict `broken` even when `response = false`.
+- **CLI.** `--store` defaults to the configured `storage_path` when that file exists; `--no-store` disables it.
+  `--fail-on` also accepts `noisy`, `faster` and `none`. Ctrl-C/SIGTERM exits 130 (no baseline written; a compare
+  prints the partial report). `--baseline-id` uses `redline_core.check.sink.load_baseline(store, id) ->
+  Baseline | dict | None`. `redline check show REPORT.json [--fail-on …] [--markdown OUT] [--junit OUT]`
+  re-prints a report (exit 0, or the `--fail-on` exit code when given). TOML suites on Python 3.10 need `tomli`
+  (else a clear error: use JSON).
+
 ### 19.5 Storage and API (schema version 4, additive)
 
 - Tables: `check_suites(id, name, suite_json, created_at, updated_at)`,
