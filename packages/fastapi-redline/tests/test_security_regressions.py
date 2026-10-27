@@ -6,6 +6,7 @@ Each one failed before its fix and passes after it.
 from __future__ import annotations
 
 import asyncio
+import time
 
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
@@ -15,6 +16,21 @@ from redline_core.access import SESSION_COOKIE
 
 REMOTE = ("203.0.113.9", 4444)
 TOKEN = "z" * 32
+
+
+def stored(rl, expected, timeout=5.0):
+    """Stored trace count once it reaches ``expected`` (or the timeout passes).
+
+    The trace is finished just after the response is sent, so the request can return before
+    it is queued for the writer; one ``flush()`` is not enough on a slow machine.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        rl.store.flush(timeout)
+        count = rl.store.count()
+        if count >= expected or time.monotonic() > deadline:
+            return count
+        time.sleep(0.02)
 
 
 def raw_get(app, path, client, host, extra=(), server=("127.0.0.1", 8000)):
@@ -151,15 +167,13 @@ def test_m4_anonymous_flag_is_ignored_but_credentials_force(tmp_path):
         rl.store.flush(5)
         assert rl.store.count() == 0  # neither profiled nor stored
         c.get("/", headers={"X-Redline-Profile": "1", "Authorization": f"Bearer {TOKEN}"})
-        rl.store.flush(5)
-        assert rl.store.count() == 1
+        assert stored(rl, 1) == 1
         # a login cookie counts as well
         login = c.post("/_redline/api/login", json={"token": TOKEN})
         cookie = login.headers["set-cookie"].split(";", 1)[0].split("=", 1)[1]
         c.cookies.set(SESSION_COOKIE, cookie)
         c.get("/?_redline=profile")
-        rl.store.flush(5)
-        assert rl.store.count() == 2
+        assert stored(rl, 2) == 2
 
 
 def test_m4_debug_mode_honours_the_flag(tmp_path):
@@ -167,8 +181,7 @@ def test_m4_debug_mode_honours_the_flag(tmp_path):
     app.debug = True
     with TestClient(app, client=REMOTE) as c:
         c.get("/", headers={"X-Redline-Profile": "1"})
-        rl.store.flush(5)
-        assert rl.store.count() == 1
+        assert stored(rl, 1) == 1
 
 
 # ── M5 (poc_load_target.py) ───────────────────────────────────────────────────────────
