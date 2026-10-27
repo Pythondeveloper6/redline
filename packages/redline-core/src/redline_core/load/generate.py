@@ -8,6 +8,11 @@
     the file for you to review and enable. Unsafe methods (POST/PUT/PATCH/DELETE) are skipped
     unless ``include_writes``; then they are added with ``weight = 0`` and the request body's
     example (if any).
+``from_routes(routes, store=None)``
+    A framework's route table (Django URLconf, Flask ``url_map``): each ``(method, template,
+    path)`` with a concrete ``path`` (no parameters) becomes a request with ``weight = 1``;
+    a parameterised template is filled with a concrete path from a recent trace of that
+    route when ``store`` has one (``weight = 1``), else it is left out.
 ``from_traces(store)``
     The top endpoints by request count in a window, each with a concrete path from a recent
     trace, weighted by count. Only method and path are copied: never bodies or headers, and a
@@ -24,7 +29,15 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-__all__ = ["from_openapi", "from_traces", "load_openapi", "to_json", "to_toml"]
+__all__ = [
+    "dump",
+    "from_openapi",
+    "from_routes",
+    "from_traces",
+    "load_openapi",
+    "to_json",
+    "to_toml",
+]
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8000"
 SAFE_METHODS = ("get", "head")
@@ -315,7 +328,74 @@ def from_traces(
     }
 
 
+# ---------------------------------------------------------------------------- routes
+def from_routes(
+    routes: Any,
+    *,
+    store: Any = None,
+    base_url: str | None = None,
+    name: str = "app routes",
+    mount_prefix: str = "/_redline",
+) -> dict[str, Any]:
+    """Build a scenario from ``(method, template, path_or_None)`` route triples.
+
+    ``template`` is the route as the adapter records it in ``Trace.route`` (so recent traces
+    can be matched); ``path`` is the concrete URL when the route has no parameters, else
+    ``None``. Duplicates and Redline's own mount are skipped.
+    """
+    requests: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for method, template, path in routes:
+        method = str(method).upper()
+        if (method, template) in seen or str(template).startswith(mount_prefix):
+            continue
+        seen.add((method, template))
+        if path is None:
+            path = _sample_path(store, template, method) if store is not None else None
+            if path is None:
+                continue
+        if not isinstance(path, str) or not path.startswith("/") or path.startswith("//"):
+            continue
+        requests.append(
+            {"name": f"{method} {template}", "method": method, "path": path, "weight": 1}
+        )
+    if not requests:
+        raise ValueError("no GET route without parameters (and no captured traffic to fill one)")
+    return {
+        "name": name,
+        "base_url": base_url or DEFAULT_BASE_URL,
+        "timeout_s": 10,
+        "requests": requests,
+        "profile": dict(DEFAULT_PROFILE),
+    }
+
+
+def _sample_path(store: Any, route: str, method: str) -> str | None:
+    from ..storage import Filters
+
+    try:
+        page = store.list(Filters(route=route, method=method), limit=5)
+    except Exception:
+        return None
+    for item in page.items:
+        p = item.get("path")
+        if (
+            isinstance(p, str)
+            and p.startswith("/")
+            and "redacted" not in p.lower()
+            and "{" not in p
+            and 200 <= int(item.get("status") or 0) < 400
+        ):
+            return p
+    return None
+
+
 # ---------------------------------------------------------------------------- writers
+def dump(scenario: Mapping[str, Any], out: str | None) -> str:
+    """Serialise for ``out``: JSON for ``*.json``, else TOML (also for stdout)."""
+    return to_json(scenario) if out and out.endswith(".json") else to_toml(scenario)
+
+
 def to_json(scenario: Mapping[str, Any]) -> str:
     return json.dumps(scenario, indent=2) + "\n"
 
