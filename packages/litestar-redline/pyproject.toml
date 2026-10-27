@@ -1,0 +1,94 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "litestar-redline"
+version = "0.1.0a1"
+description = "A modern request profiler for Litestar and SQLAlchemy: span timelines, N+1 detection with fix diffs, one-click EXPLAIN, flamegraphs and a fast web UI."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Mahmoud Ahmed", email = "pythondeveloper6@gmail.com" }]
+maintainers = [{ name = "Mahmoud Ahmed", email = "pythondeveloper6@gmail.com" }]
+keywords = [
+    "litestar",
+    "asgi",
+    "sqlalchemy",
+    "profiler",
+    "performance",
+    "n+1",
+    "explain",
+    "flamegraph",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Web Environment",
+    "Framework :: AsyncIO",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Debuggers",
+    "Topic :: System :: Monitoring",
+    "Typing :: Typed",
+]
+# Lockstep: the adapter pins the exact core release it was tested with.
+dependencies = [
+    "redline-core==0.1.0a1",
+    "litestar>=2.12,<3",
+    "sqlalchemy[asyncio]>=2.0,<3",
+]
+
+[project.optional-dependencies]
+profile = ["redline-core[profile]==0.1.0a1"]
+
+[project.urls]
+Homepage = "https://github.com/Pythondeveloper6/redline"
+Documentation = "https://pythondeveloper6.github.io/redline/litestar/"
+Source = "https://github.com/Pythondeveloper6/redline"
+Issues = "https://github.com/Pythondeveloper6/redline/issues"
+Changelog = "https://github.com/Pythondeveloper6/redline/blob/main/CHANGELOG.md"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.8",
+    "httpx>=0.27",
+    "aiosqlite>=0.20",
+    "greenlet>=3.0",
+    "pyinstrument>=5.0",
+    "advanced-alchemy>=0.20",
+]
+
+[tool.uv.sources]
+redline-core = { workspace = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/litestar_redline"]
+exclude = ["**/__pycache__", "**/*.py[cod]", "**/.DS_Store"]
+
+[tool.hatch.build.targets.sdist]
+include = ["/src/litestar_redline", "/tests", "/README.md", "/LICENSE"]
+exclude = ["**/__pycache__", "**/*.py[cod]", "**/.DS_Store"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--strict-markers -q"
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+filterwarnings = [
+    "ignore:The base_url:UserWarning",
+    "ignore:.*deprecated inferred style",
+    "ignore::sqlalchemy.exc.SADeprecationWarning",
+]
+
+[tool.ruff]
+extend = "../../pyproject.toml"

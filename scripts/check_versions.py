@@ -19,6 +19,7 @@ PACKAGES = {
     "django-redline": "django_redline",
     "fastapi-redline": "fastapi_redline",
     "flask-redline": "flask_redline",
+    "litestar-redline": "litestar_redline",
 }
 
 
