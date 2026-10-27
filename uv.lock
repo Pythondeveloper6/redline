@@ -484,6 +484,19 @@ wheels = [
 ]
 
 [[package]]
+name = "django-ninja"
+version = "1.7.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "django" },
+    { name = "pydantic" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/55/0f/5c6811706676be4c5faf5a3fd0d3ad56293db7ce8f0cc62c3e2f8e23b26d/django_ninja-1.7.1.tar.gz", hash = "sha256:2183ee5426a8c95bfabae1b7f60c471a56c48022296eaaf1cc54b00010b07ee6", size = 2341814, upload-time = "2026-09-19T05:35:56.437Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a8/05/7bf91a79ac69632b15b878ad658371dcae58a4e2545da3709cfc55916da3/django_ninja-1.7.1-py3-none-any.whl", hash = "sha256:61137e9fbb97ca15a92cdbfdcf9f6a738464b328c6cb11090faf17042035ec69", size = 2376240, upload-time = "2026-09-19T05:35:54.89Z" },
+]
+
+[[package]]
 name = "django-redline"
 version = "0.1.0a1"
 source = { editable = "packages/django-redline" }
@@ -499,6 +512,7 @@ profile = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "django-ninja" },
     { name = "pyinstrument" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -516,6 +530,7 @@ provides-extras = ["profile"]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "django-ninja", specifier = ">=1.3" },
     { name = "pyinstrument", specifier = ">=5.0" },
     { name = "pytest", specifier = ">=8.3" },
     { name = "pytest-asyncio", specifier = ">=0.24" },
