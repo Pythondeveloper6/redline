@@ -87,7 +87,8 @@ concrete path; header values are never copied, and an `Authorization` or `Cookie
 a `${env:REDLINE_CHECK_AUTHORIZATION}` or `${env:REDLINE_CHECK_COOKIE}` placeholder.
 
 `redline check show` takes the report JSON and prints it again; `--markdown OUT` and
-`--junit OUT` write those files from it. It exits `0` unless `--fail-on` is given.
+`--junit OUT` write those files from it. It exits `0` unless `--fail-on` is given; with
+`--fail-on` it exits `1` when a request matches it, as `compare` does.
 
 ```bash
 redline check init --from-traces --route '/orders*' -o checks/orders.toml

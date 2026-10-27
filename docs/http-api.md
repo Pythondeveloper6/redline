@@ -702,7 +702,7 @@ file-backed SQLite store (`501 not_supported` otherwise).
 | `GET api/checks/suites/{id}/export` | the suite as TOML, `text/plain`, `Content-Disposition: attachment; filename="<name>.toml"` |
 | `POST api/checks/suites/draft` body `{"routes"?, "limit"?}` | a suite object built from seen traffic; not saved |
 | `POST api/checks/runs` body `{"suite_id", "kind", "baseline_id"?, "label"?}` | `202 {"id", "status": "running", "kind", "suite_id", "baseline_id"}` |
-| `GET api/checks/runs?suite_id=&kind=&limit=` | `{"items": [Run]}`, newest first |
+| `GET api/checks/runs?suite_id=&kind=&limit=` | `{"items": [Run]}`, newest first. `kind` is `baseline` or `compare`; `limit` is 1 to 500 (default 50); a bad value is `400 invalid_filter` |
 | `GET api/checks/runs/{id}` | a `Run` plus `suite`, `report` and `requests` |
 | `POST api/checks/runs/{id}/stop` | `{"stopped": true}`; `false` when it was not running |
 | `DELETE api/checks/runs/{id}` | `{"deleted": ...}`. `409 run_active` while running |
@@ -729,8 +729,8 @@ created_at, summary}`.
 
 **Draft.** `routes` is a list of routes as `GET api/endpoints` shows them (`"/orders/{id}"`),
 `"GET /x"` strings or `{"method", "route"}` objects; omit it for every read-only route.
-`limit` is 1 to 200 (default 50). It uses the last 7 days of traffic and returns a suite
-object ready to edit; its only headers are the placeholders
+`limit` is at least 1 (default 50; a larger value is capped at 200, and `0` or a non-number is
+`400 invalid_body`). It uses the last 7 days of traffic and returns a suite object ready to edit; its only headers are the placeholders
 `${env:REDLINE_CHECK_AUTHORIZATION}` and `${env:REDLINE_CHECK_COOKIE}`, and only when recent
 requests carried those headers.
 
@@ -761,8 +761,10 @@ A `Run`:
 }
 ```
 
-`status` is `running`, `done`, `failed` or `stopped`; times are epoch seconds. While running,
-`progress` is `{done, total, current, ...}`. `GET api/checks/runs/{id}` adds `suite` (redacted),
+`status` is `running`, `done`, `failed` or `stopped`; times are epoch seconds. `summary` is the
+report's summary: besides the keys shown above it has `requests`, `perf`, `response`, `passed`,
+`failed`, `failing`, `speed_ratio`, `queries_change`, `server_side`, `wins`, `regressions` and,
+for a run that was stopped, `stopped_reason`. While running, `progress` is `{done, total, current, ...}`. `GET api/checks/runs/{id}` adds `suite` (redacted),
 `report` and `requests`: for a **compare**, `report` is the full report in the same shape as
 `redline check compare --json` (`{format: "redline-check-report", version, suite, baseline,
 run, summary, requests: [...]}`, each request with `perf`, `server` and `response`) and
