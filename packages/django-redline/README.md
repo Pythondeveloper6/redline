@@ -1,3 +1,12 @@
+<p align="center">
+  <a href="https://pythondeveloper6.github.io/redline/">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/assets/logo-dark.svg">
+      <img alt="Redline" src="https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/assets/logo-light.svg" height="56">
+    </picture>
+  </a>
+</p>
+
 # django-redline
 
 A modern request profiler for Django: SQL timelines, **N+1 detection with ready-to-apply
@@ -176,7 +185,7 @@ with span("render-pdf", pages=3):
   attributed to the project view that handled the request.
 
 Supports Django 5.2, 6.0 and 6.1 on Python 3.12+. A runnable demo is in
-[`examples/django`](../../examples/django).
+[`examples/django`](https://github.com/Pythondeveloper6/redline/blob/main/examples/django).
 
 ## License
 
