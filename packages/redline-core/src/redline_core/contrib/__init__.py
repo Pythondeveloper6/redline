@@ -8,4 +8,6 @@ Each module imports its third-party library at import time, so import only what 
 - ``redline_core.contrib.redis``: redis-py (sync and asyncio) commands as ``cache`` spans
 - ``redline_core.contrib.asyncpg``: asyncpg connections as ``sql`` spans
 - ``redline_core.contrib.psycopg``: psycopg 3 cursors as ``sql`` spans
+- ``redline_core.contrib.strawberry``: Strawberry ``RedlineExtension`` (GraphQL resolver spans)
+- ``redline_core.contrib.graphene``: Graphene ``RedlineMiddleware`` (GraphQL resolver spans)
 """

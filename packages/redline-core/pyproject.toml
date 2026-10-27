@@ -51,6 +51,8 @@ requests = ["requests>=2.31"]
 redis = ["redis>=5.0"]
 asyncpg = ["asyncpg>=0.29"]
 psycopg = ["psycopg>=3.1"]
+strawberry = ["strawberry-graphql>=0.240"]
+graphene = ["graphene>=3.3"]
 
 [project.urls]
 Homepage = "https://github.com/Pythondeveloper6/redline"
@@ -74,6 +76,8 @@ dev = [
     "fakeredis>=2.20",
     "asyncpg>=0.29",
     "psycopg>=3.1",
+    "strawberry-graphql>=0.240",
+    "graphene>=3.3",
 ]
 
 [tool.hatch.build.targets.wheel]
