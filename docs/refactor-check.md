@@ -47,13 +47,13 @@ flowchart LR
     Redline has seen, with a sample path and the last p50 and query count of each. Tick the
     ones you want, or add a request by hand. For each request you can turn **Perf** and
     **Response** on or off, add ignore paths, headers and an expected status. Suite-level
-    settings are the base URL, repeat, warmup and the thresholds. *Save* stores it in the
+    settings are the base URL, repeat, warmup and the thresholds. *Save suite* stores it in the
     Redline store; *Export TOML* gives you the same suite as a file you can commit.
 
     ![The suite builder: routes Redline has seen, with a sample path, p50 and queries](assets/screenshots/checks-builder-light.png){ .rl-shot .rl-only-light }
     ![The suite builder: routes Redline has seen, with a sample path, p50 and queries](assets/screenshots/checks-builder-dark.png){ .rl-shot .rl-only-dark }
 
-    **2. Record a baseline.** On the suite page press *Baseline*, ideally with a label
+    **2. Record a baseline.** On the suite page press *Record baseline*, ideally with a label
     ("before the eager-loading change"). Redline runs the suite in a background process and
     shows live progress.
 
@@ -148,7 +148,7 @@ perf = false
 
 | Key | Default | Meaning |
 |---|---|---|
-| `name` | `"refactor check"` | A non-empty name; shown in reports and used for the exported file |
+| `name` | the file name without its extension | A non-empty name; shown in reports and used for the exported file. `"refactor check"` for a suite given as an object |
 | `base_url` | none | `http://` or `https://` URL of the app under test. The CLI's `--base-url` overrides it. Required unless you pass `--base-url` |
 | `headers` | `{}` | Headers sent with every request. Values may contain [`${env:NAME}`](#environment-placeholders) |
 | `timeout_s` | `10` | Per-call timeout in seconds. More than `0`, at most `600` |

@@ -8,7 +8,8 @@
 `Development Status :: 3 - Alpha`, and the code is on GitHub under the MIT licence. It is
 **not on PyPI yet**: you install it from GitHub (see [Getting started](getting-started.md#install)).
 Redline has four planned parts; the first two (Profile and Analyze) and the third (Stress)
-exist, and the fourth (Compare / CI) is next.
+exist. The fourth (Compare / CI) has started: the [refactor check](refactor-check.md) is built
+in the unreleased 0.3.0a1, and the rest of it is next.
 
 What that means in practice:
 
@@ -35,7 +36,7 @@ What that means in practice:
 - **Not yet proven in production.** It is designed to be usable there with the
   [production preset](production.md#the-production-preset), but multi-process behaviour in
   particular has had little real-world exercise.
-- **Not built.** Baselines in CI and a pytest plugin (v0.3), a shared Postgres store,
+- **Not built.** A pytest plugin and `redline ci` (v0.3), a shared Postgres store,
   Celery stitching, and everything else on the [roadmap](roadmap.md).
 
 Use it in development and staging first, and on an internal service second.

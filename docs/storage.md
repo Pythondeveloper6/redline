@@ -89,8 +89,9 @@ Retention is by count, not age: whenever a run is created or a baseline is impor
 suite keeps its **50 newest runs** (runs without a suite form one group). A run that is still
 running is never removed, and neither is a baseline that a kept compare run refers to.
 **Clear all** (`DELETE api/traces`) and `redline_clear` do not touch these tables. A `running`
-row whose background process died (checked when runs are listed, after 10 seconds) becomes
-`failed` with the error `the check process exited unexpectedly`.
+row whose background process died becomes `failed` with the error `the check process exited
+unexpectedly`. Redline checks this when runs are read, for runs older than 10 seconds, and only
+where a `runs` directory sits beside the store file (as for load runs).
 
 The tables are written synchronously, outside the trace writer's batches, because a check run
 is a handful of writes and the report must be readable the moment the run ends.
@@ -98,8 +99,9 @@ is a handful of writes and the report must be readable the moment the run ends.
 ### Migration
 
 Migrations are additive and run when the store connects. A 0.1 file (no `schema_version`
-row) a version 2 file or a version 3 file is migrated **in place**, inside one `BEGIN IMMEDIATE` transaction that re-checks the
-version once it holds the lock, so several workers starting at once migrate it exactly once.
+row), a version 2 file and a version 3 file are migrated **in place**, inside one `BEGIN
+IMMEDIATE` transaction that re-checks the version once it holds the lock, so several workers
+starting at once migrate it exactly once.
 The new tables are created and **backfilled from the traces already stored**. Traces
 written by 0.1 still load: every new field has a default.
 

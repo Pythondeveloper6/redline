@@ -59,7 +59,8 @@ migrated in place to schema version 4 when 0.3 first opens it.
   secret header values are masked in stored suites and API responses; baselines are redacted on
   write and on import.
 - The `X-Redline-Check` tag cannot force storage: it is honoured only for a run that exists in
-  the store and is running (or ended less than a minute ago); otherwise it is stripped.
+  the store and is running (or ended less than a minute ago); otherwise its `check_*` tags are
+  stripped, and a request that sampling kept only because of the tag is dropped.
 
 ## 0.2.0a1 (2026-10-27)
 
