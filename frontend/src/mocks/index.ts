@@ -1,6 +1,7 @@
 import type { Trace, TraceFilters } from '../types'
 import { mockHistoryLoad } from './historyLoad'
-import { ALL, EXPLAIN_PG, EXPLAIN_SQLITE, buildEndpoints, buildIssueGroups, buildProfile, summarize } from './data'
+import { mockAnalysis } from './analysis'
+import { ALL, genericTraceAt, EXPLAIN_PG, EXPLAIN_SQLITE, buildEndpoints, buildIssueGroups, buildProfile, summarize } from './data'
 
 let traces: Trace[] = ALL.slice()
 const delay = (n = 120) => new Promise(r => setTimeout(r, n + Math.random() * 80))
@@ -19,8 +20,17 @@ function filtered(sp: URLSearchParams): Trace[] {
     if (f.route && t.route !== f.route) return false
     if (f.replay_of && t.tags.replay_of !== f.replay_of) return false
     if (f.has_issues === '1' && t.issues.length === 0) return false
+    if (f.since && t.started_at <= Number(f.since)) return false
+    if (f.sql && !t.spans.some(x => x.kind === 'sql' && String(x.data.sql).toLowerCase().includes(f.sql!.toLowerCase()))) return false
     return true
   })
+}
+
+/** A synthetic new request for the dev-only Live mode. */
+export function mockNewTrace() {
+  const t = genericTraceAt()
+  traces = [t, ...traces]
+  return summarize(t)
 }
 
 export async function mockFetch(method: string, url: string, body: unknown): Promise<{ status: number; json: unknown }> {
@@ -102,6 +112,8 @@ export async function mockFetch(method: string, url: string, body: unknown): Pro
     if (!s.data.explainable) return err(400, 'not_explainable', 'Only SELECT queries can be explained.')
     return ok(s.data.vendor === 'sqlite' ? EXPLAIN_SQLITE : EXPLAIN_PG)
   }
+  const an = mockAnalysis(method, path, u.searchParams)
+  if (an) return an
   const hl = await mockHistoryLoad(method, path, u.searchParams, body)
   if (hl) return hl
   return err(404, 'not_found', 'Unknown mock endpoint ' + path)

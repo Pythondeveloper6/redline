@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom'
 import { copyText } from '../lib/format'
 import { tokenizeSql, formatSql } from '../lib/sql'
 import type { IssueKind, Severity } from '../types'
-import { ISSUE_LABEL } from '../lib/format'
+import { ISSUE_LABEL, ISSUE_STYLE } from '../lib/format'
 import CallsiteLink from './CallsiteLink'
 
 export function Icon({ d, size = 14, className = '' }: { d: string; size?: number; className?: string }) {
@@ -40,9 +40,9 @@ export const statusTone = (s: number) => (s >= 500 ? 'bad' : s >= 400 ? 'warn' :
 export function Status({ code }: { code: number }) { return <Pill tone={statusTone(code)}><span className="num font-semibold">{code}</span></Pill> }
 
 export const sevTone = (s: Severity) => (s === 'critical' ? 'bad' : s === 'warning' ? 'warn' : 'info') as keyof typeof TONE
-export function IssueBadge({ kind }: { kind: IssueKind }) {
-  const tone = kind === 'n_plus_one' || kind === 'slow_query' ? 'bad' : kind === 'duplicate_query' ? 'warn' : 'info'
-  return <Pill tone={tone}>{ISSUE_LABEL[kind]}</Pill>
+export function IssueBadge({ kind, icon = false }: { kind: IssueKind; icon?: boolean }) {
+  const st = ISSUE_STYLE[kind]
+  return <Pill tone={st?.tone ?? 'info'}>{icon && st && <Icon d={st.d} size={11} />}{ISSUE_LABEL[kind] ?? kind}</Pill>
 }
 export function Sev({ s }: { s: Severity }) { return <Pill tone={sevTone(s)}>{s}</Pill> }
 

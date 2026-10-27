@@ -54,5 +54,7 @@ button { cursor: pointer; }
 .anim-slide { animation: slidein .16s ease-out; }
 .anim-fade { animation: fade .12s ease-out; }
 .live-dot { animation: pulse-dot 1.6s ease-in-out infinite; }
-@media (prefers-reduced-motion: reduce) { .anim-slide, .anim-fade, .live-dot { animation: none; } }
+@keyframes row-flash { from { background-color: rgb(var(--accent) / 0.16) } to { background-color: transparent } }
+.row-flash { animation: row-flash 2.4s ease-out; }
+@media (prefers-reduced-motion: reduce) { .anim-slide, .anim-fade, .live-dot, .row-flash { animation: none; } }
 tr[data-sel='true'] { background: rgb(var(--accent) / 0.07); box-shadow: inset 2px 0 0 rgb(var(--accent)); }

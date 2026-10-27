@@ -7,8 +7,14 @@ import Issues from './pages/Issues'
 import Compare from './pages/Compare'
 import History from './pages/History'
 import Load from './pages/Load'
+import Database from './pages/Database'
+import Cache from './pages/Cache'
+import External from './pages/External'
+import SnapshotApp from './SnapshotApp'
+import { getSnapshot } from './lib/snapshot'
 
 export default function App() {
+  if (getSnapshot()) return <SnapshotApp />
   return (
     <Routes>
       <Route element={<Shell />}>
@@ -18,6 +24,9 @@ export default function App() {
         <Route path="/compare/:a/:b" element={<Compare />} />
         <Route path="/endpoints" element={<Endpoints />} />
         <Route path="/issues" element={<Issues />} />
+        <Route path="/database" element={<Database />} />
+        <Route path="/cache" element={<Cache />} />
+        <Route path="/external" element={<External />} />
         <Route path="/history" element={<History />} />
         <Route path="/load" element={<Load />} />
         <Route path="/load/:id" element={<Load />} />

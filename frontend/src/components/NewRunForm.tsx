@@ -45,6 +45,7 @@ export default function NewRunForm({ onStarted, onCancel }: { onStarted: (id: st
     e.preventDefault()
     const requests = rows.filter(r => r.path.trim()).map(r => ({ method: r.method, path: r.path.trim(), weight: Math.max(1, Number(r.weight) || 1) }))
     if (!requests.length) { setErr('Add at least one request path.'); return }
+    if (requests.some(r => !r.path.startsWith('/') || r.path.startsWith('//'))) { setErr('Each path must start with a single "/" (the target is always this app).'); return }
     const n = (s: string) => Number(s)
     const profile: NewRunBody['profile'] =
       mode === 'constant' ? { mode, rps: n(v.rps), duration_s: n(v.duration) }

@@ -1,4 +1,5 @@
-import type { CompareResult, EndpointStats, ExplainResult, IssueGroup, Meta, Page, Speedscope, Trace, TraceFilters } from './types'
+import type { CacheStat, CompareResult, EndpointStats, ExplainResult, ExternalStat, IndexAdvice, IssueGroup, Meta, Page, Speedscope, SqlStat, Trace, TraceFilters } from './types'
+import { getSnapshot } from './lib/snapshot'
 
 export class ApiError extends Error {
   status: number
@@ -49,7 +50,24 @@ function csrfHeaders(method: string): Record<string, string> {
   return {}
 }
 
+/** Offline snapshot: answer from `window.__REDLINE_SNAPSHOT__`, never touch the network. */
+function fromSnapshot(method: string, url: string): { status: number; json: any } {
+  const snap = getSnapshot()!
+  const path = new URL(url, 'http://x/').pathname.replace(/^\/?(\.\/)?/, '').replace(/^\//, '')
+  const err = (status: number, code: string, message: string) => ({ status, json: { error: { code, message } } })
+  if (method !== 'GET') return err(403, 'snapshot', 'This is an offline snapshot; nothing can be changed.')
+  if (path === 'api/meta') {
+    return { status: 200, json: { version: 'snapshot', framework: snap.trace.framework, settings: {}, storage: { rows: 1, path: '' }, features: { load_from_ui: false, sse: false, snapshot: false } } }
+  }
+  if (path === `api/traces/${snap.trace.id}`) return { status: 200, json: snap.trace }
+  if (path === `api/traces/${snap.trace.id}/profile`) {
+    return snap.profile ? { status: 200, json: snap.profile } : err(404, 'profile_not_found', 'This snapshot has no profile.')
+  }
+  return err(404, 'snapshot', 'Not available in an offline snapshot.')
+}
+
 async function raw(method: string, url: string, body?: unknown): Promise<{ status: number; json: any }> {
+  if (getSnapshot()) return fromSnapshot(method, url)
   if (import.meta.env.DEV) {
     if (!mockReady) mockReady = wantsMock() ? initMock(true) : Promise.resolve()
     await mockReady
@@ -108,5 +126,10 @@ export const api = {
   explain: (trace_id: string, span_id: string, analyze = false) =>
     call<ExplainResult>('POST', './api/explain', { trace_id, span_id, analyze }),
   clear: () => call<{ deleted: number }>('DELETE', './api/traces'),
+  sql: (p: { q?: string; window: string; limit?: number }) => call<{ items: SqlStat[] }>('GET', './api/sql' + qs(p)),
+  indexes: (window: string) => call<IndexAdvice>('GET', './api/indexes' + qs({ window })),
+  cache: (window: string) => call<{ items: CacheStat[] }>('GET', './api/cache' + qs({ window })),
+  external: (window: string) => call<{ items: ExternalStat[] }>('GET', './api/external' + qs({ window })),
+  snapshotUrl: (id: string) => `./api/traces/${enc(id)}/snapshot`,
   profileUrl: (id: string) => `./api/traces/${enc(id)}/profile`,
 }
