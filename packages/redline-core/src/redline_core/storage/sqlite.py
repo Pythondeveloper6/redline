@@ -18,6 +18,13 @@ Design points (each one fixes something django-silk gets wrong):
 
 One connection is shared behind a lock; SQLite serialises writers anyway and the reads the
 UI does are small. ``path=":memory:"`` works (handy in tests).
+
+Schema v2 (``CONTRACT.md`` §11) adds, in the same transaction as each batch of traces,
+per-trace SQL / outbound HTTP / cache aggregates (pruned with their traces) and long-lived
+history: hourly rollups with merged latency histograms, releases, an issue index, and the
+load tester's runs. Those outlive traces for ``history_retention_s`` and survive
+:meth:`~SQLiteStore.clear` unless ``history=True``. A v0.1 file is migrated (and the new
+tables backfilled from its traces) the first time it is opened.
 """
 
 from __future__ import annotations
@@ -34,17 +41,30 @@ import weakref
 from collections import defaultdict
 from typing import Any
 
-from ..model import Issue, Trace
+from ..histogram import Histogram
+from ..model import Callsite, Issue, Trace
+from ..runs import Run, RunStep
 from .base import (
     MAX_BUCKETS,
+    Bottlenecks,
+    CacheStats,
     EndpointStats,
+    ExternalStats,
     Filters,
+    History,
     IssueGroup,
+    IssueIndexEntry,
     Page,
+    Period,
+    PeriodComparison,
+    PeriodStats,
+    ReleaseInfo,
+    SqlStats,
     decode_cursor,
     encode_cursor,
     percentile,
 )
+from .derive import HOUR, Derived, derive, fingerprint_key
 
 __all__ = ["SQLiteStore"]
 
@@ -93,7 +113,131 @@ CREATE TABLE IF NOT EXISTS issues (
 CREATE INDEX IF NOT EXISTS issues_by_id ON issues (issue_id, started_at);
 CREATE INDEX IF NOT EXISTS issues_trace ON issues (trace_id);
 CREATE INDEX IF NOT EXISTS issues_started ON issues (started_at);
+CREATE TABLE IF NOT EXISTS meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
+
+#: v2 (``CONTRACT.md`` §11). Trace-scoped tables are pruned with their traces; the history
+#: tables (rollups, releases, issue index, runs) are kept ``history_retention_s``.
+_SCHEMA_V2 = """
+CREATE TABLE IF NOT EXISTS trace_sql (
+    trace_id TEXT NOT NULL,
+    started_at REAL NOT NULL,
+    route TEXT NOT NULL,
+    method TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    sql TEXT NOT NULL,
+    count INTEGER NOT NULL,
+    total_ms REAL NOT NULL,
+    max_ms REAL NOT NULL,
+    rows INTEGER,
+    rows_n INTEGER NOT NULL DEFAULT 0,
+    vendor TEXT NOT NULL DEFAULT 'other',
+    db_alias TEXT NOT NULL DEFAULT 'default'
+);
+CREATE INDEX IF NOT EXISTS trace_sql_started ON trace_sql (started_at);
+CREATE INDEX IF NOT EXISTS trace_sql_trace ON trace_sql (trace_id);
+CREATE TABLE IF NOT EXISTS trace_ext (
+    trace_id TEXT NOT NULL,
+    started_at REAL NOT NULL,
+    method TEXT NOT NULL,
+    host TEXT NOT NULL,
+    url_pattern TEXT NOT NULL,
+    count INTEGER NOT NULL,
+    total_ms REAL NOT NULL,
+    max_ms REAL NOT NULL,
+    errors INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS trace_ext_started ON trace_ext (started_at);
+CREATE INDEX IF NOT EXISTS trace_ext_trace ON trace_ext (trace_id);
+CREATE TABLE IF NOT EXISTS trace_cache (
+    trace_id TEXT NOT NULL,
+    started_at REAL NOT NULL,
+    backend TEXT NOT NULL,
+    key_pattern TEXT NOT NULL,
+    gets INTEGER NOT NULL,
+    hits INTEGER NOT NULL,
+    misses INTEGER NOT NULL,
+    sets INTEGER NOT NULL,
+    deletes INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS trace_cache_started ON trace_cache (started_at);
+CREATE INDEX IF NOT EXISTS trace_cache_trace ON trace_cache (trace_id);
+CREATE TABLE IF NOT EXISTS rollups (
+    bucket INTEGER NOT NULL,
+    release TEXT NOT NULL,
+    route TEXT NOT NULL,
+    method TEXT NOT NULL,
+    count INTEGER NOT NULL,
+    errors INTEGER NOT NULL,
+    sum_ms REAL NOT NULL,
+    hist BLOB NOT NULL,
+    sum_queries INTEGER NOT NULL,
+    sum_query_ms REAL NOT NULL,
+    issues INTEGER NOT NULL,
+    PRIMARY KEY (bucket, release, route, method)
+);
+CREATE INDEX IF NOT EXISTS rollups_release ON rollups (release);
+CREATE TABLE IF NOT EXISTS releases (
+    release TEXT PRIMARY KEY,
+    first_seen REAL NOT NULL,
+    last_seen REAL NOT NULL,
+    requests INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS issue_index (
+    issue_id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    severity TEXT NOT NULL,
+    title TEXT NOT NULL,
+    route TEXT NOT NULL,
+    first_seen REAL NOT NULL,
+    last_seen REAL NOT NULL,
+    first_release TEXT,
+    last_release TEXT,
+    occurrences INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS issue_index_last ON issue_index (last_seen);
+CREATE TABLE IF NOT EXISTS issue_rollups (
+    bucket INTEGER NOT NULL,
+    release TEXT NOT NULL,
+    issue_id TEXT NOT NULL,
+    occurrences INTEGER NOT NULL,
+    PRIMARY KEY (bucket, release, issue_id)
+);
+CREATE INDEX IF NOT EXISTS issue_rollups_release ON issue_rollups (release);
+CREATE TABLE IF NOT EXISTS runs (
+    id TEXT PRIMARY KEY,
+    created_at REAL NOT NULL,
+    finished_at REAL,
+    status TEXT NOT NULL,
+    name TEXT NOT NULL,
+    config TEXT NOT NULL,
+    summary TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS run_steps (
+    run_id TEXT NOT NULL,
+    step INTEGER NOT NULL,
+    started_at REAL NOT NULL,
+    ended_at REAL,
+    target_rps REAL NOT NULL,
+    achieved_rps REAL NOT NULL,
+    sent INTEGER NOT NULL,
+    ok INTEGER NOT NULL,
+    errors INTEGER NOT NULL,
+    dropped INTEGER NOT NULL,
+    hist BLOB NOT NULL,
+    error_breakdown TEXT NOT NULL,
+    PRIMARY KEY (run_id, step)
+);
+"""
+
+SCHEMA_VERSION = 2
+#: Tables holding one or more rows per trace, deleted with it.
+_TRACE_TABLES = ("profiles", "trace_tags", "issues", "trace_sql", "trace_ext", "trace_cache")
+#: Long-lived tables, kept across ``clear()`` unless ``history=True``.
+_HISTORY_TABLES = ("rollups", "releases", "issue_index", "issue_rollups", "run_steps", "runs")
 
 #: Every live store, so the fork hook can reset them in the child.
 _STORES: weakref.WeakSet[SQLiteStore] = weakref.WeakSet()
@@ -125,6 +269,9 @@ class SQLiteStore:
     :param queue_size: bound of the write queue; overflow is dropped and counted.
     :param max_rows, max_age_s: retention applied by :meth:`prune`, which the writer runs
         every ``prune_every`` saved traces.
+    :param history_retention_s: how long the history tables (hourly rollups, releases, the
+        issue index, load-test runs) are kept; independent of trace retention. ``0``/``None``
+        keeps them forever.
     """
 
     def __init__(
@@ -137,15 +284,22 @@ class SQLiteStore:
         max_age_s: float | None = 7 * 86_400.0,
         prune_every: int = 200,
         batch_size: int = 50,
+        history_retention_s: float | None = 90 * 86_400.0,
     ) -> None:
         path = os.fspath(path)
-        for name, value in (("max_rows", max_rows), ("max_age_s", max_age_s)):
+        for name, value in (
+            ("max_rows", max_rows),
+            ("max_age_s", max_age_s),
+            ("history_retention_s", history_retention_s),
+        ):
             if value is not None and value < 0:
                 raise ValueError(f"{name} must not be negative (use 0 or None to disable it).")
         self.path = path
         #: Retention rules; ``0``/``None`` disables a rule.
         self.max_rows = max_rows or None
         self.max_age_s = max_age_s or None
+        #: How long rollups, releases, the issue index and runs are kept (``None``: forever).
+        self.history_retention_s = history_retention_s or None
         self.prune_every = max(1, prune_every)
         self.batch_size = max(1, batch_size)
         self.background = background
@@ -174,6 +328,7 @@ class SQLiteStore:
             conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.executescript(_SCHEMA)
+        _migrate(conn)
         return conn
 
     def _reset_after_fork(self) -> None:
@@ -224,6 +379,8 @@ class SQLiteStore:
     @classmethod
     def from_settings(cls, settings: Any, **kwargs: Any) -> SQLiteStore:
         """Build from a :class:`~redline_core.conf.Settings`."""
+        days = getattr(settings, "history_retention_days", 90)
+        kwargs.setdefault("history_retention_s", float(days) * 86_400.0 if days else None)
         return cls(
             settings.storage_path,
             queue_size=settings.writer_queue_size,
@@ -323,13 +480,26 @@ class SQLiteStore:
                 )
             if t.profile is not None:
                 profiles.append((t.id, json.dumps(t.profile)))
+        derived = derive(traces)  # outside the lock; redone in the rare re-save case
         with self._lock:
             c = self._conn
             c.execute("BEGIN")
             try:
-                ids = [(t.id,) for t in traces]
-                c.executemany("DELETE FROM trace_tags WHERE trace_id = ?", ids)
-                c.executemany("DELETE FROM issues WHERE trace_id = ?", ids)
+                # A re-saved trace replaces its rows; it is not counted in the history twice.
+                ids = [t.id for t in traces]
+                existing = {
+                    r[0]
+                    for r in c.execute(
+                        f"SELECT id FROM traces WHERE id IN ({','.join('?' * len(ids))})", ids
+                    )
+                }
+                if existing:
+                    old = [(i,) for i in existing]
+                    for table in _TRACE_TABLES[1:]:
+                        c.executemany(f"DELETE FROM {table} WHERE trace_id = ?", old)
+                    fresh = [t for t in traces if t.id not in existing]
+                    derived = derive(fresh)
+                    derive([t for t in traces if t.id in existing], history=False, out=derived)
                 c.executemany(
                     "INSERT OR REPLACE INTO traces VALUES "
                     "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -338,6 +508,7 @@ class SQLiteStore:
                 c.executemany("INSERT INTO trace_tags VALUES (?, ?, ?)", tags)
                 c.executemany("INSERT INTO issues VALUES (?, ?, ?, ?, ?, ?)", issues)
                 c.executemany("INSERT OR REPLACE INTO profiles VALUES (?, ?)", profiles)
+                _insert_derived(c, derived)
                 c.execute("COMMIT")
             except BaseException:
                 c.execute("ROLLBACK")
@@ -405,11 +576,7 @@ class SQLiteStore:
         clauses: builtins.list[str] = []
         params: builtins.list[Any] = []
         if f.q:
-            like = (
-                "%"
-                + f.q.lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-                + "%"
-            )
+            like = _like(f.q)
             clauses.append(
                 "(lower(t.path) LIKE ? ESCAPE '\\' OR lower(coalesce(t.route, '')) LIKE ? "
                 "ESCAPE '\\' OR lower(coalesce(t.view, '')) LIKE ? ESCAPE '\\')"
@@ -443,6 +610,21 @@ class SQLiteStore:
                 "AND g.value = ?)"
             )
             params += list(f.tag)
+        if f.replay_of:
+            clauses.append(
+                "EXISTS (SELECT 1 FROM trace_tags g WHERE g.trace_id = t.id "
+                "AND g.key = 'replay_of' AND g.value = ?)"
+            )
+            params.append(f.replay_of.lower())
+        if f.since is not None:
+            clauses.append("t.started_at > ?")
+            params.append(f.since)
+        if f.sql:
+            clauses.append(
+                "EXISTS (SELECT 1 FROM trace_sql s WHERE s.trace_id = t.id "
+                "AND lower(s.sql) LIKE ? ESCAPE '\\')"
+            )
+            params.append(_like(f.sql))
         return (" WHERE " + " AND ".join(clauses)) if clauses else "", params
 
     def endpoints(self, window: float, now: float | None = None) -> builtins.list[EndpointStats]:
@@ -562,12 +744,8 @@ class SQLiteStore:
             c = self._conn
             c.execute("BEGIN")
             try:
-                for table, col in (
-                    ("profiles", "trace_id"),
-                    ("trace_tags", "trace_id"),
-                    ("issues", "trace_id"),
-                ):
-                    c.executemany(f"DELETE FROM {table} WHERE {col} = ?", params)
+                for table in _TRACE_TABLES:
+                    c.executemany(f"DELETE FROM {table} WHERE trace_id = ?", params)
                 c.executemany("DELETE FROM traces WHERE id = ?", params)
                 c.execute("COMMIT")
             except BaseException:
@@ -579,13 +757,18 @@ class SQLiteStore:
         exists = self._query("SELECT id FROM traces WHERE id = ?", (trace_id,))
         return self._delete_ids([r["id"] for r in exists])
 
-    def clear(self) -> int:
+    def clear(self, history: bool = False) -> int:
+        """Delete every trace; returns how many.
+
+        The history (hourly rollups, releases, the issue index, load-test runs) outlives
+        traces by design and is kept; ``history=True`` wipes it too.
+        """
         self._check_pid()
         with self._lock:
             c = self._conn
             n = int(c.execute("SELECT COUNT(*) FROM traces").fetchone()[0])
             c.execute("BEGIN")
-            for table in ("profiles", "trace_tags", "issues", "traces"):
+            for table in (*_TRACE_TABLES, "traces", *(_HISTORY_TABLES if history else ())):
                 c.execute(f"DELETE FROM {table}")
             c.execute("COMMIT")
         return n
@@ -616,7 +799,585 @@ class SQLiteStore:
             )
             seen = set(doomed)
             doomed += [r["id"] for r in rows if r["id"] not in seen]
-        return self._delete_ids(doomed)
+        deleted = self._delete_ids(doomed)
+        self.prune_history()
+        return deleted
+
+    def prune_history(self, retention_s: float | None = None, now: float | None = None) -> int:
+        """Drop history older than ``retention_s`` (default: the store's
+        ``history_retention_s``; ``None``/``0`` there keeps it forever).
+
+        Hourly rollups whose hour ended before the cutoff, releases and issue-index entries
+        last seen before it, and finished runs created before it go. Running runs are kept.
+        Called by :meth:`prune`; returns the number of rows deleted.
+        """
+        if retention_s is not None and retention_s < 0:
+            raise ValueError("retention_s must not be negative.")
+        retention_s = self.history_retention_s if retention_s is None else retention_s
+        if not retention_s:
+            return 0
+        cutoff = (time.time() if now is None else now) - retention_s
+        self._check_pid()
+        n = 0
+        with self._lock:
+            c = self._conn
+            c.execute("BEGIN")
+            try:
+                for sql in (
+                    "DELETE FROM rollups WHERE bucket + 3600 <= ?",
+                    "DELETE FROM issue_rollups WHERE bucket + 3600 <= ?",
+                    "DELETE FROM releases WHERE last_seen < ?",
+                    "DELETE FROM issue_index WHERE last_seen < ?",
+                    "DELETE FROM run_steps WHERE run_id IN (SELECT id FROM runs WHERE "
+                    "created_at < ? AND status != 'running')",
+                    "DELETE FROM runs WHERE created_at < ? AND status != 'running'",
+                ):
+                    n += c.execute(sql, (cutoff,)).rowcount
+                c.execute("COMMIT")
+            except BaseException:
+                c.execute("ROLLBACK")
+                raise
+        return n
+
+    # analytics (v0.2) ----------------------------------------------------------
+    def _sql_groups(
+        self, since: float, until: float, q: str | None = None
+    ) -> builtins.list[SqlStats]:
+        where = "started_at >= ? AND started_at <= ?"
+        params: builtins.list[Any] = [since, until]
+        if q:
+            where += " AND lower(sql) LIKE ? ESCAPE '\\'"
+            params.append(_like(q))
+        rows = self._query(
+            "SELECT fingerprint, max(sql) AS sql, sum(count) AS n, count(DISTINCT trace_id) "
+            "AS traces, sum(total_ms) AS total, max(max_ms) AS mx, sum(rows) AS rows, "
+            "sum(rows_n) AS rows_n, max(vendor) AS vendor "
+            f"FROM trace_sql WHERE {where} GROUP BY fingerprint",
+            params,
+        )
+        # SQLite: a bare column next to max() comes from the row holding the maximum.
+        samples = {
+            r[0]: r[1]
+            for r in self._query(
+                "SELECT fingerprint, trace_id, max(started_at) FROM trace_sql "
+                f"WHERE {where} GROUP BY fingerprint",
+                params,
+            )
+        }
+        routes: dict[str, builtins.list[str]] = defaultdict(list)
+        for r in self._query(
+            f"SELECT DISTINCT fingerprint, method, route FROM trace_sql WHERE {where}", params
+        ):
+            if len(routes[r[0]]) < 20:
+                routes[r[0]].append(f"{r[1]} {r[2]}")
+        return [
+            SqlStats(
+                fingerprint=r["fingerprint"],
+                sql=r["sql"],
+                count=int(r["n"]),
+                traces=int(r["traces"]),
+                total_ms=float(r["total"]),
+                max_ms=float(r["mx"]),
+                routes=sorted(routes[r["fingerprint"]]),
+                sample_trace_id=samples.get(r["fingerprint"], ""),
+                vendor=r["vendor"] or "other",
+                mean_rows=(r["rows"] / r["rows_n"]) if r["rows_n"] else None,
+            )
+            for r in rows
+        ]
+
+    def search_sql(
+        self, q: str | None, window: float, limit: int = 100, now: float | None = None
+    ) -> builtins.list[SqlStats]:
+        """Fingerprints whose normalised SQL contains ``q`` (all when empty), by total time."""
+        now = time.time() if now is None else now
+        out = self._sql_groups(now - window, now, q)
+        out.sort(key=lambda s: (-s.total_ms, -s.count, s.fingerprint))
+        return out[: max(1, int(limit))]
+
+    def sql_workload(self, window: float, now: float | None = None) -> builtins.list[SqlStats]:
+        """Every fingerprint seen in ``window`` (what the index advisor reads), by total time."""
+        now = time.time() if now is None else now
+        out = self._sql_groups(now - window, now)
+        out.sort(key=lambda s: (-s.total_ms, -s.count, s.fingerprint))
+        return out
+
+    def cache_stats(self, window: float, now: float | None = None) -> builtins.list[CacheStats]:
+        """Per ``(backend, key_pattern)`` reads, hit rate, unread sets and stampedes."""
+        now = time.time() if now is None else now
+        params = (now - window, now)
+        rows = self._query(
+            "SELECT backend, key_pattern, sum(gets) g, sum(hits) h, sum(misses) m, sum(sets) s, "
+            "sum(deletes) d FROM trace_cache WHERE started_at >= ? AND started_at <= ? "
+            "GROUP BY backend, key_pattern",
+            params,
+        )
+        misses: dict[tuple[str, str], builtins.list[float]] = defaultdict(list)
+        for r in self._query(
+            "SELECT backend, key_pattern, started_at FROM trace_cache WHERE started_at >= ? "
+            "AND started_at <= ? AND misses > 0 ORDER BY started_at",
+            params,
+        ):
+            misses[(r[0], r[1])].append(r[2])
+        out = []
+        for r in rows:
+            gets, hits, miss, sets = int(r["g"]), int(r["h"]), int(r["m"]), int(r["s"])
+            key = (r["backend"], r["key_pattern"])
+            out.append(
+                CacheStats(
+                    backend=key[0],
+                    key_pattern=key[1],
+                    gets=gets,
+                    hits=hits,
+                    misses=miss,
+                    hit_rate=hits / (hits + miss) if hits + miss else None,
+                    sets=sets,
+                    deletes=int(r["d"]),
+                    unread_sets=sets if gets == 0 else 0,
+                    stampedes=_bursts(misses.get(key, ()), 3, 1.0),
+                )
+            )
+        out.sort(key=lambda c: (-(c.gets + c.sets), c.backend, c.key_pattern))
+        return out
+
+    def external_stats(
+        self, window: float, now: float | None = None
+    ) -> builtins.list[ExternalStats]:
+        """Outbound calls per ``(method, url_pattern)``: latency, errors, duplicates, retries."""
+        now = time.time() if now is None else now
+        groups: dict[tuple[str, str, str], builtins.list[Any]] = {}
+        for r in self._query(
+            "SELECT method, host, url_pattern, count, total_ms, max_ms, errors FROM trace_ext "
+            "WHERE started_at >= ? AND started_at <= ?",
+            (now - window, now),
+        ):
+            key = (r[0], r[1], r[2])
+            g = groups.get(key)
+            if g is None:
+                g = groups[key] = [0, 0.0, 0.0, 0, 0, 0, Histogram()]
+            n, total = int(r[3]), float(r[4])
+            g[0] += n
+            g[1] += total
+            g[2] = max(g[2], float(r[5]))
+            g[3] += int(r[6])
+            if n >= 2:
+                g[4] += 1
+            if n >= 3 and r[6] >= 1:
+                g[5] += 1
+            g[6].record(total / n if n else 0.0, n)
+        out = [
+            ExternalStats(
+                method=m,
+                host=host,
+                url_pattern=url,
+                count=g[0],
+                total_ms=g[1],
+                p95_ms=g[6].percentile(95),
+                max_ms=g[2],
+                errors=g[3],
+                duplicates=g[4],
+                retries=g[5],
+            )
+            for (m, host, url), g in groups.items()
+        ]
+        out.sort(key=lambda e: (-e.total_ms, e.url_pattern))
+        return out
+
+    # history (v0.2) ------------------------------------------------------------
+    def history(
+        self,
+        route: str | None,
+        method: str | None,
+        start: float,
+        end: float,
+        bucket: float = 3_600.0,
+    ) -> History:
+        """The hourly rollups between ``start`` and ``end`` merged into ``bucket``-second
+        buckets (``3600`` or ``86400``; UTC-aligned). ``route=None`` is the whole app."""
+        size = max(HOUR, int(bucket) // HOUR * HOUR)
+        where = ["bucket >= ?", "bucket < ?"]
+        params: builtins.list[Any] = [int(start // HOUR) * HOUR, end]
+        if route:
+            where.append("route = ?")
+            params.append(route)
+        if method:
+            where.append("method = ?")
+            params.append(method.upper())
+        merged: dict[int, builtins.list[Any]] = {}
+        for r in self._query(
+            "SELECT bucket, count, errors, hist, sum_queries FROM rollups WHERE "
+            + " AND ".join(where),
+            params,
+        ):
+            t = int(r[0]) // size * size
+            g = merged.get(t)
+            if g is None:
+                g = merged[t] = [0, 0, Histogram(), 0]
+            g[0] += r[1]
+            g[1] += r[2]
+            _merge_blob(g[2], r[3])
+            g[3] += r[4]
+        series = [
+            {
+                "t": t,
+                "count": g[0],
+                "p50_ms": round(g[2].percentile(50), 3),
+                "p95_ms": round(g[2].percentile(95), 3),
+                "p99_ms": round(g[2].percentile(99), 3),
+                "error_rate": round(g[1] / g[0], 4) if g[0] else 0.0,
+                "avg_queries": round(g[3] / g[0], 2) if g[0] else 0.0,
+            }
+            for t, g in sorted(merged.items())
+        ]
+        releases = [
+            {"release": r[0], "first_seen": r[1]}
+            for r in self._query(
+                "SELECT release, first_seen FROM releases WHERE first_seen >= ? "
+                "AND first_seen < ? ORDER BY first_seen",
+                (start, end),
+            )
+        ]
+        return History(series=series, releases=releases)
+
+    def releases(self) -> builtins.list[ReleaseInfo]:
+        """Every release seen (newest first)."""
+        return [
+            ReleaseInfo(release=r[0], first_seen=r[1], last_seen=r[2], requests=r[3])
+            for r in self._query(
+                "SELECT release, first_seen, last_seen, requests FROM releases "
+                "ORDER BY first_seen DESC"
+            )
+        ]
+
+    @staticmethod
+    def _period_where(period: Period) -> tuple[str, builtins.list[Any]]:
+        if period[0] == "release":
+            return "release = ?", [period[1]]
+        if period[0] == "range":
+            start, end = float(period[1]), float(period[2])  # type: ignore[misc]
+            return "bucket >= ? AND bucket < ?", [int(start // HOUR) * HOUR, end]
+        raise ValueError(f"Unknown period {period!r}")
+
+    def _period_stats(self, period: Period) -> dict[tuple[str, str], PeriodStats]:
+        where, params = self._period_where(period)
+        acc: dict[tuple[str, str], builtins.list[Any]] = {}
+        for r in self._query(
+            "SELECT route, method, count, errors, sum_ms, hist, sum_queries FROM rollups "
+            f"WHERE {where}",
+            params,
+        ):
+            g = acc.get((r[0], r[1]))
+            if g is None:
+                g = acc[(r[0], r[1])] = [0, 0, 0.0, Histogram(), 0]
+            g[0] += r[2]
+            g[1] += r[3]
+            g[2] += r[4]
+            _merge_blob(g[3], r[5])
+            g[4] += r[6]
+        return {
+            key: PeriodStats(
+                count=g[0],
+                error_rate=g[1] / g[0] if g[0] else 0.0,
+                p50_ms=g[3].percentile(50),
+                p95_ms=g[3].percentile(95),
+                p99_ms=g[3].percentile(99),
+                avg_ms=g[2] / g[0] if g[0] else 0.0,
+                avg_queries=g[4] / g[0] if g[0] else 0.0,
+            )
+            for key, g in acc.items()
+            if g[0]
+        }
+
+    def _period_issues(self, period: Period) -> dict[str, int]:
+        where, params = self._period_where(period)
+        return {
+            r[0]: int(r[1])
+            for r in self._query(
+                f"SELECT issue_id, sum(occurrences) FROM issue_rollups WHERE {where} "
+                "GROUP BY issue_id",
+                params,
+            )
+        }
+
+    def compare_periods(self, a: Period, b: Period) -> PeriodComparison:
+        """Endpoints and issues of period ``b`` against baseline ``a`` (``CONTRACT.md`` §12).
+
+        Verdicts: ``new``/``gone`` when an endpoint has traffic in only one period;
+        ``regressed`` when p95 rose ≥ 20 % *and* ≥ 5 ms, or average queries rose by ≥ 1;
+        ``improved`` for the mirror image; else ``same``. Ranges have hourly resolution.
+        """
+        sa, sb = self._period_stats(a), self._period_stats(b)
+        endpoints = []
+        for key in set(sa) | set(sb):
+            pa, pb = sa.get(key), sb.get(key)
+            delta_pct = delta_q = None
+            if pa is None:
+                verdict = "new"
+            elif pb is None:
+                verdict = "gone"
+            else:
+                d_p95 = pb.p95_ms - pa.p95_ms
+                delta_q = round(pb.avg_queries - pa.avg_queries, 2)
+                delta_pct = round(d_p95 / pa.p95_ms * 100, 1) if pa.p95_ms else None
+                if (d_p95 >= 5 and pb.p95_ms >= pa.p95_ms * 1.2) or delta_q >= 1:
+                    verdict = "regressed"
+                elif (-d_p95 >= 5 and pa.p95_ms >= pb.p95_ms * 1.2) or delta_q <= -1:
+                    verdict = "improved"
+                else:
+                    verdict = "same"
+            endpoints.append(
+                {
+                    "route": key[0],
+                    "method": key[1],
+                    "a": pa.to_dict() if pa else None,
+                    "b": pb.to_dict() if pb else None,
+                    "delta_p95_pct": delta_pct,
+                    "delta_queries": delta_q,
+                    "verdict": verdict,
+                }
+            )
+        order = {"regressed": 0, "new": 1, "improved": 2, "gone": 3, "same": 4}
+        endpoints.sort(
+            key=lambda e: (
+                order[e["verdict"]],
+                -((e["b"] or e["a"])["count"]),
+                e["route"],
+                e["method"],
+            )
+        )
+        ia, ib = self._period_issues(a), self._period_issues(b)
+        meta = self._issue_meta(set(ia) | set(ib))
+
+        def items(ids: Any, counts: dict[str, int]) -> builtins.list[dict[str, Any]]:
+            out = [{**meta[i], "occurrences": counts[i]} for i in ids if i in meta]
+            out.sort(key=lambda x: (-x["occurrences"], x["id"]))
+            return out
+
+        issues = {
+            "new": items(set(ib) - set(ia), ib),
+            "resolved": items(set(ia) - set(ib), ia),
+            "persisting": items(set(ia) & set(ib), ib),
+        }
+        return PeriodComparison(
+            a=_period_dict(a, sa), b=_period_dict(b, sb), endpoints=endpoints, issues=issues
+        )
+
+    def _issue_meta(self, ids: set[str]) -> dict[str, dict[str, Any]]:
+        out: dict[str, dict[str, Any]] = {}
+        id_list = sorted(ids)
+        for i in range(0, len(id_list), 500):
+            chunk = id_list[i : i + 500]
+            for r in self._query(
+                f"SELECT * FROM issue_index WHERE issue_id IN ({','.join('?' * len(chunk))})",
+                chunk,
+            ):
+                out[r["issue_id"]] = _index_entry(r).to_dict()
+        return out
+
+    def issue_index(
+        self, window: float | None = None, now: float | None = None
+    ) -> builtins.list[IssueIndexEntry]:
+        """Every issue ever indexed (or last seen within ``window``), most recent first."""
+        where, params = "", []
+        if window:
+            now = time.time() if now is None else now
+            where, params = " WHERE last_seen >= ?", [now - window]
+        return [
+            _index_entry(r)
+            for r in self._query(
+                f"SELECT * FROM issue_index{where} ORDER BY last_seen DESC, issue_id", params
+            )
+        ]
+
+    # load-test runs (v0.2) -----------------------------------------------------
+    def _write_now(self, statements: builtins.list[tuple[str, Any]]) -> None:
+        self._check_pid()
+        with self._lock:
+            c = self._conn
+            c.execute("BEGIN")
+            try:
+                for sql, params in statements:
+                    c.execute(sql, params)
+                c.execute("COMMIT")
+            except BaseException:
+                c.execute("ROLLBACK")
+                raise
+
+    def save_run(self, run: Run) -> None:
+        """Insert or replace ``run`` and its steps (written immediately, not queued)."""
+        statements: builtins.list[tuple[str, Any]] = [
+            (
+                "INSERT OR REPLACE INTO runs VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    run.id,
+                    run.created_at,
+                    run.finished_at,
+                    run.status,
+                    run.name,
+                    json.dumps(run.config, default=str),
+                    json.dumps(run.summary or {}, default=str),
+                ),
+            )
+        ]
+        statements += [_step_statement(run.id, s) for s in run.steps]
+        self._write_now(statements)
+
+    def save_run_step(self, run_id: str, step: RunStep) -> None:
+        """Insert or replace one step (call it again as the step progresses)."""
+        self._write_now([_step_statement(run_id, step)])
+
+    def finish_run(self, run_id: str, status: str, summary: dict[str, Any] | None = None) -> None:
+        """Mark a run ``finished``/``stopped``/``failed`` and store its summary."""
+        self._write_now(
+            [
+                (
+                    "UPDATE runs SET status = ?, finished_at = ?, summary = ? WHERE id = ?",
+                    (status, time.time(), json.dumps(summary or {}, default=str), run_id),
+                )
+            ]
+        )
+
+    def get_run(self, run_id: str) -> Run | None:
+        rows = self._query("SELECT * FROM runs WHERE id = ?", (run_id,))
+        if not rows:
+            return None
+        steps = self._query("SELECT * FROM run_steps WHERE run_id = ? ORDER BY step", (run_id,))
+        return _run(rows[0], [_run_step(s) for s in steps])
+
+    def list_runs(self, limit: int = 50) -> builtins.list[Run]:
+        """The most recent runs first, each with its steps."""
+        rows = self._query(
+            "SELECT * FROM runs ORDER BY created_at DESC, id LIMIT ?", (max(1, int(limit)),)
+        )
+        if not rows:
+            return []
+        ids = [r["id"] for r in rows]
+        steps: dict[str, builtins.list[RunStep]] = defaultdict(list)
+        for s in self._query(
+            f"SELECT * FROM run_steps WHERE run_id IN ({','.join('?' * len(ids))}) ORDER BY step",
+            ids,
+        ):
+            steps[s["run_id"]].append(_run_step(s))
+        return [_run(r, steps[r["id"]]) for r in rows]
+
+    def delete_run(self, run_id: str) -> int:
+        """Delete a run and its steps (its tagged traces stay); returns 1 or 0."""
+        self._check_pid()
+        with self._lock:
+            c = self._conn
+            c.execute("BEGIN")
+            try:
+                c.execute("DELETE FROM run_steps WHERE run_id = ?", (run_id,))
+                n = c.execute("DELETE FROM runs WHERE id = ?", (run_id,)).rowcount
+                c.execute("COMMIT")
+            except BaseException:
+                c.execute("ROLLBACK")
+                raise
+        return n
+
+    def run_bottlenecks(self, run_id: str, limit: int = 50) -> Bottlenecks | None:
+        """Per step, the queries (``trace_sql``) and routes of the traces the run tagged.
+
+        ``mean_ms`` is per execution (per request for routes), ``p95_ms`` the 95th percentile
+        of each request's mean, ``count`` executions (requests). ``growth`` is the mean in the
+        last step the item appears in over the mean in the first (the first floored at
+        0.01 ms). ``None`` when there is neither such a run nor any trace tagged with it.
+        """
+        steps_rows = self._query(
+            "SELECT step, target_rps FROM run_steps WHERE run_id = ? ORDER BY step", (run_id,)
+        )
+        tagged = (
+            "FROM trace_tags r JOIN trace_tags s ON s.trace_id = r.trace_id AND s.key = 'step' "
+            "{join} WHERE r.key = 'run_id' AND r.value = ?"
+        )
+        # key -> step -> [count, total_ms, per-request means, sample trace]
+        acc: dict[tuple[str, str], dict[int, builtins.list[Any]]] = defaultdict(dict)
+        labels: dict[tuple[str, str], str] = {}
+        for r in self._query(
+            "SELECT s.value, q.fingerprint, q.sql, q.count, q.total_ms, q.trace_id "
+            + tagged.format(join="JOIN trace_sql q ON q.trace_id = r.trace_id"),
+            (run_id,),
+        ):
+            step = _int_or_none(r[0])
+            if step is None:
+                continue
+            key = ("sql", r[1])
+            labels[key] = r[2]
+            _add_sample(acc[key], step, int(r[3]), float(r[4]), r[5])
+        for r in self._query(
+            "SELECT s.value, t.method, coalesce(t.route, t.path), t.duration_ms, t.id "
+            + tagged.format(join="JOIN traces t ON t.id = r.trace_id"),
+            (run_id,),
+        ):
+            step = _int_or_none(r[0])
+            if step is None:
+                continue
+            key = ("route", f"{r[1]} {r[2]}")
+            labels[key] = key[1]
+            _add_sample(acc[key], step, 1, float(r[3]), r[4])
+        if not steps_rows and not acc:
+            if not self._query("SELECT 1 FROM runs WHERE id = ?", (run_id,)):
+                return None
+        steps = [{"step": int(r[0]), "target_rps": r[1]} for r in steps_rows]
+        if not steps:  # no step rows stored: derive them from the tags
+            seen = sorted({s for per in acc.values() for s in per})
+            steps = [{"step": s, "target_rps": None} for s in seen]
+        items = []
+        for (kind, ident), per in acc.items():
+            per_step = []
+            for step in sorted(per):
+                count, total, means, _ = per[step]
+                per_step.append(
+                    {
+                        "step": step,
+                        "mean_ms": round(total / count, 3) if count else 0.0,
+                        "p95_ms": round(percentile(sorted(means), 95), 3),
+                        "count": count,
+                    }
+                )
+            first, last = per_step[0]["mean_ms"], per_step[-1]["mean_ms"]
+            items.append(
+                {
+                    "key": f"{kind}:{ident}",
+                    "kind": kind,
+                    "label": labels[(kind, ident)][:200],
+                    "callsite": None,
+                    "per_step": per_step,
+                    "growth": round(last / max(first, 0.01), 2) if len(per_step) > 1 else 1.0,
+                    "_sample": per[max(per)][3],
+                    "_fp": ident if kind == "sql" else None,
+                }
+            )
+        items.sort(key=lambda i: (-i["growth"], -i["per_step"][-1]["mean_ms"], i["key"]))
+        items = items[: max(1, limit)]
+        for item in items:
+            sample, fp = item.pop("_sample"), item.pop("_fp")
+            if fp is not None:
+                cs = self._callsite_for(sample, fp)
+                item["callsite"] = cs.to_dict() if cs else None
+        return Bottlenecks(steps=steps, items=items)
+
+    def _callsite_for(self, trace_id: str, fp_key: str) -> Callsite | None:
+        trace = self.get(trace_id, include_profile=False)
+        if trace is None:
+            return None
+        for span in trace.spans:
+            if span.kind == "sql" and span.callsite is not None:
+                fp = span.data.get("fingerprint")
+                if fp and fingerprint_key(fp) == fp_key:
+                    return span.callsite
+        return None
+
+    def traces_since(
+        self, started_at: float, trace_id: str = "", limit: int = 100
+    ) -> builtins.list[dict[str, Any]]:
+        """Summaries of traces after ``(started_at, trace_id)``, oldest first (live tail)."""
+        rows = self._query(
+            f"SELECT {_SUMMARY_COLS} FROM traces WHERE started_at > ? OR "
+            "(started_at = ? AND id > ?) ORDER BY started_at ASC, id ASC LIMIT ?",
+            (started_at, started_at, trace_id or "", max(1, min(int(limit), 500))),
+        )
+        return [_summary(r) for r in rows]
 
     def close(self) -> None:
         """Flush pending writes, stop the writer and close the connection."""
@@ -658,3 +1419,252 @@ def _summary(row: sqlite3.Row) -> dict[str, Any]:
         "has_profile": bool(row["has_profile"]),
         "tags": json.loads(row["tags"]),
     }
+
+
+# schema ----------------------------------------------------------------------
+def _schema_version(conn: sqlite3.Connection) -> int:
+    row = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
+    try:
+        return int(row[0]) if row else 1
+    except ValueError:
+        return 1
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Bring a database to :data:`SCHEMA_VERSION` in place (additive only).
+
+    A v0.1 file (no ``meta`` row) is version 1. Version 2 adds the analytics and history
+    tables and backfills them from the traces already stored, so the SQL / cache / external
+    pages and the history have data at once. Runs in one ``BEGIN IMMEDIATE`` transaction and
+    re-reads the version inside it, so concurrent processes migrate exactly once.
+    """
+    if _schema_version(conn) >= SCHEMA_VERSION:
+        return
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        version = _schema_version(conn)
+        if version < 2:
+            for statement in _SCHEMA_V2.split(";"):
+                if statement.strip():
+                    conn.execute(statement)
+            _backfill(conn)
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)",
+            (str(SCHEMA_VERSION),),
+        )
+        conn.execute("COMMIT")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+
+
+def _backfill(conn: sqlite3.Connection, chunk: int = 500) -> None:
+    cursor = conn.execute("SELECT body FROM traces ORDER BY started_at")
+    while True:
+        rows = cursor.fetchmany(chunk)
+        if not rows:
+            return
+        traces = []
+        for row in rows:
+            try:
+                traces.append(Trace.from_dict(json.loads(row[0])))
+            except (ValueError, KeyError, TypeError):  # a corrupt row is skipped, not fatal
+                continue
+        _insert_derived(conn, derive(traces))
+
+
+_ROLLUP_UPSERT = (
+    "INSERT INTO rollups VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+    "ON CONFLICT (bucket, release, route, method) DO UPDATE SET "
+    "count = count + excluded.count, errors = errors + excluded.errors, "
+    "sum_ms = sum_ms + excluded.sum_ms, hist = excluded.hist, "
+    "sum_queries = sum_queries + excluded.sum_queries, "
+    "sum_query_ms = sum_query_ms + excluded.sum_query_ms, issues = issues + excluded.issues"
+)
+_RELEASE_UPSERT = (
+    "INSERT INTO releases VALUES (?, ?, ?, ?) ON CONFLICT (release) DO UPDATE SET "
+    "first_seen = min(first_seen, excluded.first_seen), "
+    "last_seen = max(last_seen, excluded.last_seen), requests = requests + excluded.requests"
+)
+# Every SET expression reads the row's values from before the update.
+_ISSUE_UPSERT = (
+    "INSERT INTO issue_index VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+    "ON CONFLICT (issue_id) DO UPDATE SET "
+    "first_release = CASE WHEN excluded.first_seen < first_seen "
+    "THEN excluded.first_release ELSE first_release END, "
+    "first_seen = min(first_seen, excluded.first_seen), "
+    "severity = CASE WHEN excluded.last_seen >= last_seen "
+    "THEN excluded.severity ELSE severity END, "
+    "title = CASE WHEN excluded.last_seen >= last_seen THEN excluded.title ELSE title END, "
+    "last_release = CASE WHEN excluded.last_seen >= last_seen "
+    "THEN excluded.last_release ELSE last_release END, "
+    "last_seen = max(last_seen, excluded.last_seen), "
+    "occurrences = occurrences + excluded.occurrences"
+)
+_ISSUE_BUCKET_UPSERT = (
+    "INSERT INTO issue_rollups VALUES (?, ?, ?, ?) ON CONFLICT (bucket, release, issue_id) "
+    "DO UPDATE SET occurrences = occurrences + excluded.occurrences"
+)
+
+
+def _insert_derived(c: sqlite3.Connection, d: Derived) -> None:
+    """Write a :class:`Derived` inside the caller's transaction."""
+    if d.sql:
+        c.executemany("INSERT INTO trace_sql VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", d.sql)
+    if d.ext:
+        c.executemany("INSERT INTO trace_ext VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", d.ext)
+    if d.cache:
+        c.executemany("INSERT INTO trace_cache VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", d.cache)
+    if d.rollups:
+        upserts = []
+        for key, r in d.rollups.items():
+            hist: Histogram = r[3]
+            row = c.execute(
+                "SELECT hist FROM rollups WHERE bucket = ? AND release = ? AND route = ? "
+                "AND method = ?",
+                key,
+            ).fetchone()
+            if row is not None:
+                try:
+                    hist = Histogram.from_bytes(row[0]).merge(hist)
+                except ValueError:  # a corrupt blob is replaced; the counters still add up
+                    pass
+            upserts.append((*key, r[0], r[1], r[2], hist.to_bytes(), r[4], r[5], r[6]))
+        c.executemany(_ROLLUP_UPSERT, upserts)
+    if d.releases:
+        c.executemany(_RELEASE_UPSERT, [(k, *v) for k, v in d.releases.items()])
+    if d.issues:
+        c.executemany(_ISSUE_UPSERT, [(k, *v) for k, v in d.issues.items()])
+    if d.issue_buckets:
+        c.executemany(_ISSUE_BUCKET_UPSERT, [(*k, n) for k, n in d.issue_buckets.items()])
+
+
+# helpers ---------------------------------------------------------------------
+def _like(text: str) -> str:
+    """A case-insensitive ``LIKE`` pattern matching ``text`` anywhere (escape ``\\``)."""
+    return "%" + text.lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+
+
+def _bursts(times: Any, threshold: int, span_s: float) -> int:
+    """How many times ``threshold`` events fall within ``span_s`` seconds (sorted input).
+
+    Each burst is counted once: after one is found, counting restarts past its window.
+    """
+    times = list(times)
+    n, i, start = 0, 0, 0
+    while i < len(times):
+        while times[i] - times[start] > span_s:
+            start += 1
+        if i - start + 1 >= threshold:
+            n += 1
+            end = times[start] + span_s
+            while i < len(times) and times[i] <= end:
+                i += 1
+            start = i
+            continue
+        i += 1
+    return n
+
+
+def _merge_blob(hist: Histogram, blob: bytes) -> None:
+    try:
+        hist.merge(Histogram.from_bytes(blob))
+    except ValueError:  # a corrupt blob only loses its own percentiles
+        logger.debug("Redline skipped a corrupt histogram blob")
+
+
+def _period_dict(period: Period, stats: dict[tuple[str, str], PeriodStats]) -> dict[str, Any]:
+    out: dict[str, Any] = {"kind": period[0]}
+    if period[0] == "release":
+        out["release"] = period[1]
+    else:
+        out["start"], out["end"] = period[1], period[2]  # type: ignore[misc]
+    out["requests"] = sum(s.count for s in stats.values())
+    return out
+
+
+def _index_entry(r: sqlite3.Row) -> IssueIndexEntry:
+    return IssueIndexEntry(
+        id=r["issue_id"],
+        kind=r["kind"],
+        severity=r["severity"],
+        title=r["title"],
+        route=r["route"],
+        first_seen=r["first_seen"],
+        last_seen=r["last_seen"],
+        first_release=r["first_release"],
+        last_release=r["last_release"],
+        occurrences=r["occurrences"],
+    )
+
+
+def _step_statement(run_id: str, s: RunStep) -> tuple[str, tuple[Any, ...]]:
+    return (
+        "INSERT OR REPLACE INTO run_steps VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            run_id,
+            int(s.step),
+            s.started_at,
+            s.ended_at,
+            s.target_rps,
+            s.achieved_rps,
+            s.sent,
+            s.ok,
+            s.errors,
+            s.dropped,
+            s.hist.to_bytes(),
+            json.dumps(s.error_breakdown),
+        ),
+    )
+
+
+def _run_step(r: sqlite3.Row) -> RunStep:
+    try:
+        hist = Histogram.from_bytes(r["hist"])
+    except ValueError:
+        hist = Histogram()
+    return RunStep(
+        step=r["step"],
+        target_rps=r["target_rps"],
+        started_at=r["started_at"],
+        ended_at=r["ended_at"],
+        achieved_rps=r["achieved_rps"],
+        sent=r["sent"],
+        ok=r["ok"],
+        errors=r["errors"],
+        dropped=r["dropped"],
+        hist=hist,
+        error_breakdown=json.loads(r["error_breakdown"] or "{}"),
+    )
+
+
+def _run(r: sqlite3.Row, steps: list[RunStep]) -> Run:
+    return Run(
+        id=r["id"],
+        name=r["name"],
+        status=r["status"],
+        config=json.loads(r["config"] or "{}"),
+        created_at=r["created_at"],
+        finished_at=r["finished_at"],
+        steps=steps,
+        summary=json.loads(r["summary"] or "{}"),
+    )
+
+
+def _int_or_none(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _add_sample(
+    per_step: dict[int, list[Any]], step: int, count: int, total_ms: float, trace_id: str
+) -> None:
+    g = per_step.get(step)
+    if g is None:
+        g = per_step[step] = [0, 0.0, [], trace_id]
+    g[0] += count
+    g[1] += total_ms
+    g[2].append(total_ms / count if count else 0.0)
+    g[3] = trace_id
