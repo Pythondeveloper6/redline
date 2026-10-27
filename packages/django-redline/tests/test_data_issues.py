@@ -131,3 +131,31 @@ def test_wide_columns_helper(rt):
     assert model is Article and wide == ["body"]
     only = 'SELECT "testapp_article"."id" FROM "testapp_article"'
     assert DjangoFixSuggester(rt.settings.project_root).wide_columns(only)[1] == []
+
+
+def test_reused_cursor_counts_rows_per_execute_without_stacking(rt):
+    """One cursor, many executes: each span counts its own rows and the fetch methods are
+    decorated once (they used to stack a layer per execute → RecursionError at ~1000)."""
+    from django.db import connection
+
+    from django_redline.instrument import install_connection
+    from redline_core.conf import Settings
+    from redline_core.recorder import Recorder
+
+    install_connection(connection)
+    rec = Recorder(Settings.from_mapping({"max_spans_per_trace": 0}))
+    with connection.cursor() as cursor:
+        with rec.recording(method="GET", path="/x"):
+            for _ in range(1200):
+                cursor.execute("SELECT 1")
+                assert cursor.fetchone() == (1,)
+            cursor.execute("SELECT 1 UNION ALL SELECT 2")
+            assert cursor.fetchall() == [(1,), (2,)]
+        spans = [s for s in rec.last_trace.spans if s.kind == "sql"]
+        assert len(spans) == 1201
+        assert [s.data["rows"] for s in spans[:-1]] == [1] * 1200
+        assert spans[-1].data["rows"] == 2
+        # outside a trace the reused cursor works and no longer counts into the old span
+        cursor.execute("SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3")
+        assert len(cursor.fetchall()) == 3
+        assert spans[-1].data["rows"] == 2

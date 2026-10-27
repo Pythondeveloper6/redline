@@ -47,6 +47,30 @@ def test_key_is_capped(tracer):
     assert len(span.data["key"]) == 200
 
 
+def test_credential_commands_have_no_key(tracer):
+    r = fakeredis.FakeRedis()
+    b = tracer.start()
+    for args in (
+        ("AUTH", "hunter2"),
+        ("AUTH", "bob", "hunter2"),
+        ("HELLO", "3", "AUTH", "bob", "hunter2"),
+        ("CONFIG SET", "requirepass", "hunter2"),
+        ("CONFIG", "SET", "requirepass", "hunter2"),
+        ("MIGRATE", "hunter2", 6379, "", 0, 5000, "AUTH", "hunter2", "KEYS", "a"),
+        ("ACL SETUSER", "hunter2", ">hunter2"),
+    ):
+        try:
+            r.execute_command(*args)
+        except redis.RedisError:
+            pass
+    spans = tracer.finish(b)
+    assert len(spans) == 7
+    for span in spans:
+        assert span.data["key"] is None
+        assert "hunter2" not in span.name and "hunter2" not in str(span.data)
+    assert spans[0].name == "auth"
+
+
 def test_sync_pipeline(tracer):
     r = fakeredis.FakeRedis()
     b = tracer.start()
