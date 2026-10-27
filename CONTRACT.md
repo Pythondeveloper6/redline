@@ -251,3 +251,180 @@ Python helpers live in `redline_core.ui`, the package `ui/__init__.py` next to `
 - `asset_path(relative) -> Path | None`, which refuses traversal outside `static/`
 - `content_type(path)`
 - `is_built()`
+
+---
+
+# v0.2 additions
+
+Everything below extends §1–§7; nothing above changes meaning. Stored rows written by v0.1 must
+still load: every new field has a default and `from_dict` tolerates its absence.
+
+## 8. Model additions (`redline_core.model`)
+
+```python
+SpanKind = Literal["sql", "cache", "http_out", "template", "middleware", "view", "custom",
+                   "serializer", "resolver", "transaction", "blocking", "pool_wait"]
+IssueKind = Literal["n_plus_one", "duplicate_query", "slow_query", "too_many_queries",
+                    "blocking_in_async", "large_result", "unbounded_query", "inefficient_count",
+                    "slow_serializer", "long_transaction", "external_in_transaction",
+                    "slow_external", "duplicate_external", "retry_storm"]
+
+@dataclass
+class LogRecord:
+    t_ms: float                # ms since trace start
+    level: str                 # "DEBUG" | "INFO" | "WARNING" | "ERROR" | "CRITICAL"
+    logger: str
+    message: str               # formatted, redacted, capped at 2_000 chars
+    callsite: Callsite | None  # pathname:lineno of the log call (project-relative when possible)
+
+Trace.logs: list[LogRecord] = []            # capped at Settings.max_logs_per_trace (extra counted in Trace.logs_dropped: int = 0)
+Trace.release: str | None = None            # Settings.release resolved at configure time
+Issue.extra: dict[str, Any] = {}            # kind-specific facts (rows, resolver path, host, ...)
+```
+
+`Trace.error` (when `capture_locals` is on) gains `"frames": [{"file", "line", "function", "code", "locals": {name: repr}}]`:
+project frames only (innermost last, at most 20), at most 30 locals per frame, each `repr` capped at 300 chars,
+names matching `redact_keys` replaced by `"[redacted]"`.
+
+Span `data` for the new kinds and new keys:
+
+| kind | data keys |
+|---|---|
+| sql (new keys) | `rows` filled where the driver/ORM exposes it, `in_transaction` (bool), `wide_columns` (list[str]: text/blob/json columns selected, Django/SQLAlchemy only when known), `has_limit` (bool) |
+| serializer | `library` ("drf" \| "pydantic" \| "marshmallow" \| "other"), `serializer` (class name), `items` (int\|None), `many` (bool) |
+| resolver | `path` ("orders.0.customer" with list indexes as `*`: "orders.*.customer"), `field`, `parent_type` |
+| transaction | `db_alias`, `outcome` ("commit" \| "rollback"), `queries` (int), `http_out` (int: outbound calls made inside) |
+| blocking | `reason` ("loop_lag" \| "sync_call"), `call` (e.g. "time.sleep", "requests.get", "sync ORM"), `lag_ms` |
+| pool_wait | `db_alias`, `pool_size`, `checked_out` |
+
+## 9. Detectors (`redline_core.detect`, new modules in `redline_core.detectors`)
+
+`redline_core.detectors/<name>.py` each exposes `def detect(trace: Trace, settings: Settings) -> list[Issue]`.
+`redline_core.detectors.REGISTRY: list[Callable]` lists them; `Detector.detect` runs the v0.1 built-ins, then every
+registry entry, then suggesters on every issue. One exception in one detector is logged and skipped.
+
+| kind | fires when | default threshold setting |
+|---|---|---|
+| blocking_in_async | a `blocking` span ≥ `blocking_ms` in an async request | `blocking_ms = 20` |
+| large_result | a SELECT returned ≥ `large_result_rows` rows | `1000` |
+| unbounded_query | a SELECT with `has_limit: false` returned ≥ `unbounded_rows` rows | `200` |
+| inefficient_count | callsite `code` matches `len(<qs>)` / `if <qs>:` / `bool(<qs>)` / `.count() > 0` patterns on a full-row SELECT (suggest `.count()` / `.exists()`) | – |
+| slow_serializer | a `serializer` span ≥ `slow_serializer_ms` | `50` |
+| long_transaction | a `transaction` span ≥ `long_transaction_ms` | `200` |
+| external_in_transaction | a `transaction` span with `http_out > 0` | – |
+| slow_external | an `http_out` span ≥ `slow_external_ms` | `500` |
+| duplicate_external | same method+URL ≥ 2 times | – |
+| retry_storm | same method+host ≥ 3 times with ≥ 1 failed (5xx, 429 or no status) | – |
+
+N+1 over GraphQL: when the queries' common parent is a `resolver` span, the issue's `extra["resolver_path"]`
+is set and the title reads `N+1: 24 queries on shop_customer from resolver orders.*.customer`.
+
+## 10. Settings additions (`Settings`, same validation rules as §6)
+
+| name | type | default |
+|---|---|---|
+| blocking_ms | float | 20 |
+| detect_blocking | bool | True (async adapters run an event-loop lag monitor only while a request is in flight) |
+| large_result_rows / unbounded_rows | int | 1_000 / 200 |
+| slow_serializer_ms / long_transaction_ms / slow_external_ms | float | 50 / 200 / 500 |
+| capture_logs | bool | True |
+| log_level | str | "INFO" (minimum level captured into a trace) |
+| max_logs_per_trace | int | 200 |
+| capture_locals | bool | True (redacted by `redact_keys`) |
+| editor | str | "vscode" – one of vscode, cursor, pycharm, idea, sublime, none, or a template containing `{file}` and `{line}` (`{file}` is absolute) |
+| server_timing | bool | True – add a `Server-Timing` header to recorded responses |
+| badge | "auto" \| bool | "auto" – inject the floating badge into HTML responses; `auto` = on when the framework is in debug mode |
+| release | str \| None | None → auto: env `REDLINE_RELEASE`, else `GIT_SHA`/`SOURCE_VERSION`/`RENDER_GIT_COMMIT`/`HEROKU_SLUG_COMMIT`, else `git rev-parse --short HEAD` in `project_root` (once, 1 s timeout), else None |
+| history_retention_days | int \| None | 90 (rollups/issue index/runs; independent of `max_age_days`) |
+| load_from_ui | bool | False – allow `POST api/runs` |
+
+## 11. Storage additions
+
+`redline_core.histogram.Histogram`: log-linear (HDR-like, ~1% relative error, 1 µs … 1 h), mergeable,
+`record(ms)`, `merge(other)`, `percentile(p)`, `count`, `max`, `mean`, `to_bytes()` / `from_bytes()`. Zero dependencies.
+
+SQLite schema gets a `meta(key, value)` table with `schema_version`; migrations are additive and run on connect.
+New tables (written by the writer thread in the same transaction as the trace):
+
+- `trace_sql(trace_id, started_at, route, method, fingerprint, sql, count, total_ms, max_ms, rows)` – one row per (trace, fingerprint); pruned with traces.
+- `trace_ext(trace_id, started_at, method, host, url_pattern, count, total_ms, max_ms, errors)` – outbound calls.
+- `trace_cache(trace_id, started_at, backend, key_pattern, gets, hits, misses, sets, deletes)` – `key_pattern` replaces digit runs, uuids and ≥8-char hex with `*`.
+- `rollups(bucket, release, route, method, count, errors, sum_ms, hist, sum_queries, sum_query_ms, issues)` – hourly, upserted per trace, kept `history_retention_days`.
+- `releases(release, first_seen, last_seen)`.
+- `issue_index(issue_id, kind, severity, title, route, first_seen, last_seen, first_release, last_release, occurrences)` – survives trace pruning.
+- `runs(id, created_at, finished_at, status, name, config, summary)` and `run_steps(run_id, step, started_at, ended_at, target_rps, achieved_rps, sent, ok, errors, dropped, hist, error_breakdown)`.
+
+New `Store` methods (SQLiteStore implements all; a custom store may raise `NotImplementedError`, which the API maps to 501 `not_supported`):
+`search_sql(q, window, limit)`, `sql_workload(window)`, `cache_stats(window)`, `external_stats(window)`,
+`history(route, method, start, end, bucket)`, `releases()`, `compare_periods(a, b)`, `issue_index(window=None)`,
+`save_run(run)`, `save_run_step(run_id, step)`, `finish_run(run_id, status, summary)`, `get_run(id)`, `list_runs(limit)`, `delete_run(id)`, `run_bottlenecks(run_id)`,
+`traces_since(started_at, trace_id, limit)` (for live tail).
+
+## 12. API additions (§5 rules apply)
+
+| Method & path | Returns |
+|---|---|
+| `GET api/meta` | adds `project_root`, `editor`, `editor_url_template` (str\|null, with `{file}`/`{line}`), `release`, `features: {load_from_ui, sse, snapshot}` |
+| `GET api/traces` | adds filters `sql=<substring>` and `since=<epoch>`, `replay_of=<id>` |
+| `GET api/stream?since=<epoch>` | **SSE** (adapter-served): `event: trace` with a TraceSummary per new trace, `: ping` every 15 s, closes after 5 min. Core helper `api.poll(since, last_id) -> list[TraceSummary]` |
+| `GET api/traces/{id}/snapshot` | `text/html` standalone page (bundle inlined, `window.__REDLINE_SNAPSHOT__ = {trace, profile}`). `dispatch` returns a `RawResponse(status, content_type, body: bytes, headers)` for it; adapters send it as-is |
+| `GET api/compare?a=<id>&b=<id>` | `{a: TraceSummary, b: TraceSummary, delta: {duration_ms, query_count, query_ms}, by_kind: {kind: {a_ms, b_ms, a_count, b_count}}, sql: [{fingerprint, sql, a_count, b_count, a_ms, b_ms}], issues: {only_a, only_b, both}}` |
+| `GET api/sql?q=&window=` | `{items: [{fingerprint, sql, count, traces, total_ms, max_ms, routes, sample_trace_id}]}` |
+| `GET api/indexes?window=` | `{candidates: [{table, columns, create_sql, covers: [fingerprint], queries, total_ms, est_saving_ms, vendor}], unused: [{table, index, scans, size_bytes}] , unused_supported: bool}` |
+| `GET api/cache?window=` | `{items: [{backend, key_pattern, gets, hits, misses, hit_rate, sets, unread_sets, stampedes}]}` |
+| `GET api/external?window=` | `{items: [{method, host, url_pattern, count, p95_ms, max_ms, errors, error_rate, duplicates, retries}]}` |
+| `GET api/history?route=&method=&window=30d&bucket=1h\|1d` | `{series: [{t, count, p50_ms, p95_ms, p99_ms, error_rate, avg_queries}], releases: [{release, first_seen}]}` (no route = whole app) |
+| `GET api/releases` | `{items: [{release, first_seen, last_seen, requests}]}` |
+| `GET api/history/compare?a=&b=` | `a`/`b` are `release:<name>` or `range:<start>-<end>` (epoch seconds). `{a, b, endpoints: [{route, method, a: Stats, b: Stats, delta_p95_pct, delta_queries, verdict: "regressed"\|"improved"\|"same"\|"new"\|"gone"}], issues: {new: [...], resolved: [...], persisting: [...]}}`; regressed = p95 +20% and +5 ms, or avg queries +1 |
+| `GET api/runs` / `GET api/runs/{id}` | runs list / `{id, name, status, config, created_at, finished_at, steps: [Step], summary: {knee_step, max_ok_rps, verdict}}` with `Step = {step, target_rps, achieved_rps, sent, ok, errors, dropped, p50_ms, p95_ms, p99_ms, max_ms, error_rate, error_breakdown}` |
+| `GET api/runs/{id}/bottlenecks` | `{steps: [{step, target_rps}], items: [{key, kind, label, callsite, per_step: [{step, mean_ms, p95_ms, count}], growth: float}]}` sorted by growth – the "query X went 3 ms → 410 ms" view |
+| `POST api/runs` / `POST api/runs/{id}/stop` / `DELETE api/runs/{id}` | start (403 `load_disabled` unless `load_from_ui`; the target is always the app's own base URL, given by the adapter) / stop / delete |
+
+New error codes: 403 `load_disabled`, 404 `run_not_found`, 409 `run_active`, 501 `not_supported`.
+
+Replay is browser-side: the UI re-sends the request with `fetch` (same origin, the viewer's own cookies),
+adding `X-Redline-Replay-Of: <trace id>`; the recorder turns that header into the tag `replay_of`
+(like `X-Redline-Run`). Redacted values must be re-entered by the user; they are never sent as `[redacted]`.
+
+## 13. Load tester (`redline_core.load`, extra `redline-core[load]` = httpx; console script `redline`)
+
+- `redline load SCENARIO [--rps N | --ramp A:B | --steps A:B:STEP] [--duration 60s] [--step-duration 30s] [--workers N] [--store PATH] [--json OUT] [--fail-p95-ms X] [--fail-error-rate Y]`, `redline load init --from-openapi URL|FILE | --from-traces [--store PATH]`. Exit code 1 when a `--fail-*` threshold is breached (CI-ready).
+- Scenario: JSON, TOML (3.11+) or a Python file defining `SCENARIO = {...}`:
+  `{name, base_url, headers, timeout_s, requests: [{name, method, path, weight, headers, json|body, expect_status}], profile: {mode: "constant"|"ramp"|"steps", rps, start_rps, end_rps, step_rps, duration_s, step_duration_s, stop_on: {error_rate, p95_ms}}, workers}`.
+- **Open model**: arrivals are scheduled at the target rate independent of responses (fixed interval or `poisson: true`); latency is measured from the *scheduled* time (coordinated-omission corrected), with a per-worker in-flight cap (beyond it: counted `dropped`). Workers are separate **processes** (asyncio + httpx each) sending per-second histograms to the parent.
+- Every request carries `X-Redline-Run: <run_id>;step=<n>` so app-side traces are tagged; the run (steps, histograms) is written to the same store the app uses (`--store`, default `.redline/redline.db`) and appears in the UI.
+- Knee: the first step whose p95 > 2× the first step's, or error rate > 1 %, or achieved < 90 % of target. `summary.knee_step`, `summary.max_ok_rps`.
+- Scenario generators: OpenAPI (FastAPI/Litestar/Ninja), captured traffic (store; top endpoints, concrete paths, no bodies with redacted values), Django URLconf (`manage.py redline_scenario`), Flask `url_map` (`flask redline scenario`).
+
+## 14. Integrations (`redline_core.contrib.*`, lazy: never imported by `redline_core/__init__`)
+
+- `contrib.sqlalchemy`: `instrument_engine(engine)` (moved from fastapi-redline, which re-exports it), `SQLAlchemyFixSuggester`, `explain_executor_factory`, plus `transaction` spans (begin/commit/rollback events) and `pool_wait` spans (checkout time ≥ 1 ms).
+- `contrib.httpx` (moved), `contrib.requests`, `contrib.redis` (redis-py sync + asyncio → `cache` spans with `op` = command, `key`, `hit` for GET-like commands), `contrib.asyncpg`, `contrib.psycopg` (psycopg 3 without an ORM → `sql` spans).
+- `contrib.strawberry` (`RedlineExtension`) and `contrib.graphene` (`RedlineMiddleware`) → `resolver` spans.
+- `contrib.asgi`: async helpers shared by ASGI adapters (event-loop lag monitor, Server-Timing/badge body injection).
+- Core helpers used by every adapter: `TraceBuilder.server_timing() -> str` (`total;dur=…, db;dur=…;desc="12 queries", cache;dur=…, http;dur=…, tpl;dur=…, redline;desc="<trace id>"`) and `redline_core.ui.badge_snippet(trace_id, mount_url, summary) -> str` (a `<script src=".../assets/badge.js" data-…>` tag; badge.js is a dependency-free script shipped in the bundle).
+
+## 15. Adapters
+
+| package | python | framework | entry point |
+|---|---|---|---|
+| flask-redline (`flask_redline`) | ≥ 3.10 | Flask ≥ 3.0, < 4 | `Redline(app=None, *, engine=None, settings=None, url_prefix="/_redline", permission=None, store=None)` + `init_app(app)`; Flask-SQLAlchemy engines auto-detected; `flask redline clear\|prune\|scan\|scenario` |
+| litestar-redline (`litestar_redline`) | ≥ 3.10 | Litestar ≥ 2.12, < 3 | `RedlinePlugin(settings=None, engine=None, path="/_redline", guards=None, store=None)` |
+
+Flask and Litestar default to the same `local_only` policy as FastAPI (loopback client **and** loopback Host) and the same Origin / `Sec-Fetch-Site` CSRF check; a `permission` / `guards` hook replaces it. Django Ninja is served by django-redline (route templates resolved from Ninja's operations).
+Every adapter: Server-Timing, badge injection (HTML, non-streaming, 200–299, `badge` on), SSE `api/stream`, `RawResponse` passthrough, `X-Frame-Options: DENY` on Redline's own responses.
+
+## 16. Static N+1 scan (`redline_core.scan`)
+
+`scan_templates(paths, dialect="django"|"jinja") -> list[ScanFinding]` finds `{% for x in y %}` blocks that read `x.a.b` / `x.a.all`;
+`ScanFinding = {file, line, loop_var, chain, kind: "template"|"serializer", severity, message, suggestion}`.
+Django (`manage.py redline_scan`) keeps only chains whose first hop is a real FK/O2O/M2M/reverse relation, and also checks DRF
+`ModelSerializer`s with nested relation serializers whose view queryset lacks the matching `select_related`/`prefetch_related`.
+Flask (`flask redline scan`) runs the Jinja dialect. Output: text table or `--json`; exit 1 with `--fail`.
+
+## 17. UI additions
+
+Command palette (⌘K / Ctrl-K), Live mode (SSE) on Requests, open-in-editor links on every callsite, copy as cURL / HTTPie,
+Replay (modal for redacted values, optional profile), compare two traces (`#/compare/:a/:b`), Logs and Exception (with locals) tabs,
+snapshot download, new pages: **Database** (SQL search, index advisor, unused indexes), **Cache**, **External**, **History**
+(timeline with release markers, compare releases/periods, new/resolved issues) and **Load** (runs, RPS-vs-p95-vs-errors chart with knee, per-step bottlenecks, start form when `load_from_ui`).
