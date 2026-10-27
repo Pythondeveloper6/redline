@@ -1875,6 +1875,9 @@ graphene = [
 httpx = [
     { name = "httpx" },
 ]
+load = [
+    { name = "httpx" },
+]
 profile = [
     { name = "pyinstrument" },
 ]
@@ -1919,6 +1922,7 @@ requires-dist = [
     { name = "asyncpg", marker = "extra == 'asyncpg'", specifier = ">=0.29" },
     { name = "graphene", marker = "extra == 'graphene'", specifier = ">=3.3" },
     { name = "httpx", marker = "extra == 'httpx'", specifier = ">=0.27" },
+    { name = "httpx", marker = "extra == 'load'", specifier = ">=0.27" },
     { name = "psycopg", marker = "extra == 'psycopg'", specifier = ">=3.1" },
     { name = "pyinstrument", marker = "extra == 'profile'", specifier = ">=5.0,<6.0" },
     { name = "redis", marker = "extra == 'redis'", specifier = ">=5.0" },
@@ -1926,7 +1930,7 @@ requires-dist = [
     { name = "sqlalchemy", marker = "extra == 'sqlalchemy'", specifier = ">=2.0,<3.0" },
     { name = "strawberry-graphql", marker = "extra == 'strawberry'", specifier = ">=0.240" },
 ]
-provides-extras = ["profile", "sqlalchemy", "httpx", "requests", "redis", "asyncpg", "psycopg", "strawberry", "graphene"]
+provides-extras = ["profile", "sqlalchemy", "httpx", "requests", "redis", "asyncpg", "psycopg", "strawberry", "graphene", "load"]
 
 [package.metadata.requires-dev]
 dev = [
