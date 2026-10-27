@@ -2,6 +2,7 @@
 //
 // Redacted values (the backend's mask is "[redacted]") are never emitted; they become shell
 // variables such as "$AUTHORIZATION" that the user must export before running the command.
+import { safePath } from './url.ts'
 
 /** Text piece of a command: a literal, or a reference to an environment variable. */
 export type Part = string | { v: string }
@@ -69,9 +70,13 @@ function collect(parts: Part[], vars: string[]) {
   for (const p of parts) if (typeof p !== 'string' && !vars.includes(p.v)) vars.push(p.v)
 }
 
-/** URL parts: base + path + query string with redacted values left as variables. */
+/**
+ * URL parts: base + path + query string with redacted values left as variables. The path is
+ * always kept on `base` (`//evil.example/x` becomes `<base>/evil.example/x`).
+ */
 export function urlParts(base: string, path: string, query: Record<string, unknown>): Part[] {
-  const parts: Part[] = [base.replace(/\/+$/, '') + (path.startsWith('/') ? path : '/' + path)]
+  path = safePath(path)
+  const parts: Part[] = [base.replace(/\/+$/, '') + path]
   let sep = path.includes('?') ? '&' : '?'
   for (const [k, raw] of Object.entries(query)) {
     for (const v of Array.isArray(raw) ? raw : [raw]) {

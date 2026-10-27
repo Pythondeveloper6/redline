@@ -24,12 +24,20 @@ and the file and line of the log call (project-relative, clickable if
 
 ### How it is captured
 
-One handler is attached to the root logger the first time a recorder with `capture_logs`
-is created. It files a record under whichever request is active in the current
-`contextvars` context, so concurrent requests and threads do not mix. Outside a request a
-record costs a single `ContextVar.get()`. Records from Redline's own `redline` loggers are
-ignored so it can never recurse. A logger with `propagate = False` never reaches the root
-handler, so its records are not captured.
+Redline does not add a logging handler or change any logger's level. The first recorder
+with `capture_logs` wraps the log record factory (`logging.setLogRecordFactory`, keeping
+whatever factory was installed before), so your own `logging.basicConfig(...)`,
+`dictConfig(...)` or `basicConfig(force=True)` work exactly as without Redline, before or
+after it is configured. Each record is filed under whichever request is active in the
+current `contextvars` context, so concurrent requests and threads do not mix. Outside a
+request a record costs a single `ContextVar.get()`. Records from Redline's own `redline`
+loggers are ignored so it can never recurse.
+
+Python only creates a record when the logger is enabled for its level, so capture follows
+**your** logging levels and `log_level` is an additional minimum on top. To capture INFO
+your loggers must be at INFO: Django's default `LOGGING` and most configured apps are. An
+app that never configured logging has its root logger at WARNING, so only WARNING and above
+are captured there (call `logging.basicConfig(level=logging.INFO)` to get INFO too).
 
 | Setting | Default | Meaning |
 |---|---|---|

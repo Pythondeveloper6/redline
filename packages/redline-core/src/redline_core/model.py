@@ -18,7 +18,8 @@ is the wire format in ``CONTRACT.md`` §1–2 and is what the UI reads. Times ar
 
 from __future__ import annotations
 
-import uuid
+import os
+import threading
 from dataclasses import dataclass, field
 from typing import Any, Literal, cast
 
@@ -109,9 +110,42 @@ SEVERITIES: tuple[str, ...] = ("info", "warning", "critical")
 FRAMEWORKS: tuple[str, ...] = ("django", "fastapi", "flask", "litestar", "other")
 
 
+_ID_POOL_BYTES = 4096  # 256 ids per os.urandom() call
+_id_lock = threading.Lock()
+_id_pool = b""
+_id_pos = 0
+
+
 def new_id() -> str:
-    """A fresh 32-character hex id (``uuid4().hex``), used for traces and spans."""
-    return uuid.uuid4().hex
+    """A fresh 32-character hex id (random, in ``uuid4().hex`` format), used for traces
+    and spans.
+
+    The random bytes come from :func:`os.urandom` like ``uuid4()``, but are read in
+    batches: one syscall per id was a measurable share of the per-request cost.
+    """
+    global _id_pool, _id_pos
+    with _id_lock:
+        pos = _id_pos
+        if pos >= len(_id_pool):
+            _id_pool = os.urandom(_ID_POOL_BYTES)
+            pos = 0
+        _id_pos = pos + 16
+        raw = bytearray(_id_pool[pos : pos + 16])
+    raw[6] = (raw[6] & 0x0F) | 0x40  # version 4
+    raw[8] = (raw[8] & 0x3F) | 0x80  # RFC 4122 variant
+    return raw.hex()
+
+
+def _reset_ids() -> None:  # pragma: no cover - runs in forked children
+    """A forked child must not hand out the ids left in its parent's pool."""
+    global _id_lock, _id_pool, _id_pos
+    _id_lock = threading.Lock()
+    _id_pool = b""
+    _id_pos = 0
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_ids)
 
 
 @dataclass(frozen=True)

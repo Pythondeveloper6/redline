@@ -78,7 +78,7 @@ benchmarked yet**. If you need a number for your app, use [Measure it yourself](
 | Profiling a request | pyinstrument sampling every millisecond while the request runs; only for profiled requests |
 | EXPLAIN | one query on your database, once, when someone clicks. `ANALYZE` runs the query for real |
 | The UI polling | one `COUNT(*)` plus a page query every two seconds while a Requests page is open and Live mode is on polling (Live mode normally uses one open SSE connection instead) |
-| `api/stream` | one open connection per viewer, closed after five minutes (the client reconnects) |
+| `api/stream` | one open connection per viewer, closed after five minutes on ASGI and 25 seconds on WSGI, where it holds a worker thread meanwhile (the client reconnects) |
 | A snapshot download | building one HTML file (the UI bundle, inlined) |
 
 ## What the design avoids

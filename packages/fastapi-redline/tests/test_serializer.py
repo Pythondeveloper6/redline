@@ -97,3 +97,21 @@ def test_slow_serializer_issue(tmp_path):
     assert issue.extra["serializer"] == "Item" and issue.extra["items"] == 400
     assert "Item" in issue.title and "400 items" in issue.title
     assert issue.suggestion is not None
+
+
+def test_fast_serializer_span_skips_the_stack_walk(tmp_path, monkeypatch):
+    """The callsite (a stack walk, the costliest part of the span) is only taken when the
+    span is slow enough to become an issue."""
+    from redline_core.callsite import CallsiteCapturer
+
+    calls = []
+    original = CallsiteCapturer.capture
+
+    def counting(self, *a, **kw):
+        calls.append(1)
+        return original(self, *a, **kw)
+
+    monkeypatch.setattr(CallsiteCapturer, "capture", counting)
+    app, redline = make_app(tmp_path)
+    (span,) = serializer_spans(trace_of(redline, app, "/plain"))
+    assert span.callsite is None and calls == []

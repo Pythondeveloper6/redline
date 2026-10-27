@@ -1,5 +1,26 @@
 # Redline benchmarks
 
+## v0.2 fixed-cost fixes (2026-10-27)
+
+Medians of three `uv run python benchmarks/overhead.py --quick` runs ("full" mode, per-request
+fixed cost at 0 queries against the `off` baseline), same machine, before and after:
+
+| framework | before | after | per query before / after |
+|---|---|---|---|
+| fastapi | +0.085 ms | +0.054 ms | +50.3 / +45.9 us |
+| django | +0.070 ms | +0.058 ms | +27.4 / +33.0 us (quick-mode noise: runs ranged 26-33 us) |
+| flask | +0.036 ms | +0.033 ms | +28.6 / +26.8 us |
+| litestar | +0.055 ms | +0.047 ms | +48.1 / +55.4 us (noisy) |
+
+What changed: FastAPI 0.16x matches an included router by walking each of its routes, and
+Redline's sit first, so every application request paid ~5-7 us to be told "not Redline";
+they are now skipped with one `startswith` unless the path is under the prefix. Ids
+(`new_id()`, two or more per request) read `os.urandom` in 4 KiB batches instead of one
+syscall each. The FastAPI serializer span walks the stack for its callsite only when it is
+slow enough to become a `slow_serializer` issue. The event-loop monitor, detection and the
+storage hand-off measured at noise level each and were left as they are. Access checks run
+only on Redline's own routes (they are route dependencies), so they never cost an app request.
+
 ## v0.2 (current)
 
 - Date: 2026-10-27

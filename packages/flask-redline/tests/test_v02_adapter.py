@@ -85,7 +85,17 @@ def test_badge_auto_follows_debug_and_setting_overrides(make_env):
 
 
 @pytest.mark.parametrize(
-    "path", ["/orders/1", "/html-csp", "/html-fragment", "/file", "/missing", "/_redline/"]
+    "path",
+    [
+        "/orders/1",
+        "/html-csp",
+        "/html-csp-two",
+        "/html-download",
+        "/html-fragment",
+        "/file",
+        "/missing",
+        "/_redline/",
+    ],
 )
 def test_badge_not_injected(make_env, path):
     env = make_env(settings={"badge": True})

@@ -158,6 +158,22 @@ def test_badge_not_injected(make_app, url):
             assert r.text == PAGE
 
 
+def test_badge_not_injected_when_not_recording(make_app, monkeypatch):
+    """An inert builder (Redline turned off between the gate and ``start_trace``)."""
+    app, plugin = make_app()
+    calls = []
+
+    def ignored(path):  # the middleware's gate says "record", start_trace says "inert"
+        calls.append(path)
+        return len(calls) % 2 == 0
+
+    monkeypatch.setattr(plugin.recorder.sampler, "ignored", ignored)
+    with _client(app) as c:
+        r = c.get("/page")
+        assert r.status_code == 200 and "badge.js" not in r.text
+        assert int(r.headers["content-length"]) == len(r.content)
+
+
 def test_badge_not_on_redline_pages(make_app):
     app, _ = make_app()
     with _client(app) as c:

@@ -104,8 +104,11 @@ any of these is true:
 
    That is 10, 20, ... 100 requests per second, 20 seconds each.
 
-5. Read the table, then open the run in the UI (`/_redline/#/load`, the path is printed at
-   the end) to see the chart and the bottlenecks.
+5. Read the table, then open the run in the UI (the link is printed at the end as
+   "Open the run in Redline: …") to see the chart and the bottlenecks. The link uses
+   `--ui-url`, else the scenario's `ui_url`, else `mount_path` from your project's Redline config,
+   else `/_redline`; with Django (mounted where your URLconf puts it, often `/redline/`) pass
+   `--ui-url /redline` or set `ui_url` in the scenario.
 
 ```text
 redline load: browse → http://127.0.0.1:8000
@@ -228,6 +231,7 @@ stop_on = { error_rate = 0.05, p95_ms = 2000 }
 | `connections` | `64` | Keep-alive connections per worker |
 | `max_inflight` | `1000` | In-flight cap per worker; arrivals beyond it are counted `dropped` |
 | `seed` | random | Integer seed for placeholders and request choice, for repeatable runs |
+| `ui_url` | config `mount_path`, else `/_redline` | Where the Redline UI is mounted (path on `base_url`'s host, or a full URL); only used for the printed link |
 
 Durations accept a number of seconds or strings such as `"20s"`, `"2m"`.
 
@@ -289,6 +293,7 @@ SCENARIO = {
 | `--poisson` | Poisson arrivals instead of evenly spaced |
 | `--workers N` | worker processes |
 | `--base-url URL` | override the scenario's `base_url` |
+| `--ui-url PATH\|URL` | where the Redline UI is mounted, for the printed link (overrides the scenario's `ui_url`) |
 | `--name TEXT` | run name |
 | `--store PATH` | store to write the run to (default `.redline/redline.db`) |
 | `--no-store` | do not write to a store |

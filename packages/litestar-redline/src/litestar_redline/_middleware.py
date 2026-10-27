@@ -119,7 +119,9 @@ def _badge_candidate(status: int, headers: list[tuple[bytes, bytes]]) -> bool:
         status,
         _header(headers, b"content-type"),
         content_encoding=_header(headers, b"content-encoding"),
-        csp=_header(headers, b"content-security-policy"),
+        csp=", ".join(
+            v.decode("latin-1") for k, v in headers if k.lower() == b"content-security-policy"
+        ),
     ):
         return False
     if _header(headers, b"content-disposition") is not None:
@@ -168,7 +170,7 @@ class RedlineMiddleware:
         capture_res = settings.capture_response_body
         state: dict[str, Any] = {"status": None, "headers": [], "done": False}
         debug = bool(getattr(scope.get("app"), "debug", False))
-        badge_on = ui.badge_enabled(settings, debug)
+        badge_on = builder.active and ui.badge_enabled(settings, debug)
         timing_on = ui.server_timing_enabled(settings, debug)
         held: dict[str, Any] = {}  # badge: the held start message and the buffered body
 
