@@ -145,6 +145,7 @@ class TraceBuilder:
         "on_finish",
         "overflow",
         "path",
+        "path_params",
         "profiler",
         "query_count",
         "query_ms",
@@ -183,6 +184,8 @@ class TraceBuilder:
         self.framework = framework
         self.method = method.upper()
         self.path = path
+        #: The route's parameters (``{"token": "…"}``), used to mask secret path segments.
+        self.path_params: Mapping[str, Any] | None = None
         self.route = route
         self.view = view
         self.req_headers = headers
@@ -215,12 +218,20 @@ class TraceBuilder:
         return f"<TraceBuilder {self.method} {self.path} spans={len(self.spans)}>"
 
     # mutation from adapters / user code -------------------------------------
-    def set_route(self, route: str | None, view: str | None = None) -> None:
-        """Record the resolved route template and view (known only after routing)."""
+    def set_route(
+        self,
+        route: str | None,
+        view: str | None = None,
+        params: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Record the resolved route template, view and path parameters (known only after
+        routing). Parameters with secret-looking names are masked in the stored path."""
         if route is not None:
             self.route = route
         if view is not None:
             self.view = view
+        if params is not None:
+            self.path_params = params
 
     def tag(self, key: str, value: Any) -> None:
         self.tags[str(key)] = str(value)
@@ -389,11 +400,13 @@ class Recorder:
         route: str | None = None,
         view: str | None = None,
         error: BaseException | Mapping[str, Any] | None = None,
+        path_params: Mapping[str, Any] | None = None,
     ) -> Trace:
         """Stop recording and return the finished trace (stored if sampling keeps it).
 
         Response ``headers``/``body`` are redacted like the request's. ``error`` is the
-        unhandled exception, if any.
+        unhandled exception, if any. ``path_params`` are the route's parameters: values of
+        secret-looking ones are masked in the stored path (:meth:`Redactor.path`).
         """
         if builder.on_finish:
             for callback in builder.on_finish:
@@ -405,7 +418,13 @@ class Recorder:
         end = _perf()
         builder.finished = True
         _reset(builder)
-        builder.set_route(route, view)
+        builder.set_route(route, view, path_params)
+        try:
+            builder.path = self.redactor.path(
+                builder.path, builder.path_params, resolved=builder.route is not None
+            )
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("Redline failed to redact the path")
         profile = None
         if builder.profiler is not None:
             title = f"{builder.method} {builder.route or builder.path}"
@@ -428,7 +447,7 @@ class Recorder:
             duration_ms=round(duration, 3),
             tags=dict(builder.tags),
             profile=profile,
-            error=_error_dict(error),
+            error=_error_dict(error, self.redactor),
             release=self.release,
         )
         if not builder.active:
@@ -526,7 +545,7 @@ class Recorder:
                     "file": display,
                     "line": line,
                     "function": frame.f_code.co_name,
-                    "code": linecache.getline(filename, line).strip() or None,
+                    "code": redactor.text(linecache.getline(filename, line).strip()) or None,
                     "locals": local_vars,
                 }
             )
@@ -553,7 +572,9 @@ class Recorder:
             size = len(body.encode("utf-8") if isinstance(body, str) else body)
         text, truncated = (None, False)
         if self.settings.capture_response_body:
-            text, truncated = r.body(body, _header(hdrs, "content-type"))
+            # Response bodies are mostly HTML: the free-text scan would cost ~2 ms per 20 kB
+            # page on the finish path, so only JSON/form/multipart keys are masked here.
+            text, truncated = r.body(body, _header(hdrs, "content-type"), free_text=False)
         return {"headers": hdrs, "body": text, "body_truncated": truncated, "size": size}
 
 
@@ -1046,15 +1067,31 @@ def _apply_run_header(builder: TraceBuilder, headers: Any) -> None:
                 builder.tags["step"] = v2.strip()[:16]
 
 
-def _error_dict(error: BaseException | Mapping[str, Any] | None) -> dict[str, Any] | None:
+def _error_dict(
+    error: BaseException | Mapping[str, Any] | None, redactor: Redactor
+) -> dict[str, Any] | None:
+    """The stored ``Trace.error``: the message and the formatted traceback (chained
+    exceptions included) go through :meth:`Redactor.text` – URL passwords, secret query
+    values, ``key=value`` secrets, JWTs and card numbers are masked."""
     if error is None:
         return None
     if isinstance(error, Mapping):
-        return {str(k): v for k, v in error.items()}
+        return {
+            str(k): redactor.text(v) if isinstance(v, str) and k != "type" else v
+            for k, v in error.items()
+        }
+    try:
+        message = str(error)
+    except Exception:
+        message = "<unprintable>"
+    try:
+        tb = "".join(traceback.format_exception(type(error), error, error.__traceback__))
+    except Exception:
+        tb = ""
+    if len(tb) > 40_000:  # cut at a line start so no ``key=value`` pair is split
+        tb = tb[-40_000:].partition("\n")[2]
     return {
         "type": type(error).__name__,
-        "message": str(error)[:2000],
-        "traceback": "".join(traceback.format_exception(type(error), error, error.__traceback__))[
-            -20_000:
-        ],
+        "message": redactor.text(message[:4000])[:2000],
+        "traceback": redactor.text(tb[-40_000:])[-20_000:],
     }

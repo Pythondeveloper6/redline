@@ -47,6 +47,22 @@ def test_key_is_capped(tracer):
     assert len(span.data["key"]) == 200
 
 
+def test_session_and_secret_keys_are_masked(tracer):
+    r = fakeredis.FakeRedis()
+    b = tracer.start()
+    r.set("session:q1w2e3r4t5y6u7i8o9p0", "data")
+    r.get("app:api_key:sk_live_abc")
+    r.get("user:1")
+    spans = tracer.finish(b)
+    assert [s.data["key"] for s in spans] == [
+        "session:[redacted]",
+        "app:api_key:[redacted]",
+        "user:1",
+    ]
+    for span in spans:
+        assert "q1w2e3" not in span.name and "sk_live" not in span.name
+
+
 def test_credential_commands_have_no_key(tracer):
     r = fakeredis.FakeRedis()
     b = tracer.start()

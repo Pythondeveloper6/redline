@@ -31,12 +31,19 @@ _NO_KEY = frozenset({"auth", "hello", "migrate", "config", "config set", "acl", 
 
 
 def _key(args: tuple[Any, ...]) -> str | None:
+    """The command's key with session ids and secret-looking parts masked
+    (:meth:`~redline_core.redact.Redactor.cache_key`), capped at 200 characters."""
     if len(args) < 2:
         return None
     key = args[1]
     if isinstance(key, bytes):
         key = key.decode("utf-8", "replace")
-    return key[:_KEY_CAP] if isinstance(key, str) else None
+    if not isinstance(key, str):
+        return None
+    builder = current()
+    if builder is not None:
+        key = builder.recorder.redactor.cache_key(key)
+    return key[:_KEY_CAP]
 
 
 def _hit(op: str, result: Any) -> bool | None:
