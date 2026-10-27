@@ -3,12 +3,16 @@
     uv run python benchmarks/overhead.py            # full run, prints a markdown report
     uv run python benchmarks/overhead.py --quick    # fewer iterations (smoke test)
 
-Both adapters are driven in-process (no network, no server) against a view that runs N
+All four adapters are driven in-process (no network, no server) against a view that runs N
 trivial SQLite queries:
 
 * **django**  - ``django.test.Client`` -> ``RedlineMiddleware`` -> view -> ``cursor.execute``.
 * **fastapi** - raw ASGI calls on one event loop -> ``RedlineMiddleware`` -> ``async def``
   endpoint -> SQLAlchemy ``Session.execute`` (sync engine, in-memory SQLite).
+* **flask**   - ``app.test_client()`` -> Redline hooks -> view -> SQLAlchemy Core (sync engine,
+  in-memory SQLite).
+* **litestar** - raw ASGI calls on one event loop -> ``RedlinePlugin`` middleware -> ``async def``
+  handler -> SQLAlchemy Core (sync engine, in-memory SQLite).
 
 Modes:
 
@@ -38,7 +42,7 @@ import tempfile
 import time
 
 MODES = ("off", "disabled", "sample0", "full", "profile")
-FRAMEWORKS = ("django", "fastapi")
+FRAMEWORKS = ("django", "fastapi", "flask", "litestar")
 LOW, HIGH = 0, 20
 
 
@@ -151,6 +155,24 @@ def fastapi_worker(mode: str, n_queries: int, iterations: int, warmup: int) -> l
 
         install(app, engine=engine, settings=redline_settings(mode, tmp), dependencies=[])
 
+    call = _asgi_call(app)
+
+    async def main() -> list[float]:
+        async with app.router.lifespan_context(app):
+            for _ in range(warmup):
+                await call()
+            out = []
+            for _ in range(iterations):
+                t = time.perf_counter_ns()
+                status = await call()
+                out.append((time.perf_counter_ns() - t) / 1e3)
+                assert status == 200
+            return out
+
+    return asyncio.run(main())
+
+
+def _asgi_call(app):
     async def call() -> int:
         sent: list[dict] = []
 
@@ -177,8 +199,85 @@ def fastapi_worker(mode: str, n_queries: int, iterations: int, warmup: int) -> l
         await app(scope, receive, send)
         return sent[0]["status"]
 
+    return call
+
+
+def _sqlalchemy_engine():
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.pool import StaticPool
+
+    engine = create_engine(
+        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
+    )
+    with engine.begin() as conn:
+        conn.execute(text("CREATE TABLE item (id INTEGER PRIMARY KEY, name TEXT)"))
+        for i in range(50):
+            conn.execute(
+                text("INSERT INTO item (id, name) VALUES (:i, :n)"), {"i": i, "n": f"n{i}"}
+            )
+    return engine
+
+
+def flask_worker(mode: str, n_queries: int, iterations: int, warmup: int) -> list[float]:
+    from flask import Flask
+    from sqlalchemy import text
+
+    tmp = tempfile.mkdtemp(prefix="redline-bench-")
+    engine = _sqlalchemy_engine()
+    app = Flask(__name__)
+
+    @app.get("/bench/")
+    def bench():
+        with engine.connect() as conn:
+            for i in range(n_queries):
+                conn.execute(text("SELECT id, name FROM item WHERE id = :i"), {"i": i % 50}).all()
+        return {"ok": True}
+
+    if mode != "off":
+        from flask_redline import Redline
+
+        Redline(app, engine=engine, settings=redline_settings(mode, tmp), permission=lambda r: True)
+
+    client = app.test_client()
+    for _ in range(warmup):
+        client.get("/bench/")
+    out = []
+    for _ in range(iterations):
+        t = time.perf_counter_ns()
+        resp = client.get("/bench/")
+        out.append((time.perf_counter_ns() - t) / 1e3)
+        assert resp.status_code == 200
+    return out
+
+
+def litestar_worker(mode: str, n_queries: int, iterations: int, warmup: int) -> list[float]:
+    import asyncio
+
+    from litestar import Litestar, get
+    from sqlalchemy import text
+
+    tmp = tempfile.mkdtemp(prefix="redline-bench-")
+    engine = _sqlalchemy_engine()
+
+    @get("/bench/", sync_to_thread=False)
+    async def bench() -> dict:
+        with engine.connect() as conn:
+            for i in range(n_queries):
+                conn.execute(text("SELECT id, name FROM item WHERE id = :i"), {"i": i % 50}).all()
+        return {"ok": True}
+
+    plugins = []
+    if mode != "off":
+        from litestar_redline import RedlinePlugin
+
+        plugins.append(
+            RedlinePlugin(engine=engine, settings=redline_settings(mode, tmp), guards=[])
+        )
+    app = Litestar([bench], plugins=plugins)
+    call = _asgi_call(app)
+
     async def main() -> list[float]:
-        async with app.router.lifespan_context(app):
+        async with app.lifespan():
             for _ in range(warmup):
                 await call()
             out = []
@@ -231,7 +330,15 @@ def cpu_name() -> str:
 def versions() -> str:
     from importlib.metadata import version
 
-    names = ["django", "fastapi", "sqlalchemy", "pyinstrument", "redline-core"]
+    names = [
+        "django",
+        "fastapi",
+        "flask",
+        "litestar",
+        "sqlalchemy",
+        "pyinstrument",
+        "redline-core",
+    ]
     return ", ".join(f"{n} {version(n)}" for n in names)
 
 
@@ -288,7 +395,12 @@ def main() -> None:
 
     if args.worker:
         fw, mode, n, iters, warm = args.worker
-        fn = django_worker if fw == "django" else fastapi_worker
+        fn = {
+            "django": django_worker,
+            "fastapi": fastapi_worker,
+            "flask": flask_worker,
+            "litestar": litestar_worker,
+        }[fw]
         print(json.dumps(fn(mode, int(n), int(iters), int(warm))))
         return
 
