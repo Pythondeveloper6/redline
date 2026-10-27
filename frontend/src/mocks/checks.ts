@@ -69,7 +69,7 @@ function baselineRequests(): BaselineRequest[] {
   const mk = (name: string, method: string, path: string, med: number, cv: number, q: number | null, vol: string[], kind: 'json' | 'text' | 'hash' = 'json', seed = 1, status = 200, perf = true): BaselineRequest => ({
     name, method, path,
     perf: perf ? stats(samples(med, cv, 20, seed), 0) : null,
-    server: q == null ? null : { duration_median_ms: +(med * 0.8).toFixed(1), queries_median: q, queries_max: q + 1, query_ms: +(med * 0.4).toFixed(1), sql: [{ fingerprint: 'sel_orders', count: 1, sql: 'SELECT * FROM orders WHERE page = ?' }], issues: q > 30 ? [{ kind: 'n_plus_one', title: 'N+1 on order_items' }] : [] },
+    server: q == null ? null : { duration_ms_median: +(med * 0.8).toFixed(1), queries_median: q, queries_max: q + 1, query_ms_median: +(med * 0.4).toFixed(1), sql: { sel_orders: { count: 1, sql: 'SELECT * FROM orders WHERE page = ?' } }, issues: q > 30 ? [{ kind: 'n_plus_one', title: 'N+1 on order_items' }] : [] },
     response: { status, content_type: kind === 'json' ? 'application/json' : 'text/plain', headers: { 'content-type': kind === 'json' ? 'application/json' : 'text/plain' }, body_kind: kind, size: kind === 'json' ? 18432 : 2, ...(kind === 'hash' ? { sha256: 'e3b0c442' } : {}) },
     volatile: vol,
   })
@@ -99,13 +99,13 @@ function reportRequests(): ReportRequest[] {
       name: 'list orders', method: 'GET', path: '/orders?page=1',
       perf: { verdict: 'faster', before, after, ...cp(before, after), p_value: 0.00002, reason: 'time' },
       server: {
-        before: { duration_median_ms: 146, queries_median: 42, queries_max: 43, query_ms: 71, sql: [{ fingerprint: 'sel_items', count: 40, sql: 'SELECT * FROM order_items WHERE order_id = ?' }, { fingerprint: 'sel_orders', count: 1 }], issues: [{ kind: 'n_plus_one', title: 'N+1 on order_items' }] },
-        after: { duration_median_ms: 71, queries_median: 3, queries_max: 3, query_ms: 21, sql: [{ fingerprint: 'sel_items_in', count: 1 }, { fingerprint: 'sel_orders', count: 1 }], issues: [] },
+        before: { duration_ms_median: 146, queries_median: 42, queries_max: 43, query_ms_median: 71, sql: { sel_items: { count: 40, sql: 'SELECT * FROM order_items WHERE order_id = ?' }, sel_orders: { count: 1 } }, issues: [{ kind: 'n_plus_one', title: 'N+1 on order_items' }] },
+        after: { duration_ms_median: 71, queries_median: 3, queries_max: 3, query_ms_median: 21, sql: { sel_items_in: { count: 1 }, sel_orders: { count: 1 } }, issues: [] },
         queries_change: -39,
         new_issues: [],
         fixed_issues: [{ kind: 'n_plus_one', title: 'N+1 on order_items', fingerprint: 'sel_items', sample_trace_id: 'tr_0001' }],
-        new_sql: [{ fingerprint: 'sel_items_in', sql: 'SELECT * FROM order_items WHERE order_id IN (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', count: 1, sample_trace_id: 'tr_0002' }],
-        gone_sql: [{ fingerprint: 'sel_items', sql: 'SELECT * FROM order_items WHERE order_id = ?', count: 40, sample_trace_id: 'tr_0001' }],
+        new_sql: [],
+        gone_sql: [],
       },
       response: { verdict: 'same', status: [200, 200], diff: [], text_diff: null, ignored: ['data[0].created_at', 'data[1].created_at', 'meta.request_id'] },
     })
@@ -116,12 +116,12 @@ function reportRequests(): ReportRequest[] {
       name: 'order detail', method: 'GET', path: '/orders/1042',
       perf: { verdict: 'slower', before, after, ...cp(before, after), p_value: 0.00001, reason: 'time' },
       server: {
-        before: { duration_median_ms: 19, queries_median: 9, queries_max: 9, query_ms: 8, sql: [], issues: [] },
-        after: { duration_median_ms: 36, queries_median: 12, queries_max: 13, query_ms: 19, sql: [], issues: [{ kind: 'duplicate_query', title: 'Duplicate query on customers' }] },
+        before: { duration_ms_median: 19, queries_median: 9, queries_max: 9, query_ms_median: 8, sql: {}, issues: [] },
+        after: { duration_ms_median: 36, queries_median: 12, queries_max: 13, query_ms_median: 19, sql: {}, issues: [{ kind: 'duplicate_query', title: 'Duplicate query on customers' }] },
         queries_change: 3,
         new_issues: [{ kind: 'duplicate_query', title: 'SELECT * FROM customers WHERE id = ? (3x)', fingerprint: 'dup_cust', sample_trace_id: 'tr_0003' }],
         fixed_issues: [],
-        new_sql: [{ fingerprint: 'sel_cust', sql: 'SELECT * FROM customers WHERE id = ?', count: 3, sample_trace_id: 'tr_0003' }],
+        new_sql: [],
         gone_sql: [],
       },
       response: {
@@ -173,7 +173,7 @@ function reportRequests(): ReportRequest[] {
       server: {
         before: { queries_median: 6 }, after: { queries_median: 11, queries_max: 12 }, queries_change: 5,
         new_issues: [], fixed_issues: [],
-        new_sql: [{ fingerprint: 'sel_lines', sql: 'SELECT * FROM invoice_lines WHERE invoice_id = ? ORDER BY position', count: 5, sample_trace_id: 'tr_0004' }], gone_sql: [],
+        new_sql: [], gone_sql: [],
       },
       response: {
         verdict: 'broken', status: [200, 500], ignored: ['printed_at'], text_diff: null, diff_total: 2,

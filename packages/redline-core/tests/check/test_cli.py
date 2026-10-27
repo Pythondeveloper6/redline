@@ -7,6 +7,7 @@ from xml.etree import ElementTree as ET
 
 import pytest
 
+import redline_core.check
 from redline_core import cli
 from redline_core.check import Baseline
 
@@ -167,6 +168,7 @@ def test_store_without_check_storage(app, served, tmp_path, capsys, monkeypatch)
 
     SQLiteStore(str(tmp_path / "r.db"), background=False).close()
     monkeypatch.setitem(sys.modules, "redline_core.check.sink", None)  # module missing
+    monkeypatch.delattr(redline_core.check, "sink", raising=False)  # also once imported
     setup_app(app)
     suite = write_suite(tmp_path, served)
     assert cli.main(["check", "record", str(suite), "--store", "r.db", "-q"]) == 0
@@ -211,6 +213,7 @@ def test_store_sink_and_baseline_id(app, served, tmp_path, capsys, monkeypatch):
     module.StoreServerMetrics = StoreServerMetrics
     module.load_baseline = load_baseline
     monkeypatch.setitem(sys.modules, "redline_core.check.sink", module)
+    monkeypatch.setattr(redline_core.check, "sink", module, raising=False)
 
     setup_app(app)
     suite = write_suite(tmp_path, served)

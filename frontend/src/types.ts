@@ -227,8 +227,9 @@ export type PerfVerdict = 'faster' | 'slower' | 'same' | 'noisy' | 'n/a'
 export type ResponseVerdict = 'same' | 'changed' | 'broken' | 'n/a'
 export interface PerfStats { samples_ms: number[]; median: number; p95: number; mean: number; stdev: number; failed: number }
 export interface ServerStats {
-  duration_median_ms?: number | null; queries_median: number; queries_max?: number | null; query_ms?: number | null
-  sql?: { fingerprint: string; count: number; sql?: string }[]
+  duration_ms_median?: number | null; queries_median: number; queries_max?: number | null; query_ms_median?: number | null
+  sql?: Record<string, { count: number; max?: number; sql?: string }>
+  sample_trace_id?: string | null
   issues?: { kind: IssueKind; title?: string; fingerprint?: string }[]
 }
 export interface JsonDiffEntry { path: string; kind: 'added' | 'removed' | 'changed' | 'type'; before: unknown; after: unknown }

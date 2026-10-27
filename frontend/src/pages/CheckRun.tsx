@@ -251,8 +251,8 @@ function RequestDetail({ r }: { r: ReportRequest }) {
           <div className="space-y-3">
             <div className="flex flex-wrap gap-x-5 gap-y-0.5 text-[12px] text-muted">
               <span>Queries (median) <b className="num text-ink font-medium">{s.before?.queries_median ?? '-'} → {s.after?.queries_median ?? '-'}</b>{s.queries_change != null && <> ({fmtSigned(s.queries_change)})</>}</span>
-              {s.before?.duration_median_ms != null && s.after?.duration_median_ms != null && <span>Server time <b className="num text-ink font-medium">{fmtMs(s.before.duration_median_ms)} → {fmtMs(s.after.duration_median_ms)}</b></span>}
-              {s.before?.query_ms != null && s.after?.query_ms != null && <span>Query time <b className="num text-ink font-medium">{fmtMs(s.before.query_ms)} → {fmtMs(s.after.query_ms)}</b></span>}
+              {s.before?.duration_ms_median != null && s.after?.duration_ms_median != null && <span>Server time <b className="num text-ink font-medium">{fmtMs(s.before.duration_ms_median)} → {fmtMs(s.after.duration_ms_median)}</b></span>}
+              {s.before?.query_ms_median != null && s.after?.query_ms_median != null && <span>Query time <b className="num text-ink font-medium">{fmtMs(s.before.query_ms_median)} → {fmtMs(s.after.query_ms_median)}</b></span>}
             </div>
             {(s.new_issues.length > 0 || s.fixed_issues.length > 0) && (
               <ul className="m-0 p-0 list-none space-y-1">
@@ -325,7 +325,7 @@ function BaselineView({ run, requests }: { run: CheckRunDetail; requests: Baseli
                 {isOpen && (
                   <tr className="border-b border-line bg-raised/30"><td /><td colSpan={6} className="px-2 sm:px-3 py-3"><div className="sticky left-0 w-[calc(100vw-3.25rem)] sm:w-auto space-y-3">
                     <Section title="Recorded latency"><LatencyStrip before={r.perf} after={null} names={['recorded', '']} />{r.perf && r.perf.failed > 0 && <div className="text-bad text-[12px]">{r.perf.failed} failed call(s) while recording.</div>}</Section>
-                    {r.server && <Section title="Server-side"><div className="text-[12px] text-muted">Queries median <b className="num text-ink font-medium">{r.server.queries_median}</b>{r.server.queries_max != null && <> (max {r.server.queries_max})</>}{r.server.duration_median_ms != null && <> · server time <b className="num text-ink font-medium">{fmtMs(r.server.duration_median_ms)}</b></>}</div>
+                    {r.server && <Section title="Server-side"><div className="text-[12px] text-muted">Queries median <b className="num text-ink font-medium">{r.server.queries_median}</b>{r.server.queries_max != null && <> (max {r.server.queries_max})</>}{r.server.duration_ms_median != null && <> · server time <b className="num text-ink font-medium">{fmtMs(r.server.duration_ms_median)}</b></>}</div>
                       {(r.server.issues?.length ?? 0) > 0 && <div className="flex flex-wrap gap-1.5">{r.server.issues!.map((i, k) => <Pill key={k} tone="warn">{i.kind.replace(/_/g, ' ')}</Pill>)}</div>}</Section>}
                     <Section title="Volatile fields">
                       {r.volatile.length === 0 ? <div className="text-muted text-[12px]">Nothing changed between the two captured responses.</div> : (

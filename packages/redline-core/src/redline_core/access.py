@@ -53,6 +53,7 @@ import weakref
 from collections import deque
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -1068,6 +1069,12 @@ _gates: dict[int, tuple[weakref.ref[Any] | None, Access]] = {}
 _gates_lock = threading.Lock()
 
 
+def _forget_gate(key: int, _ref: Any) -> None:
+    gates = _gates  # None while the interpreter tears the module down
+    if gates is not None:
+        gates.pop(key, None)
+
+
 def get_access(settings: Settings) -> Access:
     """A process-wide :class:`Access` for ``settings`` (cached per settings object, so the
     rate limiter and the session key persist)."""
@@ -1078,9 +1085,7 @@ def get_access(settings: Settings) -> Access:
             return entry[1]
         gate = Access(settings)
         try:
-            ref: weakref.ref[Any] | None = weakref.ref(
-                settings, lambda _r, k=key: _gates.pop(k, None)
-            )
+            ref: weakref.ref[Any] | None = weakref.ref(settings, partial(_forget_gate, key))
         except TypeError:  # pragma: no cover
             ref = None
         _gates[key] = (ref, gate)
