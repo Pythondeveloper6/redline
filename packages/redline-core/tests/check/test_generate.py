@@ -72,3 +72,20 @@ def test_route_with_recent_failures_uses_an_older_healthy_trace(store):
         save(store, path="/flaky/", route="/flaky/", status=500, started_at=2_000 + i)
     data = from_traces(store, window_s=10**10)
     assert [r["name"] for r in data["requests"]] == ["GET /flaky/"]
+
+
+def test_base_url_only_from_args_or_a_single_host(store):
+    save(store, path="/a/", route="/a/")
+    assert "base_url" not in from_traces(store, window_s=10**10)
+    assert from_traces(store, base_url="http://x:1", window_s=10**10)["base_url"] == "http://x:1"
+    save(store, path="/b/", route="/b/", request={"headers": {"Host": "shop.local:8000"}})
+    # one trace has no host: still not certain
+    assert "base_url" not in from_traces(store, window_s=10**10)
+
+
+def test_base_url_from_one_host_in_the_traces(store):
+    save(store, path="/a/", route="/a/", request={"headers": {"host": "shop.local:8000"}})
+    save(store, path="/b/", route="/b/", request={"headers": {"Host": "shop.local:8000"}})
+    assert from_traces(store, window_s=10**10)["base_url"] == "http://shop.local:8000"
+    save(store, path="/c/", route="/c/", request={"headers": {"Host": "other.local"}})
+    assert "base_url" not in from_traces(store, window_s=10**10)

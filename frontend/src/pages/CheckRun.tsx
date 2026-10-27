@@ -4,7 +4,7 @@ import { apiChecks } from '../apiChecks'
 import { ago, bytes } from '../lib/format'
 import { useNow } from '../lib/hooks'
 import {
-  baselineRequestsOf, defaultDir, fmtMs, fmtPct, fmtSigned, perfStyle, reportOf, reportToMarkdown, sortRequests, summarize, type SortDir, type SortKey,
+  baselineRequestsOf, defaultDir, fmtMs, fmtPct, fmtSigned, PERF_NOT_JUDGED, perfStyle, reportOf, reportToMarkdown, sortRequests, stoppedNotice, summarize, type SortDir, type SortKey,
 } from '../lib/check'
 import type { BaselineRequest, CheckReport, CheckRunDetail, ReportRequest } from '../types'
 import { GitChip, JsonDiffList, KindBadge, LatencyStrip, PerfBadge, ResponseBadge, TextDiff, TraceLink, useCheckAccess } from '../components/CheckParts'
@@ -48,6 +48,7 @@ export default function CheckRun() {
 
   const report = reportOf(run)
   const recorded = baselineRequestsOf(run)
+  const hasResults = run.kind === 'compare' ? !!report : recorded.length > 0
   const backTo = run.suite_id ? `/checks/suites/${run.suite_id}` : '/checks'
   return (
     <div className="space-y-5">
@@ -67,7 +68,7 @@ export default function CheckRun() {
 
       {running && <Progress run={run} />}
       {run.status === 'failed' && <ErrorBox error={new Error(run.error || 'The run failed.')} />}
-      {run.status === 'stopped' && <div className="card p-3 text-warn" role="status">This run was stopped before it finished{report ? '; results below are partial' : '. No results were kept'}.</div>}
+      {run.status === 'stopped' && <div className="card p-3 text-warn" role="status" data-testid="stopped">{stoppedNotice(run, hasResults)}</div>}
 
       {run.kind === 'compare' && report ? <ReportView report={report} />
         : run.kind === 'baseline' && recorded.length > 0 ? <BaselineView run={run} requests={recorded} />
@@ -117,7 +118,7 @@ function ReportView({ report }: { report: CheckReport }) {
   const [open, setOpen] = useState<Set<string>>(() => new Set(report.requests.filter(r => r.response.verdict === 'broken').slice(0, 1).map(r => r.name)))
   const [onlyDiff, setOnlyDiff] = useState(false)
   const rows = useMemo(() => {
-    const base = onlyDiff ? report.requests.filter(r => r.perf.verdict === 'slower' || r.perf.verdict === 'faster' || r.perf.verdict === 'noisy' || r.response.verdict === 'changed' || r.response.verdict === 'broken') : report.requests
+    const base = onlyDiff ? report.requests.filter(r => r.perf.verdict === 'slower' || r.perf.verdict === 'faster' || r.perf.verdict === 'noisy' || r.response.verdict === 'changed' || r.response.verdict === 'broken' || r.response.verdict === 'missing') : report.requests
     return sortRequests(base, key, dir)
   }, [report, key, dir, onlyDiff])
   const toggle = (n: string) => setOpen(s => { const x = new Set(s); x.has(n) ? x.delete(n) : x.add(n); return x })
@@ -146,11 +147,14 @@ function ReportView({ report }: { report: CheckReport }) {
         <div role="listitem"><Card k="Changed" sub="response differs" tone={sm.changed ? 'text-warn' : ''}><span aria-hidden>{sm.changed ? 'Δ ' : ''}</span>{sm.changed}</Card></div>
         <div role="listitem"><Card k="Broken" sub="now failing" tone={sm.broken ? 'text-bad' : ''}><span aria-hidden>{sm.broken ? '✕ ' : ''}</span>{sm.broken}</Card></div>
         <div role="listitem"><Card k="Noisy" sub="too variable to judge" tone={sm.noisy ? 'text-warn' : ''}><span aria-hidden>{sm.noisy ? '≈ ' : ''}</span>{sm.noisy}</Card></div>
+        {sm.missing > 0 && <div role="listitem"><Card k="Missing" sub="not in the baseline" tone="text-bad"><span aria-hidden>? </span>{sm.missing}</Card></div>}
         <div role="listitem"><Card k="Faster" sub="significant" tone={sm.faster ? 'text-ok' : ''}><span aria-hidden>{sm.faster ? '↓ ' : ''}</span>{sm.faster}</Card></div>
         <div role="listitem"><Card k="Slower" sub="past thresholds" tone={sm.slower ? 'text-bad' : ''}><span aria-hidden>{sm.slower ? '↑ ' : ''}</span>{sm.slower}</Card></div>
         <div role="listitem"><Card k="Overall speed" tone={speedTone} sub={sm.speedChangePct == null ? 'nothing measured' : `${sm.speedChangePct < 0 ? 'faster' : sm.speedChangePct > 0 ? 'slower' : 'unchanged'} · geometric mean of ${sm.speedSamples}`}>{fmtPct(sm.speedChangePct)}</Card></div>
         <div role="listitem"><Card k="Queries" tone={qTone} sub={sm.queriesSamples ? `${sm.queriesBefore} → ${sm.queriesAfter}${sm.queriesChangePct != null ? ` (${fmtPct(sm.queriesChangePct, 0)})` : ''}` : 'no server-side data'}>{sm.queriesSamples ? fmtSigned(sm.queriesChange) : '-'}</Card></div>
       </div>
+
+      {(report.summary?.warnings ?? []).map(w => <div key={w} className="card p-3 text-warn text-[12.5px]" role="status">{w}</div>)}
 
       {(sm.wins.length > 0 || sm.regressions.length > 0) && (
         <div className="grid sm:grid-cols-2 gap-3">
@@ -224,7 +228,7 @@ function RequestDetail({ r }: { r: ReportRequest }) {
         <div className="flex flex-wrap gap-x-5 gap-y-0.5 text-[12px] text-muted">
           {p.change_ms != null && <span>Change <b className="num text-ink font-medium">{p.change_ms > 0 ? '+' : p.change_ms < 0 ? '−' : ''}{fmtMs(Math.abs(p.change_ms))}</b> ({fmtPct(p.change_pct)})</span>}
           {p.p_value != null && <span>p-value <b className="num text-ink font-medium">{p.p_value < 0.0001 ? '< 0.0001' : p.p_value.toFixed(4)}</b></span>}
-          <span>{perfStyle(p.verdict).help}{p.reason === 'queries' ? ' (query count rose)' : p.reason === 'cv' ? ' (high variance)' : ''}</span>
+          <span>{p.reason === 'broken' ? PERF_NOT_JUDGED : perfStyle(p.verdict).help}{p.reason === 'queries' ? ' (query count rose)' : p.reason === 'cv' ? ' (high variance)' : ''}</span>
         </div>
         {(p.before?.failed || p.after?.failed) ? <div className="text-bad text-[12px]" role="status">Failed calls: {p.before?.failed ?? 0} before, {p.after?.failed ?? 0} after (of the timed calls).</div> : null}
       </Section>
@@ -237,6 +241,7 @@ function RequestDetail({ r }: { r: ReportRequest }) {
         {resp.diff.length > 0 && <JsonDiffList diff={resp.diff} total={resp.diff_total} />}
         {resp.text_diff && <TextDiff diff={resp.text_diff} />}
         {resp.verdict === 'same' && <div className="text-muted text-[12px]">Identical outside the ignored fields.</div>}
+        {resp.verdict === 'missing' && <div className="text-bad text-[12px]">This request is not in the baseline: record the baseline again with the current suite.</div>}
         {resp.verdict === 'n/a' && <div className="text-muted text-[12px]">The response is not compared for this request.</div>}
         {resp.ignored.length > 0 && (
           <div className="flex flex-wrap items-center gap-1.5">
@@ -259,6 +264,13 @@ function RequestDetail({ r }: { r: ReportRequest }) {
                 {s.new_issues.map((i, k) => <li key={'n' + k} className="flex flex-wrap items-center gap-2 text-[12.5px]"><Pill tone="bad"><span aria-hidden>+</span>new issue</Pill><Pill>{i.kind.replace(/_/g, ' ')}</Pill><span>{i.title}</span><TraceLink id={i.sample_trace_id} /></li>)}
                 {s.fixed_issues.map((i, k) => <li key={'f' + k} className="flex flex-wrap items-center gap-2 text-[12.5px]"><Pill tone="ok"><span aria-hidden>✓</span>fixed issue</Pill><Pill>{i.kind.replace(/_/g, ' ')}</Pill><span>{i.title}</span><TraceLink id={i.sample_trace_id} label="baseline trace" /></li>)}
               </ul>
+            )}
+            {s.not_judged && (s.not_judged.fixed_issues.length > 0 || s.not_judged.gone_sql.length > 0 || s.not_judged.queries_change != null) && (
+              <div className="text-[12px] text-muted" role="note">
+                {PERF_NOT_JUDGED}: not counted as wins{s.not_judged.queries_change != null && <> (queries {fmtSigned(s.not_judged.queries_change)})</>}
+                {s.not_judged.fixed_issues.length > 0 && <>, {s.not_judged.fixed_issues.length} issue{s.not_judged.fixed_issues.length === 1 ? '' : 's'} no longer seen</>}
+                {s.not_judged.gone_sql.length > 0 && <>, {s.not_judged.gone_sql.length} SQL statement{s.not_judged.gone_sql.length === 1 ? '' : 's'} no longer run</>}.
+              </div>
             )}
             {s.new_sql.length > 0 && <SqlList title="New SQL" tone="bad" mark="+" items={s.new_sql} />}
             {s.gone_sql.length > 0 && <SqlList title="Gone SQL" tone="ok" mark="−" items={s.gone_sql} />}

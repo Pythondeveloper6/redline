@@ -1051,7 +1051,7 @@ expect_status = 200              # optional
 ### 19.4 Compare and verdicts
 
 `redline check compare SUITE [--baseline FILE | --baseline-id ID] [--base-url URL] [--store PATH]
-[--json OUT] [--markdown OUT] [--junit OUT] [--fail-on slower,changed,broken] [--slower-pct X] [--slower-ms Y]`
+[--json OUT] [--markdown OUT] [--junit OUT] [--fail-on slower,changed,broken,missing] [--slower-pct X] [--slower-ms Y]`
 runs the suite again and compares with the baseline. `redline check run SUITE` = record if no baseline file
 exists, else compare.
 
@@ -1064,7 +1064,15 @@ Per request:
   - Query check (server-side available): `after.queries_median > before.queries_median + max_query_increase`
     makes the verdict `slower` with reason `queries` even if time is `same`. New N+1/duplicate issues are listed
     as `new_issues`; disappeared ones as `fixed_issues`.
-- **Response verdict** (`response=true`): `same` | `changed` | `broken` | `n/a`.
+  - A request whose response is `broken` (including ≥ 50 % failed calls) is **not judged for perf**: the verdict
+    is `n/a` with `reason: "broken"` and `note: "perf not judged: response broken"`, the numbers stay in the
+    report, and `fixed_issues`, `gone_sql` and the query decrease are moved to `server.not_judged` (they are
+    not wins). Such a request is left out of the overall speed and the query totals.
+- **Response verdict** (`response=true`): `same` | `changed` | `broken` | `missing` | `n/a`.
+  - `missing`: the baseline has no request of that name. Perf is `n/a` (note "not in the baseline"). If **no**
+    request of the suite is in the baseline the compare is refused (`BaselineError`, exit 2, "baseline <label>
+    has none of this suite's requests — was it recorded from a different suite?"; in the UI the run fails with
+    that message).
   - `broken`: status class changed to 4xx/5xx from 2xx/3xx, or `expect_status` not met, or ≥ 50 % failed calls.
   - `changed`: status changed otherwise, content-type changed, or a body difference outside ignored/volatile
     paths. JSON diff = list of `{path, kind: "added"|"removed"|"changed"|"type", before, after}` (values
@@ -1073,7 +1081,7 @@ Per request:
 - **Summary:** counts per verdict; **overall speed change** = geometric mean of after/before median ratios over
   requests with `perf` and no failures, shown as a % (negative = faster), plus total query change; the biggest
   wins and regressions (top 5 each).
-- **Exit code:** 0 if nothing matches `--fail-on` (default `slower,changed,broken`), 1 otherwise, 2 for usage/
+- **Exit code:** 0 if nothing matches `--fail-on` (default `slower,changed,broken,missing`), 1 otherwise, 2 for usage/
   suite errors, 3 if the app could not be reached at all.
 - **Outputs:** terminal table (colour when a TTY), `--json` (full report, schema below), `--markdown` (PR
   comment: summary line, table, collapsible diffs), `--junit` (one testcase per request; failures for verdicts in
@@ -1097,7 +1105,7 @@ Per request:
   `new_sql`/`gone_sql` items: `{fingerprint, sql, count, sample_trace_id}` (trace id of the side the item comes
   from). Summary also has `faster/slower/changed/broken/passed/failed/failing/fail_on`, `speed_ratio`,
   `speed_change_pct`, `queries_before/after/change`, `wins`, `regressions`, `server_side`, `not_in_baseline`,
-  `not_in_suite`.
+  `not_in_suite`, `missing` (count) and `warnings` (strings, e.g. "2 of 5 requests are not in the baseline").
 - **Progress.** `run_suite(on_progress=)` receives `{done, total, current: "<request name>", run_id, phase:
   "warmup"|"timed", idx, n, status, ms}` after every call.
 - **Headers.** Compared: `content-type` (always) plus `location`, `cache-control`, `content-encoding`,

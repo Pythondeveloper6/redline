@@ -559,3 +559,20 @@ def test_draft_uses_older_healthy_trace_when_latest_calls_failed(env, store):
         _seen(store, "/flaky", "/flaky", status=500)
     status, suite = call(env(), "POST", "api/checks/suites/draft", {"routes": ["/flaky"]})
     assert status == 200 and [r["name"] for r in suite["requests"]] == ["GET /flaky"]
+
+
+def test_ui_compare_with_another_suites_baseline_fails_clearly(store):
+    pytest.importorskip("httpx")
+    other = dict(BASELINE, requests=[{"name": "elsewhere", "method": "GET", "path": "/x"}])
+    store.import_check_baseline(other, None)
+    base = store.list_check_runs()[0]["id"]
+    config = {
+        "suite": SUITE,
+        "base_url": "http://127.0.0.1:1",
+        "kind": "compare",
+        "baseline_id": base,
+    }
+    assert control.run_check(config, store, "m1") == "failed"
+    error = store.get_check_run("m1")["error"]
+    assert "baseline main has none of this suite's requests" in error
+    assert "different suite" in error

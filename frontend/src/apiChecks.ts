@@ -17,5 +17,5 @@ export const apiChecks = {
   run: (id: string) => call<CheckRunDetail>('GET', `./api/checks/runs/${enc(id)}`),
   stopRun: (id: string) => call<unknown>('POST', `./api/checks/runs/${enc(id)}/stop`, {}),
   deleteRun: (id: string) => call<unknown>('DELETE', `./api/checks/runs/${enc(id)}`),
-  importBaseline: (baseline: unknown) => call<{ id: string }>('POST', './api/checks/baselines/import', baseline),
+  importBaseline: (baseline: unknown, suiteId?: string) => call<{ id: string }>('POST', './api/checks/baselines/import' + qs({ suite_id: suiteId }), baseline),
 }
