@@ -1,4 +1,5 @@
 import type { Trace, TraceFilters } from '../types'
+import { mockHistoryLoad } from './historyLoad'
 import { ALL, EXPLAIN_PG, EXPLAIN_SQLITE, buildEndpoints, buildIssueGroups, buildProfile, summarize } from './data'
 
 let traces: Trace[] = ALL.slice()
@@ -32,6 +33,7 @@ export async function mockFetch(method: string, url: string, body: unknown): Pro
       version: '0.1.0a1', framework: 'django',
       settings: { thresholds: { n_plus_one: 5, slow_query_ms: 100, too_many_queries: 50 }, sampling: { sample_rate: 1 }, profiling_enabled: true, explain_analyze_enabled: false },
       storage: { rows: traces.length, path: '.redline/redline.db' },
+      features: { load_from_ui: true, sse: true, snapshot: true },
     })
   }
   if (path === 'api/traces' && method === 'GET') {
@@ -73,5 +75,7 @@ export async function mockFetch(method: string, url: string, body: unknown): Pro
     if (!s.data.explainable) return err(400, 'not_explainable', 'Only SELECT queries can be explained.')
     return ok(s.data.vendor === 'sqlite' ? EXPLAIN_SQLITE : EXPLAIN_PG)
   }
+  const hl = await mockHistoryLoad(method, path, u.searchParams, body)
+  if (hl) return hl
   return err(404, 'not_found', 'Unknown mock endpoint ' + path)
 }
