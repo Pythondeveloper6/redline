@@ -23,9 +23,20 @@ from ..histogram import Histogram
 from ..model import Trace
 from ..sampling import is_error
 
-__all__ = ["HOUR", "Derived", "derive", "fingerprint_key", "is_failed_status", "pattern"]
+__all__ = [
+    "HOUR",
+    "UNMATCHED",
+    "Derived",
+    "derive",
+    "fingerprint_key",
+    "is_failed_status",
+    "pattern",
+]
 
 HOUR = 3_600
+#: Rollup / issue-index route of requests no route matched (404s, scanners), so the
+#: long-lived history does not grow a row per random path.
+UNMATCHED = "(unmatched)"
 
 _UUID = re.compile(
     r"[0-9a-fA-F]{8}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{12}"
@@ -116,7 +127,7 @@ def derive(traces: list[Trace], *, history: bool = True, out: Derived | None = N
         route = t.route or t.path
         _trace_rows(t, route, d)
         if history:
-            _history(t, route, d)
+            _history(t, t.route or UNMATCHED, d)
     return d
 
 

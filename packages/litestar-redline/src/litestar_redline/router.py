@@ -127,7 +127,9 @@ def build_router(plugin: Any, path: str, guards: Sequence[Any]) -> Router:
         except FilterError as exc:
             return error_response(400, "invalid_filter", str(exc))
         return Stream(
-            stream.async_events(plugin.api, since),
+            stream.async_events(
+                plugin.api, since, after=stream.parse_after(_params(request), request.headers)
+            ),
             media_type=stream.CONTENT_TYPE,
             headers={**_SECURITY, **stream.SSE_HEADERS},
         )

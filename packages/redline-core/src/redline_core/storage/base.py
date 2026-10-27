@@ -553,5 +553,9 @@ class ExtendedStore(Store, Protocol):
     def delete_run(self, run_id: str) -> int: ...
     def run_bottlenecks(self, run_id: str) -> Bottlenecks | None: ...
     def traces_since(
-        self, started_at: float, trace_id: str = "", limit: int = 100
+        self,
+        started_at: float,
+        trace_id: str = "",
+        limit: int = 100,
+        after_seq: int | None = None,
     ) -> builtins.list[dict[str, Any]]: ...

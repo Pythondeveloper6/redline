@@ -220,7 +220,9 @@ def test_v01_database_upgrades_in_place(tmp_path):
 
 def test_fresh_database_has_version(tmp_path):
     store = SQLiteStore(str(tmp_path / "new.db"), background=False)
-    assert rows(store, "SELECT value FROM meta") == [(str(SCHEMA_VERSION),)]
+    assert rows(store, "SELECT value FROM meta WHERE key = 'schema_version'") == [
+        (str(SCHEMA_VERSION),)
+    ]
     store.close()
 
 
@@ -388,9 +390,9 @@ def test_traces_since(store):
         store.save(t)
     first, second = sorted([t2.id, t3.id])
     got = [s["id"] for s in store.traces_since(now - 5)]
-    assert got == [t1.id, first, second]
+    assert got == [t3.id, t1.id, t2.id]  # insertion order (when they were saved)
     assert [s["id"] for s in store.traces_since(now - 2, first)] == [second]
-    assert store.traces_since(now - 5, limit=1)[0]["id"] == t1.id
+    assert store.traces_since(now - 5, limit=1)[0]["id"] == t3.id
     assert set(store.traces_since(0)[0]) >= {"id", "issue_kinds", "has_profile", "tags"}
 
 

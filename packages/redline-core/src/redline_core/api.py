@@ -355,15 +355,23 @@ class RedlineAPI:
         return call
 
     def poll(
-        self, since: float, last_id: str | None = None, limit: int = 100
+        self,
+        since: float,
+        last_id: str | None = None,
+        limit: int = 100,
+        after_seq: int | None = None,
     ) -> list[dict[str, Any]]:
-        """Trace summaries newer than ``(since, last_id)``, oldest first (SSE live tail).
+        """Trace summaries newer than the cursor, oldest first (SSE live tail).
 
-        Uses ``store.traces_since``; a store without it falls back to a ``since`` list.
+        The cursor is ``after_seq`` (insertion order; every summary carries its ``seq``)
+        or, for the initial position, ``(since, last_id)``. Uses ``store.traces_since``; a
+        store without it falls back to a ``since`` list.
         """
         fn = getattr(self.store, "traces_since", None)
         if callable(fn):
             try:
+                if after_seq is not None:
+                    return list(fn(since, last_id or "", limit, after_seq=after_seq))
                 return list(fn(since, last_id or "", limit))
             except NotImplementedError:
                 pass

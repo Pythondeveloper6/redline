@@ -233,7 +233,8 @@ CREATE TABLE IF NOT EXISTS run_steps (
 );
 """
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+DEAD_RUN_MESSAGE = "the load process exited unexpectedly"
 #: Tables holding one or more rows per trace, deleted with it.
 _TRACE_TABLES = ("profiles", "trace_tags", "issues", "trace_sql", "trace_ext", "trace_cache")
 #: Long-lived tables, kept across ``clear()`` unless ``history=True``.
@@ -483,7 +484,7 @@ class SQLiteStore:
         derived = derive(traces)  # outside the lock; redone in the rare re-save case
         with self._lock:
             c = self._conn
-            c.execute("BEGIN")
+            c.execute("BEGIN IMMEDIATE")
             try:
                 # A re-saved trace replaces its rows; it is not counted in the history twice.
                 ids = [t.id for t in traces]
@@ -500,9 +501,13 @@ class SQLiteStore:
                     fresh = [t for t in traces if t.id not in existing]
                     derived = derive(fresh)
                     derive([t for t in traces if t.id in existing], history=False, out=derived)
+                # Insertion order for the live tail: a counter in ``meta`` (never reused, even
+                # after pruning), read and bumped inside this write transaction.
+                seq = _next_seq(c, len(rows))
+                rows = [(*row, seq + i) for i, row in enumerate(rows, 1)]
                 c.executemany(
                     "INSERT OR REPLACE INTO traces VALUES "
-                    "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     rows,
                 )
                 c.executemany("INSERT INTO trace_tags VALUES (?, ?, ?)", tags)
@@ -742,7 +747,7 @@ class SQLiteStore:
         params = [(i,) for i in ids]
         with self._lock:
             c = self._conn
-            c.execute("BEGIN")
+            c.execute("BEGIN IMMEDIATE")
             try:
                 for table in _TRACE_TABLES:
                     c.executemany(f"DELETE FROM {table} WHERE trace_id = ?", params)
@@ -766,11 +771,15 @@ class SQLiteStore:
         self._check_pid()
         with self._lock:
             c = self._conn
-            n = int(c.execute("SELECT COUNT(*) FROM traces").fetchone()[0])
-            c.execute("BEGIN")
-            for table in (*_TRACE_TABLES, "traces", *(_HISTORY_TABLES if history else ())):
-                c.execute(f"DELETE FROM {table}")
-            c.execute("COMMIT")
+            c.execute("BEGIN IMMEDIATE")
+            try:
+                n = int(c.execute("SELECT COUNT(*) FROM traces").fetchone()[0])
+                for table in (*_TRACE_TABLES, "traces", *(_HISTORY_TABLES if history else ())):
+                    c.execute(f"DELETE FROM {table}")
+                c.execute("COMMIT")
+            except BaseException:
+                c.execute("ROLLBACK")
+                raise
         return n
 
     def prune(self, max_age_s: float | None = None, max_rows: int | None = None) -> int:
@@ -821,7 +830,7 @@ class SQLiteStore:
         n = 0
         with self._lock:
             c = self._conn
-            c.execute("BEGIN")
+            c.execute("BEGIN IMMEDIATE")
             try:
                 for sql in (
                     "DELETE FROM rollups WHERE bucket + 3600 <= ?",
@@ -1194,7 +1203,7 @@ class SQLiteStore:
         self._check_pid()
         with self._lock:
             c = self._conn
-            c.execute("BEGIN")
+            c.execute("BEGIN IMMEDIATE")
             try:
                 for sql, params in statements:
                     c.execute(sql, params)
@@ -1237,7 +1246,50 @@ class SQLiteStore:
             ]
         )
 
+    #: A ``running`` run younger than this is never judged dead (its process is starting).
+    RUN_GRACE_S = 10.0
+
+    def _reap_dead_runs(self) -> None:
+        """Mark ``running`` rows whose process is gone as ``failed`` (and persist it).
+
+        Only applies where runs are process-managed: a ``runs`` directory beside the store
+        file holds ``<run id>.pid``. A row older than :attr:`RUN_GRACE_S` with a missing or
+        dead pid (the load process was killed or never started) can never finish.
+        """
+        if self.path == ":memory:" or self.path.startswith("file:"):
+            return
+        if not os.path.isdir(os.path.join(os.path.dirname(os.path.abspath(self.path)), "runs")):
+            return
+        rows = self._query(
+            "SELECT id FROM runs WHERE status = 'running' AND created_at < ?",
+            (time.time() - self.RUN_GRACE_S,),
+        )
+        if not rows:
+            return
+        from ..load.control import run_process_alive
+
+        for r in rows:
+            try:
+                alive = run_process_alive(r["id"], self.path)
+            except ValueError:  # not a valid run id: nothing to look up
+                alive = False
+            if not alive:
+                self._write_now(
+                    [
+                        (
+                            "UPDATE runs SET status = 'failed', finished_at = ?, summary = ? "
+                            "WHERE id = ? AND status = 'running'",
+                            (
+                                time.time(),
+                                json.dumps({"message": DEAD_RUN_MESSAGE}),
+                                r["id"],
+                            ),
+                        )
+                    ]
+                )
+
     def get_run(self, run_id: str) -> Run | None:
+        self._reap_dead_runs()
         rows = self._query("SELECT * FROM runs WHERE id = ?", (run_id,))
         if not rows:
             return None
@@ -1246,6 +1298,7 @@ class SQLiteStore:
 
     def list_runs(self, limit: int = 50) -> builtins.list[Run]:
         """The most recent runs first, each with its steps."""
+        self._reap_dead_runs()
         rows = self._query(
             "SELECT * FROM runs ORDER BY created_at DESC, id LIMIT ?", (max(1, int(limit)),)
         )
@@ -1265,7 +1318,7 @@ class SQLiteStore:
         self._check_pid()
         with self._lock:
             c = self._conn
-            c.execute("BEGIN")
+            c.execute("BEGIN IMMEDIATE")
             try:
                 c.execute("DELETE FROM run_steps WHERE run_id = ?", (run_id,))
                 n = c.execute("DELETE FROM runs WHERE id = ?", (run_id,)).rowcount
@@ -1369,15 +1422,38 @@ class SQLiteStore:
         return None
 
     def traces_since(
-        self, started_at: float, trace_id: str = "", limit: int = 100
+        self,
+        started_at: float,
+        trace_id: str = "",
+        limit: int = 100,
+        after_seq: int | None = None,
     ) -> builtins.list[dict[str, Any]]:
-        """Summaries of traces after ``(started_at, trace_id)``, oldest first (live tail)."""
-        rows = self._query(
-            f"SELECT {_SUMMARY_COLS} FROM traces WHERE started_at > ? OR "
-            "(started_at = ? AND id > ?) ORDER BY started_at ASC, id ASC LIMIT ?",
-            (started_at, started_at, trace_id or "", max(1, min(int(limit), 500))),
-        )
-        return [_summary(r) for r in rows]
+        """Summaries of newly saved traces, oldest *saved* first (live tail).
+
+        Without ``after_seq``: traces after ``(started_at, trace_id)`` (the initial
+        position, an epoch). With it: traces saved after that ``seq`` (every summary here
+        carries its ``seq``), in insertion order, so a slow request that started before
+        already-streamed fast ones is still delivered when it finishes.
+        """
+        limit = max(1, min(int(limit), 500))
+        if after_seq is not None:
+            rows = self._query(
+                f"SELECT {_SUMMARY_COLS}, saved_seq FROM traces WHERE saved_seq > ? "
+                "ORDER BY saved_seq ASC LIMIT ?",
+                (int(after_seq), limit),
+            )
+        else:
+            rows = self._query(
+                f"SELECT {_SUMMARY_COLS}, saved_seq FROM traces WHERE started_at > ? OR "
+                "(started_at = ? AND id > ?) ORDER BY saved_seq ASC LIMIT ?",
+                (started_at, started_at, trace_id or "", limit),
+            )
+        out = []
+        for r in rows:
+            d = _summary(r)
+            d["seq"] = r["saved_seq"]
+            out.append(d)
+        return out
 
     def close(self) -> None:
         """Flush pending writes, stop the writer and close the connection."""
@@ -1448,6 +1524,16 @@ def _migrate(conn: sqlite3.Connection) -> None:
                 if statement.strip():
                     conn.execute(statement)
             _backfill(conn)
+        if version < 3:
+            # Insertion order for the live tail; existing traces keep their rowid order.
+            if "saved_seq" not in {r[1] for r in conn.execute("PRAGMA table_info(traces)")}:
+                conn.execute("ALTER TABLE traces ADD COLUMN saved_seq INTEGER")
+            conn.execute("UPDATE traces SET saved_seq = rowid")
+            conn.execute("CREATE INDEX IF NOT EXISTS traces_seq ON traces (saved_seq)")
+            conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('last_seq', "
+                "(SELECT CAST(COALESCE(MAX(saved_seq), 0) AS TEXT) FROM traces))"
+            )
         conn.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)",
             (str(SCHEMA_VERSION),),
@@ -1456,6 +1542,15 @@ def _migrate(conn: sqlite3.Connection) -> None:
     except BaseException:
         conn.execute("ROLLBACK")
         raise
+
+
+def _next_seq(c: sqlite3.Connection, n: int) -> int:
+    """Reserve ``n`` sequence numbers; returns the last one before them (call inside a
+    ``BEGIN IMMEDIATE`` transaction)."""
+    row = c.execute("SELECT value FROM meta WHERE key = 'last_seq'").fetchone()
+    last = int(row[0]) if row else 0
+    c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('last_seq', ?)", (str(last + n),))
+    return last
 
 
 def _backfill(conn: sqlite3.Connection, chunk: int = 500) -> None:
