@@ -21,22 +21,25 @@ token exists anywhere, and none should be created.
    <https://pypi.org/manage/account/publishing/> and again on
    <https://test.pypi.org/manage/account/publishing/>. That is ten registrations. For
    every one, Owner is `Pythondeveloper6`, Repository name is `redline`, Workflow name is
-   `release.yml`; only the project name and environment vary:
+   `release.yml`; only the project name and environment vary. Each project needs its own
+   environment name, because PyPI accepts a pending publisher configuration for one project
+   name only:
 
    | PyPI project name | pypi.org environment | test.pypi.org environment |
    |---|---|---|
-   | `redline-core` | `pypi` | `testpypi` |
-   | `django-redline` | `pypi` | `testpypi` |
-   | `fastapi-redline` | `pypi` | `testpypi` |
-   | `flask-redline` | `pypi` | `testpypi` |
-   | `litestar-redline` | `pypi` | `testpypi` |
+   | `redline-core` | `pypi-redline-core` | `testpypi-redline-core` |
+   | `django-redline` | `pypi-django-redline` | `testpypi-django-redline` |
+   | `fastapi-redline` | `pypi-fastapi-redline` | `testpypi-fastapi-redline` |
+   | `flask-redline` | `pypi-flask-redline` | `testpypi-flask-redline` |
+   | `litestar-redline` | `pypi-litestar-redline` | `testpypi-litestar-redline` |
 
    A pending publisher turns into a normal one when the first upload creates the project.
    It also reserves nothing until then, so register all ten before tagging.
 
 3. **Create the GitHub environments** in the repository's **Settings → Environments**:
-   `pypi` (add yourself as a required reviewer, so every real upload waits for one
-   click) and `testpypi` (no reviewer needed).
+   the five `pypi-<project>` environments (add yourself as a required reviewer, so every
+   real upload waits for you; GitHub's review dialog approves all five at once) and the five
+   `testpypi-<project>` environments (no reviewer needed).
 
 4. **Dry-run the build half.** Actions → Release → *Run workflow* on `main` runs the
    version check, UI bundle check, build, `twine check` and wheel smoke test without
@@ -93,11 +96,11 @@ token exists anywhere, and none should be created.
    `release.yml` then: refuses a tag that disagrees with any package version, rebuilds the
    UI and refuses a stale committed bundle, builds all five wheels and sdists, runs
    `twine check --strict`, installs the wheels into a clean venv and smoke-tests them,
-   uploads to TestPyPI, **waits for your approval of the `pypi` deployment**, uploads to
+   uploads to TestPyPI, **waits for your approval of the `pypi-*` deployments**, uploads to
    PyPI with attestations, and creates the GitHub release with the distributions attached
    (marked as a pre-release when the version contains `a`, `b`, `rc` or `dev`).
 
-7. **Approve the `pypi` deployment** when the workflow pauses (Actions → the run →
+7. **Approve the `pypi-*` deployments** when the workflow pauses (Actions → the run →
    *Review deployments*), after glancing at the TestPyPI pages.
 
 8. **Verify the install from PyPI**, from a fresh directory. `--pre` is needed for an
