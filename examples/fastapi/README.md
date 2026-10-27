@@ -56,15 +56,24 @@ volatile fields). Setting `SHOP_REFACTOR=1` simulates a refactor of the app, so 
 | `GET /status` | unchanged; `now` and `request_id` differ on every call | same (volatile fields ignored) |
 
 ```bash
-# 1. old code: start the app (as above) and, from the repository root in another terminal,
-#    record a baseline
+# terminal 1 – the app, from examples/fastapi: old code first
 cd examples/fastapi
 uv run --project ../.. uvicorn shop.main:app --port 8000
+```
+
+```bash
+# terminal 2 – from the repository root: record a baseline against the old code
 uv run --package redline-core --extra load redline check record examples/fastapi/check.toml \
     --base-url http://127.0.0.1:8000 --store examples/fastapi/.redline/redline.db
+```
 
-# 2. "refactored" code: restart the app with the toggle, then compare
+```bash
+# terminal 1: stop the app (Ctrl-C) and start the "refactored" code
 SHOP_REFACTOR=1 uv run --project ../.. uvicorn shop.main:app --port 8000
+```
+
+```bash
+# terminal 2 – from the repository root: compare against the baseline
 uv run --package redline-core --extra load redline check compare examples/fastapi/check.toml \
     --base-url http://127.0.0.1:8000 --store examples/fastapi/.redline/redline.db --markdown report.md --junit report.xml
 echo $?   # 1: the refactor made things slower, changed a response and broke an endpoint
