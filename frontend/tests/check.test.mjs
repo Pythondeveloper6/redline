@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
 import {
-  baselineRequestsOf, blockedReason, boxStats, defaultDir, fmtMs, fmtPct, ignorePathError, isEnvPlaceholder, isSecretHeader,
+  baselineFileError, baselineRequestsOf, blockedReason, importErrorMessage, MAX_BASELINE_BYTES, parseBaselineText, PERF_NOT_JUDGED, stoppedNotice, boxStats, defaultDir, fmtMs, fmtPct, ignorePathError, isEnvPlaceholder, isSecretHeader,
   parseIgnorePath, perfLabel, reportOf, reportToMarkdown, requestPasses, responseLabel, sortRequests, summarize,
   summaryCounts, validateSuite, volatileSuggestions,
 } from '../src/lib/check.ts'
@@ -65,7 +65,7 @@ test('summarize ignores requests with failed calls in the speed mean, handles em
 })
 
 test('summaryCounts accepts flat and nested shapes', () => {
-  assert.deepEqual(summaryCounts({ slower: 2, counts: { faster: 3 } }), { faster: 3, slower: 2, same: 0, noisy: 0, changed: 0, broken: 0, passed: 0 })
+  assert.deepEqual(summaryCounts({ slower: 2, counts: { faster: 3 } }), { faster: 3, slower: 2, same: 0, noisy: 0, changed: 0, broken: 0, missing: 0, passed: 0 })
   assert.equal(summaryCounts(null).slower, 0)
 })
 
@@ -239,4 +239,58 @@ test('reportOf / baselineRequestsOf tolerate both result shapes', () => {
   assert.equal(baselineRequestsOf({ requests: b }), b)
   assert.equal(baselineRequestsOf({ results: b }), b)
   assert.deepEqual(baselineRequestsOf({}), [])
+})
+
+test('a broken response is not judged: left out of the speed mean and the query totals, markdown says why', () => {
+  const srv = (qb, qa) => ({ before: { queries_median: qb }, after: { queries_median: qa }, queries_change: null, new_issues: [], fixed_issues: [], new_sql: [], gone_sql: [] })
+  const ok = req('ok', { perf: perf('faster', 100, 50), server: srv(4, 2) })
+  const broken = req('boom', {
+    perf: { ...perf('n/a', 100, 10), reason: 'broken', note: PERF_NOT_JUDGED },
+    server: { ...srv(30, 1), not_judged: { fixed_issues: [], gone_sql: [], queries_change: -29 } },
+    response: resp('broken', [200, 500]),
+  })
+  const s = summarize([ok, broken])
+  assert.equal(s.speedSamples, 1)
+  assert.ok(Math.abs(s.speedChangePct + 50) < 1e-9)
+  assert.deepEqual([s.queriesBefore, s.queriesAfter, s.queriesSamples], [4, 2, 1])
+  assert.deepEqual(s.wins.map(w => w.name), ['ok'])
+  const md = reportToMarkdown({ suite: { name: 's' }, baseline: {}, run: {}, requests: [ok, broken] })
+  assert.ok(md.includes('perf not judged: response broken'))
+  // even if an older report still says "faster" for a broken response, it is not counted
+  const legacy = req('legacy', { perf: perf('faster', 100, 10), response: resp('broken', [200, 500]) })
+  assert.equal(summarize([legacy]).speedSamples, 0)
+})
+
+test('missing requests: own verdict, count, and they do not pass', () => {
+  const m = req('new', { perf: { ...perf('n/a', 1, 1), before: null }, response: resp('missing', [null, 200]) })
+  assert.equal(responseLabel('missing'), '? missing')
+  assert.equal(requestPasses(m), false)
+  const s = summarize([m, req('a')])
+  assert.deepEqual([s.missing, s.passed, s.respNa], [1, 1, 0])
+  assert.equal(summaryCounts({ missing: 2 }).missing, 2)
+  assert.ok(reportToMarkdown({ suite: { name: 's' }, baseline: {}, run: {}, requests: [m] }).includes('1 missing from the baseline'))
+})
+
+test('stoppedNotice: partial results are labelled, the "no results" message only when there are none', () => {
+  const run = { progress: { done: 40, total: 200 } }
+  const withResults = stoppedNotice(run, true)
+  assert.ok(withResults.includes('partial: stopped after 40 of 200 calls'))
+  assert.ok(!withResults.includes('No results were kept'))
+  const none = stoppedNotice(run, false)
+  assert.ok(none.includes('No results were kept'))
+  assert.ok(!none.includes('partial'))
+  assert.ok(stoppedNotice({}, true).includes('partial: stopped before it finished'))
+})
+
+test('baseline import: client-side size and JSON checks, API error wording', () => {
+  assert.equal(baselineFileError({ name: 'b.json', size: 1000 }), null)
+  assert.equal(baselineFileError({ name: 'b.json', size: MAX_BASELINE_BYTES }), null)
+  assert.match(baselineFileError({ name: 'big.json', size: MAX_BASELINE_BYTES + 1 }), /larger than 10 MiB/)
+  assert.match(baselineFileError({ name: 'e.json', size: 0 }), /empty/)
+  assert.equal(parseBaselineText('{"format":"redline-check-baseline"}').ok, true)
+  assert.equal(parseBaselineText('nope').ok, false)
+  assert.equal(parseBaselineText('[1]').ok, false)
+  assert.equal(importErrorMessage('invalid_baseline', 'Not a Redline baseline (format).'), 'Not a usable baseline: Not a Redline baseline (format).')
+  assert.match(importErrorMessage('payload_too_large', 'x'), /10 MiB/)
+  assert.equal(importErrorMessage('boom', 'raw message'), 'raw message')
 })

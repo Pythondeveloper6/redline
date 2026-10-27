@@ -4,7 +4,7 @@ import { apiChecks } from '../apiChecks'
 import { ApiError } from '../api'
 import { ago } from '../lib/format'
 import { useNow } from '../lib/hooks'
-import { blockedReason } from '../lib/check'
+import { baselineFileError, blockedReason, importErrorMessage, parseBaselineText } from '../lib/check'
 import { GitChip, KindBadge, SummaryBadges, useCheckAccess } from '../components/CheckParts'
 import { LoadError } from '../components/Unsupported'
 import { ConfirmDialog, Empty, I, Icon, Pill, Spinner, useAsync } from '../components/ui'
@@ -39,6 +39,28 @@ export default function CheckSuite() {
   useEffect(() => { if (!baselineId && baselines[0]) setBaselineId(baselines[0].id) }, [baselines, baselineId])
 
   const reason = blocked ?? access.metaReason
+  const fileInput = useRef<HTMLInputElement>(null)
+  const [importing, setImporting] = useState(false)
+  const [importErr, setImportErr] = useState<string | null>(null)
+  const [imported, setImported] = useState<string | null>(null)
+  const importFile = async (file: File | undefined) => {
+    if (fileInput.current) fileInput.current.value = '' // picking the same file again must fire onChange
+    if (!file) return
+    setImportErr(null); setImported(null)
+    const tooBig = baselineFileError(file)
+    if (tooBig) { setImportErr(tooBig); return }
+    setImporting(true)
+    try {
+      const parsed = parseBaselineText(await file.text())
+      if (!parsed.ok) { setImportErr(parsed.error); return }
+      const r = await apiChecks.importBaseline(parsed.doc, id)
+      runs.reload()
+      setBaselineId(r.id)
+      setImported(file.name)
+    } catch (e) {
+      setImportErr(importErrorMessage((e as ApiError).code, (e as Error).message))
+    } finally { setImporting(false) }
+  }
   const start = async (kind: 'baseline' | 'compare') => {
     setBusy(kind); setErr(null)
     try {
@@ -95,7 +117,16 @@ export default function CheckSuite() {
                 <Icon d={I.zap} size={12} />{busy === 'compare' ? 'Starting…' : 'Compare'}
               </button>
             </div>
-            {noBaseline && <p className="m-0 text-[11.5px] text-faint">Record a baseline first.</p>}
+            {noBaseline && <p className="m-0 text-[11.5px] text-faint">Record a baseline first, or import one.</p>}
+            <div className="flex flex-wrap items-center gap-2">
+              <input ref={fileInput} id="bl-file" type="file" accept="application/json,.json" className="sr-only" tabIndex={-1} onChange={e => importFile(e.target.files?.[0])} />
+              <button type="button" className="btn" disabled={access.readOnly || importing} onClick={() => fileInput.current?.click()}>
+                <Icon d={I.down} size={12} />{importing ? 'Importing…' : 'Import baseline…'}
+              </button>
+              <span className="text-[11.5px] text-faint">A <code className="mono">*.baseline.json</code> from <code className="mono">redline check record</code> (up to 10 MiB).</span>
+            </div>
+            {imported && <p className="m-0 text-[12px] text-ok" role="status">Imported {imported}; it is selected above.</p>}
+            {importErr && <div className="text-bad text-[12px]" role="alert">{importErr}</div>}
           </div>
         </div>
         <label className="flex flex-col gap-1 text-[11.5px] text-muted max-w-sm">Label (optional)

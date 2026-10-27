@@ -286,7 +286,11 @@ Then the two sets of samples (before and after) are compared:
   deviation over mean) is above `0.5`. The numbers are too scattered to trust a verdict;
   raise `repeat`, or quiet the machine.
 - **`n/a`** when `perf` is off, the request is not in the baseline, there are no timed samples,
-  or it failed too often (below).
+  or its response is `broken` (below). A broken request shows its numbers but is **not
+  judged** ("perf not judged: response broken"): an error page is fast, and an error handler
+  that skips the queries looks like an N+1 fix. Its fixed issues, gone SQL and query
+  decrease are not counted as wins, and it is left out of the overall speed and the query
+  totals.
 
 **The query rule.** When server-side metrics are available (see [below](#server-side-metrics)),
 a request whose median query count rose by more than `max_query_increase` is `slower` with
@@ -295,7 +299,7 @@ a regression even on a fast development database with five rows. Newly appearing
 duplicate-query issues are listed as *new issues*, and issues that disappeared as *fixed
 issues*.
 
-### Response: `same`, `changed`, `broken`, `n/a`
+### Response: `same`, `changed`, `broken`, `missing`, `n/a`
 
 - **`broken`**: the status went from below 400 to 400 or above (`200 → 500`), or the
   request has `expect_status` and got another one, or at least half of its calls failed
@@ -305,6 +309,10 @@ issues*.
   `location`, `cache-control`, `content-encoding`, `content-language`,
   `content-disposition`, `vary`, `allow` and `access-control-allow-origin`, minus your
   `ignore_headers`.
+- **`missing`**: the baseline has no request of that name (the suite grew since it was
+  recorded). It fails by default; the report also carries a warning. If *none* of the suite's
+  requests is in the baseline, the compare stops with exit code `2`: "baseline … has none of
+  this suite's requests — was it recorded from a different suite?".
 - **`same`**: none of the above.
 
 JSON differences are a list of `added`, `removed`, `changed` and `type` entries with the path
@@ -407,7 +415,7 @@ list orders:
   fixed issue: duplicate_query – 28 identical queries
 
 3 requests · perf: 1 faster, 1 slower, 1 same · response: 1 changed, 2 same · overall 11.4% faster · queries 37 → 12 (-25)
-FAIL: 2 of 3 requests match --fail-on slower,changed,broken: order detail, customer export
+FAIL: 2 of 3 requests match --fail-on slower,changed,broken,missing: order detail, customer export
 ```
 
 (Column spacing and wording are illustrative.) `redline check show report.json` prints a
@@ -431,8 +439,8 @@ saved JSON report again, and can write the Markdown and JUnit files from it.
 | `3` | The app could not be reached at all: every call of the first round failed to connect |
 | `130` | Interrupted with Ctrl-C or SIGTERM. A `record` writes no baseline; a `compare` prints the partial report |
 
-`--fail-on` takes a comma-separated list of `slower`, `changed`, `broken`, `noisy`, `faster`
-and `none`. The default is `slower,changed,broken`. Use `--fail-on broken,changed` to gate on
+`--fail-on` takes a comma-separated list of `slower`, `changed`, `broken`, `noisy`, `faster`,
+`missing` and `none`. The default is `slower,changed,broken,missing`. Use `--fail-on broken,changed` to gate on
 correctness only (for example when the baseline was recorded on other hardware), or add
 `noisy` if you want an unstable measurement to fail the build.
 

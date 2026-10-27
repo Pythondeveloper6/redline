@@ -42,6 +42,19 @@ migrated in place to schema version 4 when 0.3 first opens it.
 
 ### Changed
 
+- Refactor check: a request whose response is `broken` is no longer judged for perf (verdict
+  `n/a`, reason `broken`, "perf not judged: response broken"); its fixed issues, gone SQL and
+  query decrease are not reported as wins and it is left out of the overall speed and the
+  query totals.
+- Refactor check: requests that the baseline does not have get the response verdict `missing`,
+  which fails by default (`--fail-on` now defaults to `slower,changed,broken,missing`) and adds
+  a warning and `summary.missing` to the report. A baseline that has none of the suite's
+  requests is an error (exit 2; in the UI the run fails with the same message).
+- `redline check init` writes `base_url` only when `--base-url` is given or the traces show a
+  single host; otherwise a commented `# base_url = ...` line.
+- UI: a stopped run shows its partial results labelled "partial: stopped after N of M calls", or
+  "No results were kept", never both. The suite page can import a baseline file (up to
+  10 MiB), which then appears in the baseline picker.
 - The `production` preset sets `checks_from_ui = false`.
 - The Django, FastAPI, Flask and Litestar adapters pass `PUT` bodies to the API and accept
   request bodies up to 11 MiB on `api/` routes (Django reads past
