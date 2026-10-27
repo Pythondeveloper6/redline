@@ -5,10 +5,12 @@ core release beside it, so it pins ``redline-core==<same version>``. This check
 also compares each package's ``__version__`` with its ``pyproject.toml``.
 
     uv run python scripts/check_versions.py
+    uv run python scripts/check_versions.py --expect 0.2.0a1   # the release workflow's tag check
 """
 
 from __future__ import annotations
 
+import argparse
 import re
 import sys
 from pathlib import Path
@@ -24,6 +26,13 @@ PACKAGES = {
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument(
+        "--expect",
+        metavar="VERSION",
+        help="also require every package to be exactly this version (the tag, without 'v')",
+    )
+    args = parser.parse_args()
     errors: list[str] = []
     versions: dict[str, str] = {}
     for dist, module in PACKAGES.items():
@@ -43,6 +52,10 @@ def main() -> int:
                 errors.append(f"{dist} pins core {pin.group(1)}, core is {core}")
     if len(set(versions.values())) != 1:
         errors.append(f"versions differ: {versions}")
+    if args.expect is not None:
+        wrong = {d: v for d, v in versions.items() if v != args.expect}
+        if wrong:
+            errors.append(f"expected version {args.expect}, found {wrong}")
     for error in errors:
         print(f"error: {error}", file=sys.stderr)
     if not errors:
