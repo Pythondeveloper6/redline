@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from flask import Flask
 
 from flask_redline import Redline, instrument_httpx
@@ -13,7 +15,15 @@ app.register_blueprint(bp)
 Redline(
     app,
     engine=sync_engine,
-    settings={"slow_query_ms": 40, "always_keep_slower_than_ms": 300, "access": "local"},
+    settings={
+        "slow_query_ms": 40,
+        "always_keep_slower_than_ms": 300,
+        "access": "local",
+        "checks_from_ui": True,
+        "analysis_from_ui": True,
+        "project_root": str(Path(__file__).resolve().parent.parent),
+        "orm_instances_threshold": 20,
+    },
     # No `permission=`; access="local" (set explicitly – unset, Redline answers 404
     # outside debug mode): the UI is reachable from localhost only.
 )

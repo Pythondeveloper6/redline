@@ -302,6 +302,13 @@ class StoreServerMetrics:
                     out[s["trace_id"]]["issues"].append(json.loads(s["data"]))
                 except ValueError:
                     continue
+        for trace_id, entry in out.items():
+            trace = self.store.get(trace_id, include_profile=False)
+            if trace is not None:
+                entry["runtime"] = trace.runtime
+            if trace is not None and not trace.truncated:
+                entry["external_calls"] = sum(s.kind == "http_out" for s in trace.spans)
+                entry["complete_spans"] = True
         return list(out.values())
 
     def _traces_generic(self, run_id: str) -> list[dict[str, Any]]:
@@ -330,11 +337,18 @@ class StoreServerMetrics:
                     {
                         "id": trace.id,
                         "req": req,
+                        "runtime": trace.runtime,
                         "duration_ms": trace.duration_ms,
                         "query_count": trace.query_count,
                         "query_ms": trace.query_ms,
                         "sql": [(fp, v[0], v[1]) for fp, v in sql.items()],
                         "issues": [i.to_dict() for i in trace.issues],
+                        "complete_spans": not bool(trace.truncated),
+                        "external_calls": (
+                            None
+                            if trace.truncated
+                            else sum(s.kind == "http_out" for s in trace.spans)
+                        ),
                     }
                 )
             cursor = getattr(page, "next_cursor", None)
@@ -408,7 +422,16 @@ def _aggregate(traces: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
                     },
                 )
                 entry["calls"] += 1
+        runtimes = [t.get("runtime") or {} for t in items]
+        runtime = {}
+        for key in {k for value in runtimes for k in value}:
+            values = {value.get(key) for value in runtimes}
+            runtime[key] = next(iter(values)) if len(values) == 1 else "mixed or incomplete"
+        external = [t.get("external_calls") for t in items]
         out[req] = {
+            "runtime": runtime,
+            "complete_spans": all(t.get("complete_spans", False) for t in items),
+            "external_calls_max": max(external) if all(v is not None for v in external) else None,
             "calls": len(items),
             "duration_ms_median": _num(median),
             "queries_median": _num(statistics.median(t["query_count"] for t in items)),

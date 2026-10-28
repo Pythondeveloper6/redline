@@ -35,7 +35,7 @@ def test_postgres_fixture():
     scan = a.tree.children[0].children[0]
     assert scan.label == "Seq Scan on shop_orderitem i"
     assert scan.rows == 100000 and scan.cost == 1693.0 and scan.actual_ms == 9.1
-    assert flags(a.tree) == {"seq_scan", "sort_spill"}
+    assert flags(a.tree) == {"seq_scan", "sort_spill", "rows_filtered_out"}
     titles = [f.title for f in a.findings]
     assert "Sort spilled to disk" in titles
     assert "Sequential scan on shop_order" in titles

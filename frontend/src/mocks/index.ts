@@ -1,3 +1,4 @@
+import { mockTools, mockSuppressed } from './tools'
 import type { Trace, TraceFilters } from '../types'
 import { mockHistoryLoad } from './historyLoad'
 import { mockAnalysis } from './analysis'
@@ -41,6 +42,8 @@ export async function mockFetch(method: string, url: string, body: unknown): Pro
   const ok = (json: unknown) => ({ status: 200, json })
   const err = (status: number, code: string, message: string) => ({ status, json: { error: { code, message } } })
 
+  const tools = await mockTools(method, path, u.searchParams, body, traces)
+  if (tools) return tools
   if (path === 'api/meta') {
     // Dev switches for the checks UI: ?ro=1 (read-only), ?checks_from_ui=0, ?checks=0 (feature off)
     const q = new URLSearchParams(location.search)
@@ -103,7 +106,7 @@ export async function mockFetch(method: string, url: string, body: unknown): Pro
   let m = path.match(/^api\/traces\/([^/]+)\/profile$/)
   if (m) {
     const t = traces.find(x => x.id === m![1])
-    return t?.has_profile ? ok(buildProfile()) : err(404, 'no_profile', 'This request was not profiled.')
+    return t?.has_profile ? ok((t as Trace & { profile?: unknown }).profile ?? buildProfile()) : err(404, 'no_profile', 'This request was not profiled.')
   }
   m = path.match(/^api\/traces\/([^/]+)$/)
   if (m) {
@@ -139,7 +142,8 @@ export async function mockFetch(method: string, url: string, body: unknown): Pro
   if (path === 'api/endpoints') return ok({ items: buildEndpoints() })
   if (path === 'api/issues') {
     const kind = u.searchParams.get('kind')
-    return ok({ items: buildIssueGroups().filter(g => !kind || g.kind === kind) })
+    const samples = traces.filter(t => t.tags.synthetic_demo).flatMap(t => t.issues.map(i => ({ ...i, occurrences: 1, first_seen: t.started_at, last_seen: t.started_at, routes: [t.route ?? t.path], sample_trace_id: t.id, sample_span_ids: i.span_ids, observed_total_ms: i.total_ms })))
+    return ok({ items: [...buildIssueGroups(), ...samples].filter(g => !kind || g.kind === kind).map(g => ({ ...g, suppressed: mockSuppressed(g.kind, g.routes) })) })
   }
   if (path === 'api/explain') {
     const b = body as { trace_id: string; span_id: string; analyze: boolean }

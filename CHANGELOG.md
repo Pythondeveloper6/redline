@@ -15,6 +15,18 @@ migrated in place to schema version 4 when 0.3 first opens it.
 
 ### Added
 
+- Performance workflow UI: endpoint budgets, keyed JSON arrays, numeric tolerances,
+  environment labels and observed target runtime warnings, suite coverage, source analysis,
+  recording health, scoped suppressions and issue-to-check verification.
+- Deterministic findings for repeated writes/aggregate scans, deep OFFSET pagination,
+  cumulative round trips, pool waits, response/cache size, ORM instance construction and
+  explicitly measured cache decoding; sampled JSON decode hotspots and on-demand catalog
+  checks for wide columns, covering indexes and matching generated JSON expressions.
+- `redline analyze` and a pytest plugin, with query/outbound-call/issue assertions, explicit
+  no-query blocks and UI-inspectable test traces. See Performance workflows in the docs.
+- Real `/patterns` demo endpoints and clearly marked synthetic detector examples for UI
+  exploration; synthetic timings are not treated as measured application traffic.
+
 - **Refactor check** (`redline_core.check`). A suite of read-only requests (TOML or JSON, or
   built in the UI) is replayed against the old code to make a **baseline** and against the new
   code to make a **comparison**. Per endpoint: a response verdict (`same`, `changed`, `broken`,

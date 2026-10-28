@@ -31,6 +31,7 @@ export function GitChip({ git }: { git: CheckGit | null | undefined }) {
 export function SummaryBadges({ summary }: { summary: CheckSummary | null | undefined }) {
   const c = summaryCounts(summary)
   const bits: { n: number; node: React.ReactNode }[] = [
+    { n: summary?.budget_failed ?? 0, node: <Pill tone="bad">{summary?.budget_failed} budget failures</Pill> },
     { n: c.broken, node: <Pill tone="bad"><span aria-hidden>✕</span>{c.broken} broken</Pill> },
     { n: c.missing, node: <Pill tone="bad"><span aria-hidden>?</span>{c.missing} missing</Pill> },
     { n: c.changed, node: <Pill tone="warn"><span aria-hidden>Δ</span>{c.changed} changed</Pill> },
@@ -103,8 +104,8 @@ export function LatencyStrip({ before, after, afterColor = 'rgb(var(--accent))',
 }
 
 // ---- diffs ----------------------------------------------------------------------------------------------------
-const KIND_TONE = { added: 'ok', removed: 'bad', changed: 'warn', type: 'info' } as const
-const KIND_HELP = { added: 'Present now, absent before', removed: 'Present before, gone now', changed: 'Value changed', type: 'Value type changed' }
+const KIND_TONE = { added: 'ok', removed: 'bad', changed: 'warn', type: 'info', invalid_identity: 'bad' } as const
+const KIND_HELP = { added: 'Present now, absent before', removed: 'Present before, gone now', changed: 'Value changed', type: 'Value type changed', invalid_identity: 'Missing, duplicate or invalid array identity' }
 
 function Val({ v }: { v: unknown }) {
   if (v === undefined) return <span className="text-faint italic">missing</span>

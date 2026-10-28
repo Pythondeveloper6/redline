@@ -70,4 +70,7 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 # SLOW_QUERY_MS is lowered from 100 so the 400k-row review scan counts as slow on a laptop.
 REDLINE = {
     "SLOW_QUERY_MS": 25,
+    "ANALYSIS_FROM_UI": True,
+    "CHECKS_FROM_UI": True,
+    "ORM_INSTANCES_THRESHOLD": 20,
 }

@@ -55,6 +55,9 @@ strawberry = ["strawberry-graphql>=0.240"]
 graphene = ["graphene>=3.3"]
 load = ["httpx>=0.27"]
 
+[project.entry-points.pytest11]
+redline = "redline_core.pytest_plugin"
+
 [project.scripts]
 redline = "redline_core.cli:main"
 

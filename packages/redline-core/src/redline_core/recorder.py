@@ -143,6 +143,7 @@ class TraceBuilder:
         "max_spans",
         "method",
         "on_finish",
+        "orm_instances",
         "overflow",
         "path",
         "path_params",
@@ -197,6 +198,7 @@ class TraceBuilder:
         self.active = active
         self.finished = False
         self.spans: list[Span] = []
+        self.orm_instances = 0
         self.query_count = 0
         self.query_ms = 0.0
         self.max_spans = recorder.settings.max_spans_per_trace or 0
@@ -456,6 +458,8 @@ class Recorder:
             trace.logs = list(builder.logs)
             trace.logs_dropped = builder.logs_dropped
             spans = sorted(builder.spans, key=lambda s: s.start_ms)
+            if builder.orm_instances:
+                trace.tags["orm_instances"] = str(builder.orm_instances)
             trace.query_count = builder.query_count
             trace.query_ms = round(builder.query_ms, 3)
             overflow = list(builder.overflow.values())
@@ -478,8 +482,18 @@ class Recorder:
             check="check_run_id" in trace.tags
             and getattr(self.store, "validates_check_tags", False) is True,
         )
+        from .testing import active_capture
+
+        capture = active_capture()
+        if capture is not None:
+            reason = reason or "test"
+            if capture[0]:
+                trace.tags["test_name"] = self.redactor.text(capture[0])
         if reason is None:
             return trace
+        from .runtime_info import target_runtime
+
+        trace.runtime = dict(target_runtime(trace.framework))
         trace.tags["sampled_by"] = reason
         if (
             isinstance(error, BaseException)
@@ -497,6 +511,8 @@ class Recorder:
             trace.issues = self.detector.detect(trace, overflow=overflow)
         except Exception:  # never let analysis break the response
             logger.exception("Redline failed to analyse trace %s", trace.id)
+        if capture is not None:
+            capture[1].append(trace)
         if self.store is not None:
             try:
                 self.store.save(trace)

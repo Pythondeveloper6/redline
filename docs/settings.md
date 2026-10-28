@@ -299,3 +299,13 @@ Their counterparts are FastAPI's `dependencies` and `store=`, Flask's `permissio
         "max_age_days": 3,
     })
     ```
+
+
+## v0.3 analysis settings
+
+`analysis_from_ui` accepts `"auto"`, `true` or `false`. Auto enables source scans and
+synthetic detector samples only in framework debug mode; the production preset sets it
+to false. `read_only` still refuses these POST operations. Detector threshold settings,
+model-count semantics and explicit cache-decode instrumentation are documented in
+[Performance workflows](performance-workflows.md#additional-runtime-findings). Preview
+controls do not change the server's effective configuration.

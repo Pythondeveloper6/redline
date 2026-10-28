@@ -76,6 +76,7 @@ _SUITE_KEYS = {
     "repeat",
     "warmup",
     "thresholds",
+    "environment",
     "requests",
 }
 _THRESHOLD_KEYS = {"slower_pct", "slower_ms", "max_query_increase"}
@@ -89,6 +90,9 @@ _REQUEST_KEYS = {
     "ignore",
     "ignore_headers",
     "expect_status",
+    "array_keys",
+    "tolerances",
+    "budgets",
 }
 _HEADER_NAME = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+")
 _ENV = re.compile(r"\$\{env:([A-Za-z_][A-Za-z0-9_]*)\}")
@@ -266,6 +270,10 @@ class CheckRequest:
     ignore_headers: tuple[str, ...] = ()
     expect_status: tuple[int, ...] | None = None
 
+    array_keys: dict[str, str] = field(default_factory=dict)
+    tolerances: dict[str, dict[str, float]] = field(default_factory=dict)
+    budgets: dict[str, Any] = field(default_factory=dict)
+
     def ignore_patterns(self) -> list[tuple[Token, ...]]:
         return [parse_path(p) for p in self.ignore]
 
@@ -281,6 +289,10 @@ class CheckRequest:
             out["ignore"] = list(self.ignore)
         if self.ignore_headers:
             out["ignore_headers"] = list(self.ignore_headers)
+        for key in ("array_keys", "tolerances", "budgets"):
+            value = getattr(self, key)
+            if value:
+                out[key] = value
         if self.expect_status is not None:
             es = self.expect_status
             out["expect_status"] = es[0] if len(es) == 1 else list(es)
@@ -297,6 +309,7 @@ class Suite:
     repeat: int = DEFAULT_REPEAT
     warmup: int = DEFAULT_WARMUP
     thresholds: Thresholds = field(default_factory=Thresholds)
+    environment: dict[str, str] = field(default_factory=dict)
     #: The file the suite was read from (not serialised).
     source: str | None = field(default=None, compare=False)
 
@@ -306,7 +319,23 @@ class Suite:
         cls, data: Any, *, source: str | None = None, default_name: str = "refactor check"
     ) -> Suite:
         try:
-            return _parse_suite(data, default_name=default_name, source=source)
+            result = _parse_suite(data, default_name=default_name, source=source)
+            environment = data.get("environment", {})
+            allowed = {"dataset", "python", "framework", "database", "configuration"}
+            if not isinstance(environment, Mapping) or set(environment) - allowed:
+                raise SuiteError(
+                    "Use dataset, python, framework, database or configuration environment labels",
+                    "environment",
+                )
+            if any(
+                not isinstance(v, str) or not v.strip() or len(v) > 200
+                for v in environment.values()
+            ):
+                raise SuiteError(
+                    "environment labels must be non-empty strings up to 200 characters",
+                    "environment",
+                )
+            return result.replace(environment=dict(environment))
         except SuiteError as exc:
             raise (exc.with_source(source) if source and not exc.source else exc) from None
 
@@ -379,6 +408,8 @@ class Suite:
         out["repeat"] = self.repeat
         out["warmup"] = self.warmup
         out["thresholds"] = self.thresholds.to_dict()
+        if self.environment:
+            out["environment"] = dict(self.environment)
         out["requests"] = [r.to_dict() for r in self.requests]
         return out
 
@@ -651,6 +682,13 @@ def _request(raw: Any, index: int) -> CheckRequest:
             )
         expect_t = tuple(items)
 
+    from .policies import validate_rules
+
+    try:
+        rules = validate_rules(raw)
+    except ValueError as exc:
+        raise SuiteError(str(exc), path, request=name) from None
+
     return CheckRequest(
         name=name,
         method=method,
@@ -661,6 +699,7 @@ def _request(raw: Any, index: int) -> CheckRequest:
         ignore=tuple(ignore),
         ignore_headers=tuple(h.lower() for h in ignore_headers),
         expect_status=expect_t,
+        **rules,
     )
 
 
@@ -699,6 +738,8 @@ def redact_suite(suite: Suite | Mapping[str, Any], redactor: Any = None) -> dict
                 out[k] = MASK
         return out
 
+    if isinstance(data.get("environment"), Mapping):
+        data["environment"] = {key: r.text(value) for key, value in data["environment"].items()}
     if "headers" in data:
         data["headers"] = headers(data["headers"])
     if isinstance(data.get("base_url"), str):

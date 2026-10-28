@@ -1,4 +1,5 @@
 // Pure helpers for the refactor-check UI (CONTRACT §19). No React, no DOM: unit-tested with `node --test`.
+import { policyErrors } from './policies.ts'
 import type {
   BaselineRequest, CheckReport, CheckSuite, CheckSummary, PerfVerdict, ReportRequest, ResponseVerdict,
 } from '../types.ts'
@@ -28,7 +29,7 @@ export const perfLabel = (v: string | null | undefined) => { const s = perfStyle
 export const responseLabel = (v: string | null | undefined) => { const s = responseStyle(v); return `${s.glyph} ${s.label}` }
 
 /** A request passes when it is neither slower, changed, broken nor missing from the baseline (the default `--fail-on`). */
-export const requestPasses = (r: ReportRequest) => r.perf.verdict !== 'slower' && r.response.verdict !== 'changed' && r.response.verdict !== 'broken' && r.response.verdict !== 'missing'
+export const requestPasses = (r: ReportRequest) => r.perf.verdict !== 'slower' && r.response.verdict !== 'changed' && r.response.verdict !== 'broken' && r.response.verdict !== 'missing' && !(r.budgets ?? []).some(b => !b.passed)
 
 /** A broken response makes the timing meaningless: perf is not judged (CONTRACT §19.4). */
 export const PERF_NOT_JUDGED = 'perf not judged: response broken'
@@ -249,6 +250,7 @@ export function validateSuite(s: CheckSuite): SuiteErrors {
     if (r.expect_status != null && !intIn(r.expect_status, 100, 599)) f[p + 'expect_status'] = 'HTTP status from 100 to 599'
     const bad = (r.ignore ?? []).map(ignorePathError).find(Boolean)
     if (bad) f[p + 'ignore'] = bad
+    for (const [key, error] of Object.entries(policyErrors(r))) f[p + key] = error
     validateHeaders(r.headers, p + 'headers', f)
     if (r.perf === false && r.response === false) warnings.push(`"${r.name}" has both Perf and Response off, so it checks nothing.`)
   })
@@ -308,6 +310,8 @@ export function reportToMarkdown(rep: CheckReport): string {
   if (sm.changed) parts.push(`${sm.changed} changed`)
   if (sm.broken) parts.push(`${sm.broken} broken`)
   if (sm.missing) parts.push(`${sm.missing} missing from the baseline`)
+  const budgetFailures = rep.requests.filter(r => r.budgets?.some(b => !b.passed)).length
+  if (budgetFailures) parts.push(`${budgetFailures} budget failures`)
   if (sm.noisy) parts.push(`${sm.noisy} noisy`)
   if (sm.speedChangePct != null) parts.push(`overall speed ${fmtPct(sm.speedChangePct)}`)
   if (sm.queriesSamples) parts.push(`queries ${sm.queriesBefore} → ${sm.queriesAfter} (${fmtSigned(sm.queriesChange)})`)
@@ -321,7 +325,7 @@ export function reportToMarkdown(rep: CheckReport): string {
     const pcell = perfNotJudged(r) ? `${perfLabel(r.perf.verdict)} (${PERF_NOT_JUDGED})` : perfLabel(r.perf.verdict)
     out.push(`| ${code(cell(`${r.method} ${r.path}`))} | ${pcell} | ${fmtMs(r.perf.before?.median)} → ${fmtMs(r.perf.after?.median)} | ${fmtPct(r.perf.change_pct)} | ${q} | ${responseLabel(r.response.verdict)} |`)
   }
-  const detail = rep.requests.filter(r => r.response.diff.length || r.response.text_diff || r.server?.new_issues.length || r.server?.fixed_issues.length || r.server?.new_sql.length)
+  const detail = rep.requests.filter(r => r.response.diff.length || r.response.text_diff || r.server?.new_issues.length || r.server?.fixed_issues.length || r.server?.new_sql.length || r.budgets?.some(b => !b.passed))
   for (const r of detail) {
     out.push('', `<details><summary>${cell(r.method + ' ' + r.path)} (${responseLabel(r.response.verdict)}, ${perfLabel(r.perf.verdict)})</summary>`, '')
     if (r.response.diff.length) {
@@ -332,6 +336,7 @@ export function reportToMarkdown(rep: CheckReport): string {
       out.push('')
     }
     if (r.response.text_diff) out.push('```diff', r.response.text_diff.replace(/```/g, "'''"), '```', '')
+    for (const b of r.budgets ?? []) if (!b.passed) out.push(`- Budget failed: ${b.rule}, observed ${JSON.stringify(b.observed)}, limit ${JSON.stringify(b.limit)}${b.reason ? ': ' + b.reason : ''}`)
     for (const i of r.server?.new_issues ?? []) out.push(`- New issue: ${i.kind}${i.title ? ' ' + i.title : ''}`)
     for (const i of r.server?.fixed_issues ?? []) out.push(`- Fixed issue: ${i.kind}${i.title ? ' ' + i.title : ''}`)
     for (const q of r.server?.new_sql ?? []) out.push(`- New SQL: ${code(cell(q.sql.slice(0, 120)))}`)

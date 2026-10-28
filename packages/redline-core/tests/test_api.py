@@ -119,6 +119,10 @@ def test_endpoints_and_issues(api, seeded):
         "sample_span_ids",
         "suggestion",
         "callsite",
+        "suppressed",
+        "suppressed_routes",
+        "observed_total_ms",
+        "fingerprint",
     }
     assert api.dispatch("GET", "api/issues", {"kind": "bogus"})[0] == 400
     assert api.dispatch("GET", "api/issues")[0] == 200

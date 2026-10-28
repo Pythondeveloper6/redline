@@ -74,6 +74,7 @@ __all__ = ["SQLiteStore"]
 logger = logging.getLogger("redline")
 
 _SCHEMA = """
+CREATE TABLE IF NOT EXISTS issue_suppressions (id TEXT PRIMARY KEY, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS traces (
     id TEXT PRIMARY KEY,
     started_at REAL NOT NULL,
@@ -755,6 +756,25 @@ class SQLiteStore(CheckStoreMixin):
         out.sort(key=lambda e: (-e.count, -e.p95_ms, e.route))
         return out
 
+    def list_suppressions(self) -> builtins.list[dict[str, Any]]:
+        return [
+            json.loads(row["data"])
+            for row in self._query("SELECT data FROM issue_suppressions ORDER BY id", ())
+        ]
+
+    def save_suppression(self, rule: dict[str, Any]) -> None:
+        self._write_now(
+            [
+                (
+                    "INSERT INTO issue_suppressions (id, data) VALUES (?, ?)",
+                    (rule["id"], json.dumps(rule)),
+                )
+            ]
+        )
+
+    def delete_suppression(self, rule_id: str) -> None:
+        self._write_now([("DELETE FROM issue_suppressions WHERE id = ?", (rule_id,))])
+
     def issues(
         self, window: float, kind: str | None = None, now: float | None = None
     ) -> builtins.list[IssueGroup]:
@@ -777,9 +797,11 @@ class SQLiteStore(CheckStoreMixin):
                 g = acc[row["issue_id"]] = {
                     "first": row["started_at"],
                     "n": 0,
+                    "observed_total_ms": 0.0,
                     "routes": [],
                 }
             g["n"] += 1
+            g["observed_total_ms"] += float(json.loads(row["data"]).get("total_ms") or 0)
             g["last"] = row["started_at"]
             g["trace"] = row["trace_id"]
             g["data"] = row["data"]
@@ -797,6 +819,8 @@ class SQLiteStore(CheckStoreMixin):
                     title=issue.title,
                     detail=issue.detail,
                     occurrences=g["n"],
+                    observed_total_ms=g["observed_total_ms"],
+                    fingerprint=issue.fingerprint,
                     first_seen=g["first"],
                     last_seen=g["last"],
                     routes=g["routes"],

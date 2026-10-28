@@ -41,7 +41,7 @@ def test_n_plus_one_severity_critical_by_count_or_time():
 
 def test_writes_are_not_n_plus_one():
     spans = [sql_span("UPDATE t SET a = %s", [i], callsite=make_callsite()) for i in range(10)]
-    assert detect(make_trace(spans=spans)) == []
+    assert not any(i.kind == "n_plus_one" for i in detect(make_trace(spans=spans)))
 
 
 def test_issue_ids_are_stable_across_traces():

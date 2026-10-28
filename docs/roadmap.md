@@ -12,7 +12,7 @@ change as the earlier parts meet real use.
 |---|---|---|
 | **0.1** | Profile and Analyze: traces, N+1 with fix diffs, EXPLAIN, flamegraphs, UI, Django and FastAPI | **Built** |
 | **0.2** | Analyze more, **Stress**, History: Flask and Litestar, a load tester, new detectors, release history, access control | **Built** (alpha) |
-| 0.3 | **Compare / CI**: the refactor check, a pytest plugin, `redline ci`, flamegraph diffs, OTLP | In progress: the refactor check is built (0.3.0a1); the rest is planned |
+| 0.3 | **Compare / CI**: refactor checks, endpoint budgets, pytest and source analysis | Built in the development branch; integration and release validation in progress |
 | 1.0 | Hardened production mode and the long tail | Planned |
 
 ## The thesis
@@ -48,12 +48,12 @@ Everything below is built and documented. The [changelog](changelog.md) has the 
 
 Make performance a thing you can regress-test.
 
-- A **pytest plugin**: `@pytest.mark.redline(max_queries=..., no_n_plus_one=True)`, so a
+- A **pytest plugin** (built in the development branch): `@pytest.mark.redline(max_queries=..., no_n_plus_one=True)`, so a
   test fails when a view regresses to an N+1.
-- **`redline ci`** emits **JUnit** output and a **Markdown PR comment** (`+queries`, `+p95`,
+- **`redline ci`** (planned) emits **JUnit** output and a **Markdown PR comment** (`+queries`, `+p95`,
   the culprit line), comparing a run against a stored baseline.
-- **Flamegraph diffs** between two requests or two releases.
-- **OTLP import and export**, so traces can flow to and from other tools.
+- **Flamegraph diffs** between two requests or two releases are deferred to the next release.
+- **OTLP import and export** (planned), so traces can flow to and from other tools.
 - Baselines and diffs per endpoint in CI, building on the History comparison already in 0.2.
 - **Refactor check** (**shipped in 0.3.0a1**, see [Refactor check](refactor-check.md)): pick a
   set of read-only endpoints, record a baseline before a refactor, run it again after, and
@@ -65,6 +65,8 @@ Make performance a thing you can regress-test.
   (N+1), missing `select_related` / `prefetch_related` / `selectinload`, unbounded
   queries, blocking calls inside async views, and similar database and logic problems.
   Extends the template scan shipped in 0.2.
+
+See [Performance workflows](performance-workflows.md) for the implemented UI, assertions, source analysis and detector additions. Two live targets, differential flamegraphs, serial-call concurrency advice and automated cold/warm scenarios are deferred to the next release.
 
 ## v1.0
 
@@ -93,7 +95,6 @@ Be realistic about gaps that are not on the list above:
 - Cross-service distributed tracing.
 - Alerting.
 - Distributed load generation, browsers and WebSockets in the load tester.
-- A PyPI release. Until then you install from GitHub.
 
 ## How the roadmap is decided
 

@@ -270,7 +270,7 @@ def test_server_section_items():
 
 # ----------------------------------------------------------------------- fail-on, exit
 def test_parse_fail_on():
-    assert parse_fail_on(None) == ("slower", "changed", "broken", "missing")
+    assert parse_fail_on(None) == ("slower", "changed", "broken", "missing", "budget")
     assert parse_fail_on("slower, broken,slower") == ("slower", "broken")
     assert parse_fail_on("") == () and parse_fail_on("none") == ()
     assert parse_fail_on(["noisy"]) == ("noisy",)

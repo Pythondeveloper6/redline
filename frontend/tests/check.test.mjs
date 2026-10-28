@@ -294,3 +294,22 @@ test('baseline import: client-side size and JSON checks, API error wording', () 
   assert.match(importErrorMessage('payload_too_large', 'x'), /10 MiB/)
   assert.equal(importErrorMessage('boom', 'raw message'), 'raw message')
 })
+
+test('budget-only failures cannot be shown as passed or omitted from Markdown', () => {
+  const row = req('budget', { budgets: [{ rule: 'max_queries', observed: 8, limit: 5, passed: false }] })
+  assert.equal(requestPasses(row), false)
+  assert.equal(summarize([row]).passed, 0)
+  const text = reportToMarkdown({ suite: { name: 'budgets' }, requests: [row], baseline: {}, run: {} })
+  assert.match(text, /1 budget failures/)
+  assert.match(text, /Budget failed: max_queries/)
+})
+
+test('policy validation rejects invalid paths, identity names, non-finite tolerances and fractional counts', () => {
+  const base = { name: 'rules', requests: [{ name: 'items', method: 'GET', path: '/items' }] }
+  const check = rules => validateSuite({ ...base, requests: [{ ...base.requests[0], ...rules }] }).fields
+  assert.ok(check({ array_keys: { 'items[': 'id' } })['requests.0.array_keys'])
+  assert.ok(check({ array_keys: { items: '' } })['requests.0.array_keys'])
+  assert.ok(check({ tolerances: { price: { relative: Infinity } } })['requests.0.tolerances'])
+  assert.ok(check({ budgets: { max_queries: 1.5 } })['requests.0.budgets'])
+  assert.equal(Object.keys(check({ array_keys: { items: 'id' }, tolerances: { total: { absolute: .01 } }, budgets: { max_queries: 5 } })).length, 0)
+})

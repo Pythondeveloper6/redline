@@ -147,6 +147,7 @@ function ReportView({ report }: { report: CheckReport }) {
         <div role="listitem"><Card k="Changed" sub="response differs" tone={sm.changed ? 'text-warn' : ''}><span aria-hidden>{sm.changed ? 'Δ ' : ''}</span>{sm.changed}</Card></div>
         <div role="listitem"><Card k="Broken" sub="now failing" tone={sm.broken ? 'text-bad' : ''}><span aria-hidden>{sm.broken ? '✕ ' : ''}</span>{sm.broken}</Card></div>
         <div role="listitem"><Card k="Noisy" sub="too variable to judge" tone={sm.noisy ? 'text-warn' : ''}><span aria-hidden>{sm.noisy ? '≈ ' : ''}</span>{sm.noisy}</Card></div>
+        {report.requests.some(r => r.budgets?.some(b => !b.passed)) && <div role="listitem"><Card k="Budget failures" tone="text-bad" sub="absolute endpoint limits">{report.requests.filter(r => r.budgets?.some(b => !b.passed)).length}</Card></div>}
         {sm.missing > 0 && <div role="listitem"><Card k="Missing" sub="not in the baseline" tone="text-bad"><span aria-hidden>? </span>{sm.missing}</Card></div>}
         <div role="listitem"><Card k="Faster" sub="significant" tone={sm.faster ? 'text-ok' : ''}><span aria-hidden>{sm.faster ? '↓ ' : ''}</span>{sm.faster}</Card></div>
         <div role="listitem"><Card k="Slower" sub="past thresholds" tone={sm.slower ? 'text-bad' : ''}><span aria-hidden>{sm.slower ? '↑ ' : ''}</span>{sm.slower}</Card></div>
@@ -184,7 +185,7 @@ function ReportView({ report }: { report: CheckReport }) {
                 <Fragment key={r.name}>
                   <tr className="border-b border-line last:border-0 hover:bg-raised/50 cursor-pointer" onClick={() => toggle(r.name)} data-row={r.name}>
                     <td className="td"><button type="button" className="text-faint" aria-expanded={isOpen} aria-label={`${isOpen ? 'Collapse' : 'Expand'} ${r.name}`} onClick={e => { e.stopPropagation(); toggle(r.name) }}><Icon d={I.chev} size={12} className={isOpen ? 'rotate-90' : ''} /></button></td>
-                    <td className="td !whitespace-normal min-w-[9.5rem] max-w-[22rem]"><div className="font-medium">{r.name}</div><div className="mono text-[11.5px] text-muted break-words [overflow-wrap:anywhere]"><span className="font-semibold">{r.method}</span> {r.path}</div></td>
+                    <td className="td !whitespace-normal min-w-[9.5rem] max-w-[22rem]"><div className="font-medium">{r.name} {r.budgets?.some(b => !b.passed) && <Pill tone="bad">Budget failed</Pill>}</div><div className="mono text-[11.5px] text-muted break-words [overflow-wrap:anywhere]"><span className="font-semibold">{r.method}</span> {r.path}</div></td>
                     <td className="td"><PerfBadge v={r.perf.verdict} reason={r.perf.reason} /></td>
                     <td className="td text-right num hidden md:table-cell">{r.perf.before && r.perf.after ? <>{fmtMs(r.perf.before.median)} <span className="text-faint">→</span> <b>{fmtMs(r.perf.after.median)}</b></> : <span className="text-faint">-</span>}</td>
                     <td className={`td text-right num font-medium ${r.perf.change_pct == null ? 'text-faint' : r.perf.verdict === 'faster' ? 'text-ok' : r.perf.verdict === 'slower' ? 'text-bad' : 'text-muted'}`}>{fmtPct(r.perf.change_pct)}</td>
@@ -233,11 +234,23 @@ function RequestDetail({ r }: { r: ReportRequest }) {
         {(p.before?.failed || p.after?.failed) ? <div className="text-bad text-[12px]" role="status">Failed calls: {p.before?.failed ?? 0} before, {p.after?.failed ?? 0} after (of the timed calls).</div> : null}
       </Section>
 
+      {!!r.budgets?.length && <Section title="Endpoint budgets">
+        <div className="space-y-2">{r.budgets.map(b => <div key={b.rule} className="flex flex-wrap items-center gap-2">
+          <Pill tone={b.passed ? 'ok' : 'bad'}>{b.passed ? 'Pass' : 'Fail'}</Pill>
+          <span className="mono">{b.rule}</span><span>Observed: {JSON.stringify(b.observed) ?? 'unavailable'} · Limit: {JSON.stringify(b.limit)}</span>
+          {b.reason && <span className="text-bad">{b.reason}</span>}
+        </div>)}</div>
+      </Section>}
       <Section title="Response">
         <div className="flex flex-wrap items-center gap-2 text-[12px]">
           <ResponseBadge v={resp.verdict} />
           <span className="text-muted">status</span><b className="num">{resp.status[0] ?? '-'} <span className="text-faint font-normal">→</span> {resp.status[1] ?? '-'}</b>
         </div>
+        {resp.rules && (Object.keys(resp.rules.array_keys).length > 0 || Object.keys(resp.rules.tolerances).length > 0) && <div className="space-y-1 text-muted">
+          <p>Explicit comparison rules applied:</p>
+          {Object.entries(resp.rules.array_keys).map(([path, key]) => <div key={path}>Match <code>{path}</code> by <code>{key}</code></div>)}
+          {Object.entries(resp.rules.tolerances).map(([path, rule]) => <div key={path}><code>{path}</code>: absolute {rule.absolute ?? 0}, relative {rule.relative ?? 0}</div>)}
+        </div>}
         {resp.diff.length > 0 && <JsonDiffList diff={resp.diff} total={resp.diff_total} />}
         {resp.text_diff && <TextDiff diff={resp.text_diff} />}
         {resp.verdict === 'same' && <div className="text-muted text-[12px]">Identical outside the ignored fields.</div>}

@@ -35,6 +35,7 @@ from django.db import connections
 from django.db.backends.signals import connection_created
 
 from redline_core.blocking import note_sync_call
+from redline_core.cache_payload import value_bytes
 from redline_core.callsite import MAX_STACK
 from redline_core.model import Callsite, Frame
 from redline_core.recorder import SpanContext, current, record_query, record_span
@@ -402,13 +403,15 @@ def _many_keys(keys: Any) -> str:
     return shown + (f" (+{len(items) - 5})" if len(items) > 5 else "")
 
 
-def _cache_span(op: str, key: str, hit: bool | None, backend: str, start: float) -> None:
+def _cache_span(
+    op: str, key: str, hit: bool | None, backend: str, start: float, value: Any = None
+) -> None:
     record_span(
         "cache",
         f"{op} {key}"[:120],
         start,
         _perf() - start,
-        {"op": op, "key": key, "hit": hit, "backend": backend},
+        {"op": op, "key": key, "hit": hit, "backend": backend, "value_bytes": value_bytes(value)},
     )
 
 
@@ -428,7 +431,7 @@ def _wrap_get(method: Callable[..., Any], backend: str) -> Callable[..., Any]:
         finally:
             _in_cache.reset(token)
         hit = value is not _MISS
-        _cache_span("get", _key_text(key), hit, backend, start)
+        _cache_span("get", _key_text(key), hit, backend, start, value if hit else None)
         return value if hit else default
 
     return get

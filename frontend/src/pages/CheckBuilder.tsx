@@ -1,5 +1,6 @@
+import { CheckPolicyEditor } from '../components/CheckPolicyEditor'
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { Link, useNavigate, useParams } from 'react-router-dom'
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { api } from '../api'
 import { apiChecks } from '../apiChecks'
 import { ms } from '../lib/format'
@@ -19,6 +20,7 @@ interface RRow extends Omit<CheckRequestDef, 'headers'> { k: string; headers: HR
 interface Form {
   name: string; base_url: string; timeout_s: string; repeat: string; warmup: string
   slower_pct: string; slower_ms: string; max_query_increase: string
+  environment: Record<string, string>
   headers: HRow[]; requests: RRow[]
 }
 
@@ -37,17 +39,19 @@ function toForm(s: CheckSuite): Form {
   return {
     name: s.name ?? '', base_url: s.base_url ?? '', timeout_s: String(s.timeout_s ?? 10), repeat: String(s.repeat ?? 20), warmup: String(s.warmup ?? 3),
     slower_pct: String(s.thresholds?.slower_pct ?? 10), slower_ms: String(s.thresholds?.slower_ms ?? 2), max_query_increase: String(s.thresholds?.max_query_increase ?? 0),
+    environment: s.environment ?? {},
     headers: toRows(s.headers), requests: (s.requests ?? []).map(toReq),
   }
 }
 function toSuite(f: Form): CheckSuite {
   const out: CheckSuite = {
-    name: f.name.trim(),
+    name: f.name.trim(), environment: f.environment,
     timeout_s: num(f.timeout_s), repeat: num(f.repeat), warmup: num(f.warmup),
     thresholds: { slower_pct: num(f.slower_pct), slower_ms: num(f.slower_ms), max_query_increase: num(f.max_query_increase) },
     headers: fromRows(f.headers),
     requests: f.requests.map(r => {
       const q: CheckRequestDef = { name: r.name.trim(), method: r.method, path: r.path.trim(), headers: fromRows(r.headers), perf: r.perf !== false, response: r.response !== false, ignore: r.ignore, ignore_headers: r.ignore_headers }
+      q.array_keys = r.array_keys; q.tolerances = r.tolerances; q.budgets = r.budgets
       if (r.expect_status != null && !Number.isNaN(r.expect_status)) q.expect_status = r.expect_status
       return q
     }),
@@ -179,6 +183,11 @@ function RequestCard({ r, idx, errors, suggestions, onChange, onRemove }: {
         <Toggle label="Response" checked={r.response !== false} onChange={v => onChange({ response: v })} help="Compare status, headers and body" />
         {r.perf === false && r.response === false && <Pill tone="warn">checks nothing</Pill>}
       </div>
+      <CheckPolicyEditor value={r} onChange={onChange} />
+      <details className="text-muted"><summary className="cursor-pointer">pytest assertion for this endpoint</summary><pre className="overflow-x-auto whitespace-pre-wrap mt-2">{`import pytest\n\n@pytest.mark.redline(max_queries=${r.budgets?.max_queries ?? 'None'}, max_external_calls=${r.budgets?.max_external_calls ?? 'None'}, forbidden_issues=${JSON.stringify(r.budgets?.forbidden_issues ?? [])})
+def test_endpoint(client):
+    response = client.get(${JSON.stringify(r.path)})
+    assert response.status_code == 200`}</pre><p>Run against an instrumented in-process test client. Recorded requests carry a test_name tag for inspection in the UI.</p></details>
       <details open={adv} className="group">
         <summary className="cursor-pointer text-[12px] text-muted hover:text-ink select-none">Headers, ignore paths, expected status</summary>
         <div className="mt-3 space-y-4">
@@ -276,6 +285,7 @@ export default function CheckBuilder() {
   const access = useCheckAccess()
   const nav = useNavigate()
   const existing = useAsync(() => (id ? apiChecks.suite(id) : Promise.resolve(null)), [id])
+  const [params] = useSearchParams()
   const [form, setForm] = useState<Form | null>(id ? null : emptyForm())
   const [dirty, setDirty] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -287,6 +297,15 @@ export default function CheckBuilder() {
   useEffect(() => {
     if (id && existing.data) { setForm(toForm(existing.data.suite)); setDirty(false) }
   }, [id, existing.data])
+  useEffect(() => {
+    const traceId = params.get('trace'), kind = params.get('verify_kind')
+    if (id || !traceId || !kind) return
+    let live = true
+    api.trace(traceId).then(trace => {
+      if (live && ['GET', 'HEAD', 'OPTIONS'].includes(trace.method)) setForm(toForm({ name: `Verify ${kind}`, requests: [{ name: trace.route ?? trace.path, method: trace.method as CheckMethod, path: trace.path, budgets: { forbidden_issues: [kind] } }] }))
+    }).catch(() => undefined)
+    return () => { live = false }
+  }, [id, params])
   // Volatile-field suggestions: from the most recent finished baseline of this suite.
   useEffect(() => {
     if (!id) return
@@ -394,6 +413,10 @@ export default function CheckBuilder() {
           <Field label="and > ms" error={errs['thresholds.slower_ms']} hint="absolute change"><input type="number" className="field num" min={0} step="any" value={form.slower_ms} onChange={field('slower_ms')} {...inv(errs['thresholds.slower_ms'])} /></Field>
           <Field label="Max extra queries" error={errs['thresholds.max_query_increase']} hint="more = slower"><input type="number" className="field num" min={0} value={form.max_query_increase} onChange={field('max_query_increase')} {...inv(errs['thresholds.max_query_increase'])} /></Field>
         </div>
+        <details><summary className="cursor-pointer text-muted">Target environment labels</summary>
+          <p className="text-muted">Declare the target server and dataset. Labels are compared with the baseline; they are not detected automatically.</p>
+          <div className="grid sm:grid-cols-2 gap-3 mt-3">{['dataset', 'python', 'framework', 'database', 'configuration'].map(key => <Field key={key} label={key}><input className="field" maxLength={200} value={form.environment[key] ?? ''} onChange={e => { const environment = { ...form.environment }; if (e.target.value) environment[key] = e.target.value; else delete environment[key]; patch({ environment }) }} /></Field>)}</div>
+        </details>
         <details open={form.headers.length > 0 || !!errs.headers}>
           <summary className="cursor-pointer text-[12px] text-muted hover:text-ink select-none">Suite headers (sent with every request)</summary>
           <div className="mt-3"><HeadersEditor rows={form.headers} onChange={headers => patch({ headers })} error={errs.headers} label="Suite" /></div>

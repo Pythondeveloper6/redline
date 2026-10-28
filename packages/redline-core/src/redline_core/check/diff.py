@@ -175,20 +175,26 @@ def _ignored(path: tuple[str | int, ...], rules: list[tuple[Token, ...]]) -> boo
 
 
 def json_diff(
-    before: Any, after: Any, *, ignore: Iterable[tuple[Token, ...]] = ()
+    before: Any,
+    after: Any,
+    *,
+    ignore: Iterable[tuple[Token, ...]] = (),
+    array_keys: Mapping[str, str] | None = None,
+    tolerances: Mapping[str, Mapping[str, float]] | None = None,
 ) -> Iterator[dict[str, Any]]:
     """Every difference as ``{path, kind, before, after}``; ``kind`` is ``added``,
     ``removed``, ``changed`` or ``type``. Arrays are compared index by index. Values are
     *not* truncated here (see :func:`truncate_value`)."""
     rules = list(ignore)
-    yield from _walk(before, after, (), rules)
+    options = (array_keys or {}, tolerances or {})
+    yield from _walk(before, after, (), rules, options)
 
 
 def _entry(path: tuple, kind: str, before: Any, after: Any) -> dict[str, Any]:
     return {"path": format_path(path), "kind": kind, "before": before, "after": after}
 
 
-def _walk(a: Any, b: Any, path: tuple, rules: list) -> Iterator[dict[str, Any]]:
+def _walk(a: Any, b: Any, path: tuple, rules: list, options: tuple) -> Iterator[dict[str, Any]]:
     if rules and _ignored(path, rules):
         return
     ka, kb = _kind(a), _kind(b)
@@ -202,13 +208,22 @@ def _walk(a: Any, b: Any, path: tuple, rules: list) -> Iterator[dict[str, Any]]:
                 if not (rules and _ignored(sub, rules)):
                     yield _entry(sub, "removed", value, None)
             else:
-                yield from _walk(value, b[key], sub, rules)
+                yield from _walk(value, b[key], sub, rules, options)
         for key, value in b.items():
             if key not in a:
                 sub = (*path, key)
                 if not (rules and _ignored(sub, rules)):
                     yield _entry(sub, "added", None, value)
     elif ka == "array":
+        from .policies import align_arrays, rule_at
+
+        identity = rule_at(options[0], path)
+        if identity is not None:
+            try:
+                a, b = align_arrays(a, b, identity, _MISSING)
+            except ValueError as exc:
+                yield _entry(path, "invalid_identity", str(exc), str(exc))
+                return
         for i, (va, vb) in enumerate(zip_longest(a, b, fillvalue=_MISSING)):
             sub = (*path, i)
             if vb is _MISSING:
@@ -218,8 +233,13 @@ def _walk(a: Any, b: Any, path: tuple, rules: list) -> Iterator[dict[str, Any]]:
                 if not (rules and _ignored(sub, rules)):
                     yield _entry(sub, "added", None, vb)
             else:
-                yield from _walk(va, vb, sub, rules)
+                yield from _walk(va, vb, sub, rules, options)
     elif a != b:
+        from .policies import numeric_equal, rule_at
+
+        tolerance = rule_at(options[1], path)
+        if tolerance is not None and numeric_equal(a, b, tolerance):
+            return
         yield _entry(path, "changed", a, b)
 
 
@@ -255,7 +275,12 @@ def text_diff(
 
 
 # ============================================================================ volatility
-def detect_volatile(first: Mapping[str, Any] | None, last: Mapping[str, Any] | None) -> dict:
+def detect_volatile(
+    first: Mapping[str, Any] | None,
+    last: Mapping[str, Any] | None,
+    *,
+    array_keys: Mapping[str, str] | None = None,
+) -> dict:
     """``{"volatile": [paths], "volatile_headers": [names]}`` from two responses of the
     same request. JSON bodies give JSON paths, text bodies ``line:<n>``, a changed hash
     (or a change of body kind) ``$``."""
@@ -269,7 +294,9 @@ def detect_volatile(first: Mapping[str, Any] | None, last: Mapping[str, Any] | N
         out["volatile"] = ["$"]
     elif kind == "json":
         paths: list[str] = []
-        for entry in json_diff(first.get("body"), last.get("body")):
+        for entry in json_diff(first.get("body"), last.get("body"), array_keys=array_keys):
+            if entry["kind"] == "invalid_identity":
+                continue
             paths.append(entry["path"])
             if len(paths) >= MAX_VOLATILE:
                 paths = ["$"]
@@ -303,6 +330,8 @@ def compare_captures(
     volatile: Iterable[str] = (),
     volatile_headers: Iterable[str] = (),
     max_entries: int = MAX_DIFF_ENTRIES,
+    array_keys: Mapping[str, str] | None = None,
+    tolerances: Mapping[str, Mapping[str, float]] | None = None,
 ) -> dict[str, Any]:
     """Diff two captured responses (status is the caller's business).
 
@@ -348,7 +377,15 @@ def compare_captures(
     elif kb != ka:
         entries.append(_entry_str("$", "type", kb, ka))
     elif kb == "json":
-        entries.extend(json_diff(before.get("body"), after.get("body"), ignore=rules))
+        entries.extend(
+            json_diff(
+                before.get("body"),
+                after.get("body"),
+                ignore=rules,
+                array_keys=array_keys,
+                tolerances=tolerances,
+            )
+        )
     elif kb == "text":
         text = text_diff(
             before.get("body") or "",
