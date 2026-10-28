@@ -106,6 +106,17 @@ GROUPS: dict[str, tuple[str, ...]] = {
         "slow_serializer_ms",
         "long_transaction_ms",
         "slow_external_ms",
+        "repeated_writes_threshold",
+        "deep_offset_rows",
+        "round_trip_count",
+        "round_trip_ms",
+        "repeated_scans_threshold",
+        "large_response_bytes",
+        "large_cache_bytes",
+        "pool_wait_ms",
+        "orm_instances_threshold",
+        "json_decode_ms",
+        "cache_decode_ms",
         "explain_analyze",
     ),
     "storage": (
@@ -134,7 +145,7 @@ GROUPS: dict[str, tuple[str, ...]] = {
         "ui_enabled",
         "mount_path",
     ),
-    "features": ("features", "load_from_ui", "checks_from_ui", "base_url"),
+    "features": ("features", "load_from_ui", "checks_from_ui", "analysis_from_ui", "base_url"),
 }
 
 
@@ -231,7 +242,7 @@ _FIELD_TYPES: dict[str, str] = {f.name: str(f.type) for f in dataclasses.fields(
 
 def _kind(name: str) -> str:
     t = _FIELD_TYPES[name].replace(" ", "")
-    if name in ("badge", "server_timing", "checks_from_ui", "cookie_secure"):
+    if name in ("badge", "server_timing", "checks_from_ui", "analysis_from_ui", "cookie_secure"):
         return "badge"
     if t.startswith("tuple["):
         return "list"

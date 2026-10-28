@@ -832,12 +832,13 @@ are in the tabs above) and:
     ![A request expanded: latency, the response diff and the SQL that went away](assets/screenshots/checks-report-expanded-light.png){ .rl-shot .rl-only-light }
     ![A request expanded: latency, the response diff and the SQL that went away](assets/screenshots/checks-report-expanded-dark.png){ .rl-shot .rl-only-dark }
 
+See [Performance workflows](performance-workflows.md) for per-endpoint budgets, keyed arrays, numeric tolerances, environment warnings and UI verification.
+
 ## Limits and what's next
 
 - **Read-only requests only.** `GET`, `HEAD` and `OPTIONS`. There is no way to replay a write
   safely, and the check does not try.
-- **Arrays are compared by index.** Reordering a list looks like many changes. There is no
-  matching by key yet; put a sort on the endpoint, or ignore the list.
+- **Arrays use index order by default.** Opt in to `array_keys` for paths where order is not part of the contract; invalid identities fail comparison.
 - **No concurrency.** Requests run one at a time on one connection. That makes the numbers
   stable, and means it says nothing about behaviour under load: use
   [`redline load`](load-testing.md) for that.
@@ -848,5 +849,4 @@ are in the tabs above) and:
 - **UI runs are capped** (200 requests, 5 000 calls, 15 minutes). The command line has no cap
   beyond the suite limits (`repeat` up to 1000).
 
-Next on the [roadmap](roadmap.md) is `redline analyze`, a static analysis of the application
-code that finds likely bottlenecks before any request runs.
+`redline analyze` and its UI are documented in [Performance workflows](performance-workflows.md).

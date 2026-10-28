@@ -15,6 +15,7 @@ import redis
 import redis.asyncio
 
 from redline_core import record_span
+from redline_core.cache_payload import value_bytes
 from redline_core.recorder import current
 
 __all__ = ["instrument_redis", "uninstrument_redis"]
@@ -58,12 +59,23 @@ def _record(args: tuple[Any, ...], start: float, result: Any, ok: bool) -> None:
     op = args[0]
     op = (op.decode("utf-8", "replace") if isinstance(op, bytes) else str(op)).lower()
     key = None if op in _NO_KEY else _key(args)
+    size = value_bytes(result) if ok and op in _READS else None
+    if size is None and op == "set" and len(args) > 2:
+        size = value_bytes(args[2])
+    if size is None and op in {"setex", "psetex"} and len(args) > 3:
+        size = value_bytes(args[3])
     record_span(
         "cache",
         f"{op} {key}" if key else op,
         start,
         _perf() - start,
-        {"op": op, "key": key, "hit": _hit(op, result) if ok else None, "backend": "redis"},
+        {
+            "op": op,
+            "key": key,
+            "hit": _hit(op, result) if ok else None,
+            "backend": "redis",
+            "value_bytes": size,
+        },
     )
 
 

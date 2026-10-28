@@ -6,8 +6,11 @@ import uuid
 
 from asgiref.sync import sync_to_async
 from django.core.cache import cache
+from django.db import transaction
+from django.db.models import Count, F, Sum
 from django.http import JsonResponse
 from django.shortcuts import render
+from django.views.decorators.http import require_POST
 
 from django_redline import span
 
@@ -18,6 +21,7 @@ from .models import Customer, Order, OrderItem, Product, Review
 REFACTOR = os.environ.get("SHOP_REFACTOR") == "1"
 
 ENDPOINTS = [
+    ("/patterns/", "aggregate scans, pagination, ORM instances and response rules"),
     ("/orders/", "N+1 on order items – fix: prefetch_related"),
     ("/items/", "N+1 on each item's product – fix: select_related"),
     ("/orders/page/", "N+1 inside a template loop"),
@@ -138,3 +142,38 @@ def cached(request):
 def status(request):
     """A health check with volatile fields (change on every call)."""
     return JsonResponse({"ok": True, "now": time.time(), "request_id": uuid.uuid4().hex})
+
+
+def patterns(request):
+    """Compare aggregate scans, deep pagination and model construction."""
+    qs = Product.objects.filter(price__gte=0)
+    if REFACTOR:
+        aggregates = qs.aggregate(count=Count("id"), total=Sum("price"))
+        rows = list(Product.objects.order_by("id").values("id", "name", "price")[:30])
+        items = [
+            {"id": row["id"], "name": row["name"], "price": float(row["price"])} for row in rows
+        ]
+        items.reverse()
+    else:
+        aggregates = {"count": qs.count(), "total": qs.aggregate(total=Sum("price"))["total"]}
+        list(Product.objects.order_by("id").values_list("id", flat=True)[10000:10005])
+        rows = list(Product.objects.order_by("id")[:30])
+        items = [{"id": row.id, "name": row.name, "price": float(row.price)} for row in rows]
+    return JsonResponse(
+        {
+            "items": items,
+            "count": aggregates["count"],
+            "total": float(aggregates["total"] or 0) + (0.005 if REFACTOR else 0),
+        }
+    )
+
+
+@require_POST
+def pattern_writes(request):
+    """Execute six individual writes and roll back; do not commit demo changes."""
+    with transaction.atomic():
+        ids = list(Product.objects.order_by("id").values_list("id", flat=True)[:6])
+        for ident in ids:
+            Product.objects.filter(pk=ident).update(price=F("price"))
+        transaction.set_rollback(True)
+    return JsonResponse({"writes": len(ids), "rolled_back": True})

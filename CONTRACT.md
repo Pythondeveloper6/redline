@@ -1247,3 +1247,81 @@ Per request:
   response diff (JSON path list with before/after, or unified text diff), new/fixed issues and SQL with links to
   sample traces, ignored fields. Copy as Markdown.
 - Live progress while a run is `running` (poll `GET api/checks/runs/{id}` every second).
+
+
+## 20. v0.3 selected feature expansion
+
+The selected IDs and stage status are recorded in PLAN.md. The four deferred IDs F03/F08/F14/F16 must not be implemented in this expansion.
+
+### 20.1 Response comparison rules and endpoint budgets
+
+Each check request may contain `array_keys` (JSON-path to identity-field mapping), `tolerances` (JSON-path to `{absolute, relative}` nonnegative finite numbers; relative is a fraction), and `budgets` (nonnegative finite numeric limits `max_queries`, `max_median_ms`, `max_p95_ms`, `max_external_calls`, plus `forbidden_issues`, a list of issue-kind strings). Defaults are empty and preserve exact existing behavior. Unknown fields and malformed paths are rejected consistently by CLI and API.
+
+Array identity rules apply only at the configured array path. All elements must be objects with unique, non-null string or finite numeric identities. Booleans are not identities. Missing/duplicate/invalid identities produce a visible comparison error that fails the response check; they never silently compare equal. Elements match by identity; additions/removals remain differences. Rules are opt-in because ordering may be part of an endpoint contract.
+
+Numeric tolerance at a configured path accepts a difference no greater than `max(absolute, relative * abs(before))`. Booleans are not numbers; type changes are still reported. Rules apply to existing numeric values, not missing fields. Ignore rules retain precedence. Applied rules are included in response reports.
+
+Budgets are evaluated against the current run, independently of baseline-relative verdicts. Query and outbound-call limits use maximum observed per-call counts. Missing required metrics, missing latency samples, and broken responses must never be reported as budget success. Budget failures fail the default check and all machine-readable outputs. The UI exposes the same rules in its suite editor and reports, and preserves rules through import/export and editing.
+
+### 20.2 Additional runtime findings
+
+New kinds: `repeated_writes`, `deep_offset`, `database_round_trips`, `connection_pool_wait`, `large_response`, `repeated_scan`, `large_cache_entry`. Settings default to 5 writes, OFFSET 10,000 rows, 10 round trips with 100 ms cumulative query time, 50 ms pool wait, 1,000,000 response/cache bytes, and 2 distinct aggregate projections. A zero threshold disables the corresponding rule. Findings include observed spans, thresholds and trace completeness. Repeated writes exclude executemany. Round-trip findings avoid an already exceeded query-count budget and classic repeated-query groups. Similar aggregate predicate shapes are review candidates, not proof of equivalent semantics. OFFSET detection is restricted to directly observed literal offsets, not guessed parameter values. Cache size requires explicit size metadata, never serialization solely for measurement.
+
+### 20.3 Test capture and diagnostics
+
+`pytest.mark.redline` accepts per-request `max_queries`, `max_external_calls`, `no_n_plus_one`, and `forbidden_issues`. Capture is context-local, includes sampled-out active instrumented requests, and restores context after tests. No captured request fails the assertion. Truncation fails assertions needing complete span or issue coverage. Disabled or ignored requests are not silently enabled. Stored test traces carry a redacted `test_name` tag and remain inspectable in the UI. The core does not import pytest outside its plugin.
+
+Trace diagnostics partition clamped request-time intervals into database-only, external-only, pool-wait-only, cross-category overlap, and remaining time. Concurrent spans of the same category are unioned. Remaining time is not labeled CPU. Truncation and dropped logs are explicit warnings. Observed span kinds do not prove which integrations are installed or exercised.
+
+Environment labels in a suite are user-declared target labels (`dataset`, `python`, `framework`, `database`, `configuration`); differences and absent metadata warn rather than silently certifying comparable environments. The runner's environment must not be represented as the target server's runtime. Coverage uses a bounded latest-retained trace sample and labels missing routes and single-input routes; unobserved traffic is unknown.
+
+### 20.4 Static analysis
+
+Python source analysis parses syntax without importing or executing application code. CLI project scanning is bounded, excludes dependency/generated directories and symlinks, and reports skipped/invalid inputs. UI analysis accepts bounded pasted/uploaded source or scans only the configured project root; it never accepts an arbitrary server filesystem root. Every finding includes kind, source location, explanation, confidence and limitations. Runtime use of data cannot be inferred from row counts alone. Aggregation and duration advice requires checking null, precision and rounding semantics; a successful rewrite is verified with a refactor check.
+
+
+### 20.5 Integrated surfaces and storage
+
+Additional kinds: `many_orm_instances` (default 500), `json_decode_hotspot` (50 sampled ms)
+and `slow_cache_decode` (50 explicitly measured ms). Django's post_init signal counts
+construction; SQLAlchemy's loaded_as_persistent event counts loads. Counters keep no model
+references. `cache_decode` measures a caller-selected decode block; automatic cache hooks
+observe only binary values already present. No extra serialization or database queries
+are added to request recording. OFFSET may use a directly observed integer bind; redacted
+or unresolved values are not guessed.
+
+Kept traces add `runtime` with target Python/framework metadata, cached by framework.
+Check server aggregates preserve observed metadata and warn on differences or disappearance.
+Declared environment labels do not certify database contents, hardware or runtime equality.
+Issue groups add `fingerprint` and summed `observed_total_ms`; these costs may overlap and
+are not predicted savings. Every finding exposes rule and evidence completeness alongside
+its span IDs; built-in evidence remains inspectable in the request UI.
+
+The SQLite schema remains v4 with an additive `issue_suppressions(id TEXT PRIMARY KEY,
+data TEXT NOT NULL)` table created on opening old or new stores. Suppressions are exact
+kind plus one or more route/fingerprint/location selectors, with a reason and optional
+finite epoch expiry. Expiry stops matching. API issue groups expose suppressed routes and
+whether all routes are suppressed. Raw stored issues and test/check policies are unchanged.
+
+The framework-neutral API adds GET analysis/health, GET analysis/coverage, POST
+analysis/source, POST analysis/trace, POST analysis/database, POST analysis/demo and
+GET/POST/DELETE suppressions routes, documented in docs/http-api.md. Existing access and
+read-only gates run first. Source scans and synthetic sample creation require
+`analysis_from_ui` (auto = framework debug; production = false). Source inputs never
+execute code; project scans use only configured project_root, not caller-provided roots.
+Trace previews accept only detector thresholds. Catalog reads are on demand, bounded to
+supported single-table shapes and never run application queries or DDL. Missing executor,
+unsupported store and malformed inputs use normal structured API errors.
+
+Synthetic examples are explicitly tagged, stored without large payload bodies, and labeled
+in the UI. Their timings are illustrative. Replay and real database inspection are disabled
+for synthetic evidence. The real demo shops also expose GET /patterns (Django with a
+trailing slash) and POST /patterns/writes; writes are rolled back. Their check suites
+include explicit array and numeric rules. scripts/check_demo_patterns.py exercises the
+four adapters in-process against disposable databases.
+
+All UI controls use existing components and tokens. Checks expose policies and generated
+pytest snippets; Analysis exposes source scans, coverage, recording quality and suppression
+management. Request detail exposes preview thresholds, evidence, time attribution and
+on-demand catalog inspection. Issues expose observed-impact sorting and a real-request
+link to a verification suite. Browser interactions do not execute arbitrary shell commands.

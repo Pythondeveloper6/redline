@@ -807,3 +807,37 @@ setting and the feature and not `read_only`) and `access: {policy, login, read_o
 - **A store may not support every route.** A custom store without the extended methods
   answers `501 not_supported` for the history, SQL, cache, external and run routes. The core
   routes keep working.
+
+
+## Analysis tools (v0.3 development)
+
+All routes are relative to the Redline mount and use its normal authentication and
+read-only gate. See [Performance workflows](performance-workflows.md) for semantics.
+
+| Method and route | Input / result |
+|---|---|
+| `GET api/analysis/health` | Latest retained trace sample, drop/profiling indicators and links to test requests |
+| `GET api/analysis/coverage?suite_id=...` | Coverage of a saved suite against retained traffic |
+| `POST api/analysis/source` | `{source, file?}` or `{project: true}`; findings and parse/read errors |
+| `POST api/analysis/trace` | `{trace_id, settings: {...}}`; preview findings, without changing stored data or global settings |
+| `POST api/analysis/database` | `{trace_id, span_id}`; on-demand catalog candidates and limitations |
+| `POST api/analysis/demo` | `{}`; IDs of nine explicitly synthetic detector traces |
+| `GET api/suppressions` | Persistent acknowledgement rules; raw CI findings are unaffected |
+| `POST api/suppressions` | `{kind, reason, route?, fingerprint?, location?, expires_at?}`; created rule |
+| `DELETE api/suppressions/{id}` | Remove an acknowledgement; traces remain intact |
+
+Source scans and detector samples require `analysis_from_ui`; auto follows framework debug
+mode. Coverage requires the checks feature, and database inspection requires the explain
+feature and an adapter executor. Preview overrides accept only the detector thresholds
+listed in Performance workflows. Synthetic samples cannot inspect a real database.
+
+Invalid inputs use `invalid_source`, `invalid_thresholds`, `invalid_database_check` or
+`invalid_suppression` (400). Other relevant codes include `analysis_disabled` (403),
+`feature_disabled`, `trace_not_found`, `span_not_found`, `suite_not_found` (404),
+`payload_too_large` (413), `explain_unavailable` and `not_supported` (501).
+
+Check-suite request objects additionally accept `budgets`, `array_keys`, and `tolerances`;
+suites accept `environment` labels. These fields survive save, retrieval and TOML export.
+Reports add per-request budget results and applied comparison rules, and a `budget_failed`
+summary count. Issue groups add `fingerprint`, `observed_total_ms`, `suppressed_routes` and
+`suppressed`. Trace detail adds `runtime` and overlap-aware `diagnostics`.

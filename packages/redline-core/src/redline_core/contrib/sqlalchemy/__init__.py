@@ -160,6 +160,10 @@ class _CountingCursor:
 
 def instrument_engine(engine: EngineLike, alias: str = "default") -> None:
     """Record every statement executed on ``engine`` as a ``sql`` span (idempotent)."""
+    from sqlalchemy.orm import Session
+
+    if not event.contains(Session, "loaded_as_persistent", _note_loaded_instance):
+        event.listen(Session, "loaded_as_persistent", _note_loaded_instance)
     sync_engine = _sync(engine)
     if sync_engine in _instrumented:
         return
@@ -348,3 +352,9 @@ def build_executor(
 
 #: Contract name for :func:`build_executor`.
 explain_executor_factory = build_executor
+
+
+def _note_loaded_instance(session, instance):
+    from redline_core.orm import note_instance
+
+    note_instance()

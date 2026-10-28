@@ -118,6 +118,7 @@ nav:
       - Refactor check: refactor-check.md
   - Analysis:
       - Detectors overview: detectors.md
+      - Performance workflows: performance-workflows.md
       - Queries and data:
           - Database: database.md
           - Static N+1 scan: static-scan.md

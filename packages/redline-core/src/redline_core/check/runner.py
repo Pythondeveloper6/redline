@@ -112,7 +112,7 @@ class _Track:
             last = capture(
                 status, headers, content, redactor=redactor, ignore_headers=self.req.ignore_headers
             )
-        vol = detect_volatile(self.first, last)
+        vol = detect_volatile(self.first, last, array_keys=self.req.array_keys)
         broken = self.calls > 0 and self.failed * 2 >= self.calls
         perf = None
         if self.req.perf:

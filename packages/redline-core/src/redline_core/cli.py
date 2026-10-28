@@ -1301,11 +1301,52 @@ CHECK_COMMANDS: dict[str, tuple[str, Callable[[argparse.ArgumentParser], None], 
 }
 
 
+def _configure_analyze(parser):
+    parser.add_argument(
+        "path", nargs="?", default=".", help="Python source file or project directory"
+    )
+    parser.add_argument("--json", action="store_true", help="emit a JSON report")
+    parser.add_argument("--fail", action="store_true", help="exit 1 when findings are present")
+
+
+def _cmd_analyze(args, out, err):
+    import json
+    from pathlib import Path
+
+    from .analyze import analyze_project, analyze_source
+
+    try:
+        path = Path(args.path)
+        report = (
+            analyze_project(path)
+            if path.is_dir()
+            else analyze_source(path.read_text(encoding="utf-8"), str(path))
+        )
+    except (OSError, UnicodeError, ValueError) as exc:
+        err.write(f"redline analyze: {exc}\n")
+        return 2
+    if args.json:
+        out.write(json.dumps(report, indent=2) + "\n")
+    else:
+        for item in report["findings"]:
+            out.write(
+                f"{item['file']}:{item['line']}: {item['kind']}: {item['detail']}\n"
+                f"  {item['suggestion']}\n"
+            )
+        out.write(f"{len(report['findings'])} findings; {len(report['errors'])} source errors\n")
+        if report.get("limited"):
+            out.write("Scan stopped at its file/byte limit; coverage is incomplete.\n")
+    if report["errors"] or report.get("limited"):
+        return 2
+    return 1 if args.fail and report["findings"] else 0
+
+
 # ============================================================================ dispatch
 Handler = Callable[[argparse.Namespace, TextIO, TextIO], int]
 
 #: name -> (help, configure(parser), handler, subcommands {name: (help, configure, handler)})
 COMMANDS: dict[str, tuple[str, Callable[[argparse.ArgumentParser], None], Handler, dict]] = {
+    "analyze": ("analyze Python source without executing it", _configure_analyze, _cmd_analyze, {}),
     "load": (
         "run a load test (open model) against a running app",
         _configure_load,

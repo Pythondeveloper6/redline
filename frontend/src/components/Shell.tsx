@@ -55,6 +55,7 @@ const MORE = [
   { to: '/cache', label: 'Cache', hint: 'Hit rates, stampedes' }, { to: '/external', label: 'External', hint: 'Outbound HTTP' },
   { to: '/history', label: 'History', hint: 'Trends and releases' }, { to: '/load', label: 'Load', hint: 'Load runs' },
   { to: '/checks', label: 'Checks', hint: 'Refactor safety checks' },
+  { to: '/analysis', label: 'Analysis', hint: 'Source, health, coverage and suppressions' },
   { to: '/settings', label: 'Settings', hint: 'Effective configuration' },
 ]
 

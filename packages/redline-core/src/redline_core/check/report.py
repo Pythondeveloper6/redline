@@ -55,9 +55,9 @@ FORMAT = "redline-check-report"
 VERSION = 1
 P_VALUE = 0.01
 NOISY_CV = 0.5
-DEFAULT_FAIL_ON = ("slower", "changed", "broken", "missing")
+DEFAULT_FAIL_ON = ("slower", "changed", "broken", "missing", "budget")
 #: Values ``--fail-on`` accepts (perf: slower/noisy/faster, response: changed/broken/missing).
-FAIL_ON_CHOICES = ("slower", "changed", "broken", "missing", "noisy", "faster")
+FAIL_ON_CHOICES = ("slower", "changed", "broken", "missing", "noisy", "faster", "budget")
 PERF_VERDICTS = ("faster", "slower", "same", "noisy", "n/a")
 RESPONSE_VERDICTS = ("same", "changed", "broken", "missing", "n/a")
 #: Why a broken request has no perf verdict (terminal, Markdown and UI wording).
@@ -271,14 +271,28 @@ def _response(
     volatile = list(before.get("volatile") or [])
     vol_headers = list(before.get("volatile_headers") or [])
     if run_volatile:
-        volatile += [p for p in run_volatile.get("volatile") or [] if p not in volatile]
+        current_paths = run_volatile.get("volatile") or []
+        if req.array_keys and rb.get("body_kind") == "json" and ra.get("body_kind") == "json":
+            from .policies import remap_volatile
+
+            current_paths = remap_volatile(
+                current_paths, ra.get("body"), rb.get("body"), req.array_keys
+            )
+        volatile += [p for p in current_paths if p not in volatile]
         vol_headers += run_volatile.get("volatile_headers") or []
     if rb.get("body_kind") != "json":  # JSON paths only apply to JSON bodies, lines to text
         volatile = [p for p in volatile if p == "$" or p.startswith("line:")]
     cmp = compare_captures(
-        rb, ra, ignore=req.ignore, volatile=volatile, volatile_headers=vol_headers
+        rb,
+        ra,
+        ignore=req.ignore,
+        volatile=volatile,
+        volatile_headers=vol_headers,
+        array_keys=req.array_keys,
+        tolerances=req.tolerances,
     )
     out.update(cmp)
+    out["rules"] = {"array_keys": req.array_keys, "tolerances": req.tolerances}
     if sb != sa:
         out["verdict"], out["reason"] = "changed", f"status {sb} → {sa}"
     elif cmp["diff_total"]:
@@ -305,7 +319,10 @@ def compare_request(
     response = _response(req, before, after, run_volatile)
     if before is not None and response["verdict"] == "broken":
         _not_judged(req, perf, server)
+    from .policies import evaluate_budgets
+
     return {
+        "budgets": evaluate_budgets(req.budgets, after),
         "idx": after.get("idx"),
         "name": req.name,
         "method": req.method,
@@ -344,6 +361,8 @@ def _failing(entry: Mapping[str, Any], fail_on: Sequence[str]) -> list[str]:
         hits.append(pv)
     if rv in fail_on:
         hits.append(rv)
+    if "budget" in fail_on and any(not b["passed"] for b in entry.get("budgets", [])):
+        hits.append("budget")
     return hits
 
 
@@ -408,6 +427,7 @@ def _summary(entries: list[dict[str, Any]], fail_on: Sequence[str]) -> dict[str,
         "changed": resp["changed"],
         "broken": resp["broken"],
         "missing": resp["missing"],
+        "budget_failed": sum(any(not b["passed"] for b in e.get("budgets", [])) for e in entries),
         "speed_ratio": None if gm is None else round(gm, 4),
         "speed_change_pct": None if gm is None else round((gm - 1.0) * 100.0, 2),
         "speed_requests": len(ratios),
@@ -437,6 +457,33 @@ def build_report(
         e["name"] for e in entries if e["response"]["verdict"] == "missing"
     ]
     summary["warnings"] = []
+    for entry in entries:
+        server = entry.get("server") or {}
+        old_runtime = (server.get("before") or {}).get("runtime", {})
+        new_runtime = (server.get("after") or {}).get("runtime", {})
+        for key in sorted(set(old_runtime) | set(new_runtime)):
+            if old_runtime.get(key) != new_runtime.get(key):
+                summary["warnings"].append(
+                    f"{entry['name']}: observed target {key} differs or is missing."
+                )
+
+    old_suite = baseline.suite if hasattr(baseline, "suite") else (baseline or {}).get("suite", {})
+    old_environment = old_suite.get("environment", {})
+    new_environment = (suite_dict or suite.to_dict()).get("environment", {})
+    summary["environment"] = {
+        "before": old_environment,
+        "after": new_environment,
+        "source": "user-declared target labels",
+    }
+    if not old_environment or not new_environment:
+        summary["warnings"].append(
+            "Target environment labels are missing; environment equivalence is not verified."
+        )
+    for key in sorted(set(old_environment) | set(new_environment)):
+        if old_environment.get(key) != new_environment.get(key):
+            summary["warnings"].append(
+                f"Target environment label {key} differs between baseline and current run."
+            )
     if summary["not_in_baseline"]:
         names = summary["not_in_baseline"]
         shown = ", ".join(names[:5]) + (f" (+{len(names) - 5})" if len(names) > 5 else "")
@@ -529,7 +576,12 @@ def _short_value(value: Any, quote: bool = False) -> str:
 
 def _diff_lines(entry: Mapping[str, Any], limit: int) -> list[str]:
     r = entry["response"]
-    lines = []
+    lines = [
+        f"budget {b['rule']}: {b['observed']} (limit {b['limit']})"
+        + (f" — {b['reason']}" if b.get("reason") else "")
+        for b in entry.get("budgets", [])
+        if not b["passed"]
+    ]
     for d in r.get("diff") or []:
         if d["path"] == "$" and r.get("text_diff"):
             continue
@@ -721,7 +773,9 @@ class Report:
         for e in self.requests:
             r, srv = e["response"], e["server"]
             lines: list[str] = []
-            if r["verdict"] in ("changed", "broken"):
+            if r["verdict"] in ("changed", "broken") or any(
+                not b["passed"] for b in e.get("budgets", [])
+            ):
                 lines += [f"  {x}" for x in _diff_lines(e, 12)]
             if e["perf"].get("reason") == "broken":
                 lines.append(f"  {PERF_NOT_JUDGED}")
@@ -785,7 +839,9 @@ class Report:
                 body.append(f"broken: {r['reason']}")
             if e["perf"].get("reason") == "broken":
                 body.append(PERF_NOT_JUDGED)
-            if r["verdict"] in ("changed", "broken"):
+            if r["verdict"] in ("changed", "broken") or any(
+                not b["passed"] for b in e.get("budgets", [])
+            ):
                 body += _diff_lines(e, 60)
             for issue in srv.get("new_issues") or []:
                 body.append(f"new issue: {issue.get('kind')} – {issue.get('title') or ''}")
@@ -844,6 +900,8 @@ class Report:
                     reasons.append(f"perf {p['verdict']} ({why}, {_fmt_pct(p['change_pct'])})")
                 if r["verdict"] in hits:
                     reasons.append(f"response {r['verdict']} ({r.get('reason') or ''})")
+                if "budget" in hits:
+                    reasons.append("endpoint budget failed")
                 failure = ET.SubElement(
                     tc, "failure", message="; ".join(reasons), type=",".join(hits)
                 )

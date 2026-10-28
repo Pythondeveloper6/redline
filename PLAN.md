@@ -151,3 +151,27 @@ Scope agreed with the owner on 2026-10-27: every analysis/UX feature from the fo
 | 1 | UI Checks pages against the §19.5 API with mocks (§19.6) | sonnet |
 | 2 | Docs page, CLI reference, examples' suites, CHANGELOG; browser E2E on the examples | sonnet |
 | later | `redline analyze`: static analysis of Python code for DB/logic bottlenecks (roadmap) | – |
+
+
+## v0.3 selected expansion
+
+Selection: F01, F02, F04–F07, F09–F13, F15, F17–F22 and P01–P14 from FEATURE_CANDIDATES.md. F03, F08, F14 and F16 are deferred to the next release. Existing P01/P07 behavior is extended only where a documented gap exists. No version bump, merge, tag or publication is implied.
+
+Every selected feature must have a UI workflow or an inspectable report with a reproducible example. CLI and UI must use the same validation and engines. Developer integrations expose configuration and results in the UI; they do not execute arbitrary test commands from the browser.
+
+| Stage | Work | UI acceptance | Status |
+|---|---|---|---|
+| A | F02/F04/F05: endpoint budgets, keyed arrays, numeric tolerances | Suite builder edits rules; saved rules survive reload/export; reports show violations and applied comparison rules | Implemented; API and helper checks passed |
+| B | F01/F06/F07: pytest, baseline compatibility, suite coverage | Inspect policies, environment warnings and route/input coverage | Implemented; integration checks passed |
+| C | F09–F13/F15 and runtime P03/P04/P05/P13 | Findings with evidence, configurable thresholds and deliberate demo cases | Implemented; deterministic findings and demo checks passed |
+| D | Static P01/P02/P06/P11/P12/P14 and P10 profiler evidence | Analyze source through a bounded local workflow; browse findings and source locations | Implemented; bounded source checks passed |
+| E | Database P08/P09/P10 | On-demand checks, catalog/plan evidence and explicit uncertainty | Implemented; catalog/plan checks passed on supported shapes |
+| F | F17–F22: impact, evidence, suppressions, health, time breakdown, fix verification | End-to-end issue-to-check workflow and persistent scoped suppressions | Implemented; API/helper checks passed |
+| G | Integration | Four framework demos, UI interactions, responsive/accessibility review, all package/lint/docs/build/version checks | Available checks passed; socket tests and visual review blocked |
+
+No stage is complete until its backend, UI, tests and documentation are integrated. Timing-dependent tests must use deterministic data or bounded polling.
+
+
+Validation details and feature-to-UI mapping are in IMPLEMENTATION_STATUS.md. No current CI success, merge, tag or publication is claimed. Browser
+visual/accessibility review is pending because UI automation timed out; 21 existing server
+setup tests cannot bind sockets in the current environment.

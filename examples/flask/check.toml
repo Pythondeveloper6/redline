@@ -39,3 +39,12 @@ path = "/slow"
 name = "status (volatile fields)"
 method = "GET"
 path = "/status"
+
+
+[[requests]]
+name = "performance patterns and response rules"
+method = "GET"
+path = "/patterns"
+array_keys = { items = "id" }
+tolerances = { total = { absolute = 0.01 } }
+budgets = { max_queries = 4, forbidden_issues = [] }

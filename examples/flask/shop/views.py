@@ -8,7 +8,7 @@ import uuid
 
 import httpx
 from flask import Blueprint, current_app, render_template, request
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import selectinload
 
 from .db import Session
@@ -25,6 +25,7 @@ REFACTOR = os.environ.get("SHOP_REFACTOR") == "1"
 def index() -> dict:
     return {
         "try": [
+            "/patterns  (aggregation, deep pagination, ORM instances; check-suite rules)",
             "/orders  (N+1 on order items)",
             "/orders/customers  (N+1 on customers, many-to-one)",
             "/orders/tags  (lazy-loaded many-to-many tags)",
@@ -170,3 +171,40 @@ def checkout() -> dict:
     """Send a body with secrets to see Redline redact them."""
     payload = request.get_json(force=True)
     return {"ok": True, "email": payload.get("email")}
+
+
+@bp.get("/patterns")
+def patterns() -> dict:
+    """Aggregates, deep pagination and ORM hydration; refactor mode fixes the extra work."""
+    with Session() as db:
+        if REFACTOR:
+            count, total = db.execute(
+                select(func.count(Product.id), func.sum(Product.price)).where(Product.price >= 0)
+            ).one()
+            rows = db.execute(
+                select(Product.id, Product.name, Product.price).order_by(Product.id).limit(30)
+            ).all()
+        else:
+            count = db.scalar(select(func.count(Product.id)).where(Product.price >= 0))
+            total = db.scalar(select(func.sum(Product.price)).where(Product.price >= 0))
+            db.execute(select(Product.id).order_by(Product.id).limit(5).offset(10000)).all()
+            rows = db.scalars(select(Product).order_by(Product.id).limit(30)).all()
+        items = [{"id": row.id, "name": row.name, "price": float(row.price)} for row in rows]
+        if REFACTOR:
+            items.reverse()
+        return {
+            "items": items,
+            "count": count,
+            "total": float(total or 0) + (0.005 if REFACTOR else 0),
+        }
+
+
+@bp.post("/patterns/writes")
+def pattern_writes() -> dict:
+    """Execute six individual writes, then roll them all back. No changes are committed."""
+    with Session() as db:
+        ids = db.scalars(select(Product.id).order_by(Product.id).limit(6)).all()
+        for ident in ids:
+            db.execute(update(Product).where(Product.id == ident).values(price=Product.price))
+        db.rollback()
+    return {"writes": len(ids), "rolled_back": True}

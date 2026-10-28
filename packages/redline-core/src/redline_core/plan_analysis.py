@@ -424,6 +424,23 @@ def analyze_postgres(plan: Any, sql: str = "", params: Any = None) -> Analysis:
     def check(p: dict[str, Any], node: PlanNode) -> None:
         ntype = p.get("Node Type", "")
         rel = p.get("Relation Name")
+        removed_actual = _num(p.get("Rows Removed by Filter"))
+        returned_actual = _num(p.get("Actual Rows"))
+        if (
+            removed_actual is not None
+            and returned_actual is not None
+            and removed_actual >= LARGE_TABLE_ROWS
+            and removed_actual > 9 * max(returned_actual, 1)
+        ):
+            col.finding(
+                node,
+                "rows_filtered_out",
+                "warning",
+                "Most scanned rows were filtered out",
+                f"Per loop, {removed_actual:,.0f} rows removed; {returned_actual:,.0f} returned. "
+                "Review predicate selectivity and available indexes. "
+                "This does not prove an alternative index is faster.",
+            )
         if ntype == "Seq Scan" and rel:
             plan_rows = _num(p.get("Plan Rows")) or 0.0
             actual_rows = (_num(p.get("Actual Rows")) or 0.0) * (_num(p.get("Actual Loops")) or 1.0)

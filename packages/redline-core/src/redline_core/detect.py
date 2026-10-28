@@ -218,6 +218,8 @@ class Detector:
         issues.extend(self._run_registry(trace))
         by_id = {s.id: s for s in trace.spans}
         for issue in issues:
+            issue.extra.setdefault("rule_kind", issue.kind)
+            issue.extra.setdefault("trace_spans_complete", not bool(trace.truncated))
             spans = [by_id[i] for i in issue.span_ids if i in by_id]
             if not spans and issue.id in samples:
                 spans = [samples[issue.id]]

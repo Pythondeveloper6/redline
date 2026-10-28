@@ -26,6 +26,7 @@ from __future__ import annotations
 import hashlib
 import re
 from functools import lru_cache
+from typing import Any
 
 __all__ = [
     "KEYWORDS",
@@ -347,3 +348,49 @@ def select_columns(sql: str) -> list[tuple[str | None, str]]:
         parts = _split_qualified(ref) + (["*"] if ref.endswith("*") else [])
         out.append((parts[-2] if len(parts) > 1 else None, parts[-1]))
     return out
+
+
+def structural_sql(sql: str) -> str:
+    """SQL with literals and comments masked; numeric literals remain for pagination."""
+
+    def replace(match: re.Match[str]) -> str:
+        if match.lastgroup in ("lcomment", "bcomment", "dollar", "string"):
+            return " "
+        return match.group()
+
+    return _TOKEN.sub(replace, sql)
+
+
+def offset_value(sql: str, params: Any = None) -> int | None:
+    """A terminal OFFSET literal or an observed integer bind; never guesses redacted binds."""
+    if statement_kind(sql) != "SELECT":
+        return None
+    tokens = list(_TOKEN.finditer(sql))
+    positional = 0
+    for index, token in enumerate(tokens):
+        if token.lastgroup in {"qmark", "pyformat"}:
+            positional += 1
+        if token.lastgroup != "word" or token.group().upper() != "OFFSET":
+            continue
+        if index + 1 >= len(tokens):
+            continue
+        value_token = tokens[index + 1]
+        if sql[token.end() : value_token.start()].strip():
+            continue
+        if structural_sql(sql[value_token.end() :]).strip().strip(";").strip():
+            continue
+        value = None
+        kind, text = value_token.lastgroup, value_token.group()
+        if kind == "number" and text.isdigit() and len(text) <= 20:
+            value = int(text)
+        elif kind in {"qmark", "pyformat"} and isinstance(params, (list, tuple)):
+            value = params[positional] if positional < len(params) else None
+        elif kind == "numbered" and len(text) <= 20 and isinstance(params, (list, tuple)):
+            position = int(text[1:]) - 1
+            value = params[position] if 0 <= position < len(params) else None
+        elif kind in {"named", "pyformat"} and isinstance(params, dict):
+            key = text[1:] if kind == "named" else text[2:-2]
+            value = params.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            return value
+    return None

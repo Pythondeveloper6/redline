@@ -1,3 +1,4 @@
+import { suiteToToml } from '../lib/suiteToml'
 // Dev-only mocks for the refactor check (CONTRACT §19). Returns null for foreign paths.
 import type {
   BaselineRequest, CheckReport, CheckRunDetail, CheckRunItem, CheckSuite, CheckSuiteDoc, CheckSummary, PerfStats, ReportRequest,
@@ -252,17 +253,7 @@ const detail = (s: Stored): CheckRunDetail => ({
 })
 
 function toml(d: CheckSuiteDoc): string {
-  const s = d.suite
-  const lines = [`name = ${JSON.stringify(s.name)}`]
-  if (s.base_url) lines.push(`base_url = ${JSON.stringify(s.base_url)}`)
-  if (s.headers && Object.keys(s.headers).length) lines.push(`headers = { ${Object.entries(s.headers).map(([k, v]) => `${k} = ${JSON.stringify(v)}`).join(', ')} }`)
-  lines.push(`timeout_s = ${s.timeout_s ?? 10}`, `repeat = ${s.repeat ?? 20}`, `warmup = ${s.warmup ?? 3}`, '', '[thresholds]')
-  lines.push(`slower_pct = ${s.thresholds?.slower_pct ?? 10}`, `slower_ms = ${s.thresholds?.slower_ms ?? 2}`, `max_query_increase = ${s.thresholds?.max_query_increase ?? 0}`)
-  for (const r of s.requests) {
-    lines.push('', '[[requests]]', `name = ${JSON.stringify(r.name)}`, `method = ${JSON.stringify(r.method)}`, `path = ${JSON.stringify(r.path)}`,
-      `perf = ${r.perf !== false}`, `response = ${r.response !== false}`, `ignore = ${JSON.stringify(r.ignore ?? [])}`)
-  }
-  return lines.join('\n') + '\n'
+  return suiteToToml(d.suite)
 }
 
 let seq = 100
