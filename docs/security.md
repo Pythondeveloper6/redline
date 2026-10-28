@@ -223,8 +223,8 @@ the request itself carries valid Redline credentials (a login cookie, a Bearer t
 Basic credentials, a client the `local` policy lets in, or `access_check`); anyone else
 could make you profile and store their requests at will. With `access = "framework"` (a
 hook that only runs inside Redline's own routes) only debug mode honours them. The
-`production` preset turns profiling off. `X-Redline-Run` (the load tester's header) tags a
-trace only when that run exists in the store and is running.
+`production` preset turns profiling off. `X-Redline-Run` (the load tester's header) and `X-Redline-Check` (the refactor check's) tag a
+trace only when that run exists in the store and is running (a check also for a minute after it ends).
 
 ### DNS rebinding
 
@@ -295,6 +295,38 @@ The `redline load` command line is a different matter: it runs on the machine yo
 on, against the URL you give it, with the rights you have there. Point it only at systems you
 own or are authorised to test.
 
+### Refactor checks
+
+Starting a [refactor check](refactor-check.md) from the UI is opt-in too: `checks_from_ui`
+defaults to `"auto"`, which means **debug mode only**, and the `production` preset sets it to
+`false` (`403 checks_from_ui_disabled`). It is also refused under `read_only` and when the
+`checks` feature is off. A check is sequential `GET`, `HEAD` and `OPTIONS` requests: a suite
+containing any other method is rejected when it is loaded, saved or started. Runs started
+from the UI are limited to 200 requests, 5 000 calls and 15 minutes, and aim at the
+`base_url` setting or the server's own listening port, never at the `Host` header.
+
+What the feature stores, and what it does not:
+
+- **`${env:NAME}` placeholders are never expanded in anything stored.** A suite keeps the
+  placeholder. The value is read from the environment of the process that runs the check. For a
+  run started from the UI, the headers are handed to the background process in a file with mode
+  `0600` that is deleted when the run ends.
+- **Secret header values are masked** (`[redacted]`) in stored suites, in `api/checks` responses
+  and in exported TOML, unless they are only a placeholder (optionally after a scheme such as
+  `Bearer ${env:API_TOKEN}`). Saving a suite with `[redacted]` back keeps the stored value.
+- **Baselines are redacted.** Response headers and bodies go through the redactor before they
+  are written (JSON keys at any depth, text through the text redactor), and again when a
+  baseline is imported through the API, along with suite headers, URLs and request paths. The
+  same redaction is applied to both sides of a comparison, so a masked secret never shows as a
+  difference. A baseline is still a copy of your responses: keep it as private as a trace.
+- **The check tag cannot force storage.** Every check call carries `X-Redline-Check: <run
+  id>;req=<i>;n=<k>`. Redline honours the tag only when `<run id>` belongs to a check run that
+  exists in the store and is running (or ended less than a minute ago). The ids are random
+  128-bit values known only to Redline users. For any other request carrying the header, the
+  `check_*` tags are removed and its normal sampling decision stands; a request that sampling
+  would have dropped and that was only provisionally kept for the tag is dropped entirely.
+  Profiling is never started by the tag.
+
 ### If you must expose it
 
 In order of preference:
@@ -358,6 +390,7 @@ repository, and pin a tag or a commit in your lock file.
 | Anonymous internet user | Read traces | Django: login and superuser check. Others: `404` until `access` is set (outside debug mode), the loopback policy, a token or your own hook. **Not stopped** if you expose it open |
 | Anonymous internet user | Force profiling and storage of their requests | `X-Redline-Profile` / `?_redline=profile` honoured only in debug mode or with Redline credentials; `production` turns profiling off |
 | Logged-in non-admin user | Read other users' request data | `PERMISSION`, `dependencies`, `permission`, `guards` or a token |
+| A client that sends a made-up `X-Redline-Check` header | Make Redline store its requests, or tag them as part of a check | The tag is honoured only for a check run that exists in the store and is running; otherwise it is stripped, and a request that was only kept for the tag is dropped |
 | A logged-in user who may start load runs | Make the server hit someone else (or another local service), or overload it | Paths only (no host); the target is the server's own listening port, never the `Host` header; `load_from_ui` off by default, `read_only`, the `load` switch |
 | Someone who guesses or sniffs a token | Read everything | A long random token, HTTPS, login rate limit, constant-time comparison. Use a VPN as well |
 | A malicious website the admin visits | Delete traces, trigger EXPLAIN | CSRF protections; `X-Frame-Options: DENY` |

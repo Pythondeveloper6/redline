@@ -115,7 +115,7 @@ def build_router(redline: Any, dependencies: Sequence[Any]) -> APIRouter:
 
     @router.api_route(
         "/api/{path:path}",
-        methods=["GET", "POST", "DELETE", "PUT", "PATCH"],  # the core answers 405 for the last two
+        methods=["GET", "POST", "DELETE", "PUT", "PATCH"],  # the core answers 405 to PATCH
     )
     async def api(request: Request, path: str) -> Response:
         redline.loop = asyncio.get_running_loop()
@@ -135,7 +135,7 @@ def build_router(redline: Any, dependencies: Sequence[Any]) -> APIRouter:
                 params[key] = [*prev, value] if isinstance(prev, list) else [prev, value]
             else:
                 params[key] = value
-        body = await request.body() if request.method == "POST" else None
+        body = await request.body() if request.method in ("POST", "PUT") else None
         # the server's own listening port, never the Host header (CONTRACT.md §18)
         scope = request.scope
         base_url = own_base_url(

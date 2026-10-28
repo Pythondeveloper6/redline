@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from collections.abc import Sequence
 from functools import partial
 from pathlib import Path
@@ -16,13 +17,19 @@ from litestar.exceptions import HTTPException
 from litestar.response import Redirect, Stream
 
 from redline_core import stream, ui
-from redline_core.api import RawResponse, own_base_url
+from redline_core.api import MAX_API_BODY, RawResponse, own_base_url
 from redline_core.storage import FilterError
 
 from ._security import RedlineHTTPError, request_info
 
 __all__ = ["build_router", "error_response"]
 
+# ``request_max_body_size`` exists from Litestar 2.13 on (older versions have no limit).
+_BODY_LIMIT: dict[str, Any] = (
+    {"request_max_body_size": MAX_API_BODY}
+    if "request_max_body_size" in inspect.signature(route).parameters
+    else {}
+)
 _NO_STORE = {"Cache-Control": "no-store"}
 _IMMUTABLE = {"Cache-Control": "public, max-age=31536000, immutable"}
 _SECURITY = {
@@ -141,9 +148,12 @@ def build_router(plugin: Any, path: str, guards: Sequence[Any]) -> Router:
 
     @route(
         "/api/{rest:path}",
-        http_method=["GET", "POST", "DELETE", "PUT", "PATCH"],  # core answers 405 to the last two
+        http_method=["GET", "POST", "DELETE", "PUT", "PATCH"],  # core answers 405 to PATCH
         status_code=200,
         include_in_schema=False,
+        # imported check baselines may be up to 10 MiB (the core enforces it); Litestar's
+        # default limit (since 2.13) is 10 MB
+        **_BODY_LIMIT,
     )
     async def api(request: Request[Any, Any, Any]) -> Response[Any]:
         plugin.loop = asyncio.get_running_loop()
@@ -158,7 +168,7 @@ def build_router(plugin: Any, path: str, guards: Sequence[Any]) -> Router:
                     headers={**_NO_STORE, **_SECURITY, **decision.headers},
                 )
         params = _params(request)
-        body = await request.body() if request.method == "POST" else None
+        body = await request.body() if request.method in ("POST", "PUT") else None
         status, payload = await sync_to_thread(
             partial(
                 plugin.api.dispatch,

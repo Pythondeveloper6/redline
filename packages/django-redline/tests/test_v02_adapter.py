@@ -294,3 +294,51 @@ def test_iter_routes_regex_patterns():
 
     routes = list(iter_routes([re_path(r"^plain/$", view), re_path(r"^item/(?P<pk>\d+)/$", view)]))
     assert routes == [("GET", "/plain/$", "/plain/"), ("GET", "/item/(?P<pk>\\d+)/$", None)]
+
+
+# ---------------------------------------------------------------------------- checks
+CHECK_SUITE = {"repeat": 1, "warmup": 0, "requests": [{"name": "home", "path": "/plain/"}]}
+
+
+def _send(client, method, path, body):
+    client.get("/redline/")
+    token = client.cookies["csrftoken"].value
+    return getattr(client, method)(
+        path, data=json.dumps(body), content_type="application/json", HTTP_X_CSRFTOKEN=token
+    )
+
+
+def test_checks_suites_and_runs(client, staff, tmp_path, monkeypatch):
+    from redline_core.check import control as check_control
+
+    seen = {}
+
+    def fake_launch(suite, base_url, store_path, **kw):
+        seen.update(base_url=base_url, store_path=store_path, **kw)
+        return kw["run_id"]
+
+    monkeypatch.setattr(check_control, "launch_check", fake_launch)
+    client.force_login(staff)
+    with _redline(STORAGE_PATH=str(tmp_path / "r.db"), ALLOWED_HOSTS=["testserver"]):
+        r = _send(client, "post", "/redline/api/checks/suites", {"name": "s", "suite": CHECK_SUITE})
+        assert r.status_code == 201, r.content
+        sid = r.json()["id"]
+        r = _send(
+            client, "put", f"/redline/api/checks/suites/{sid}", {"name": "s2", "suite": CHECK_SUITE}
+        )
+        assert r.status_code == 200 and r.json()["name"] == "s2"
+        body = {"suite_id": sid, "kind": "baseline"}
+        r = _send(client, "post", "/redline/api/checks/runs", body)  # DEBUG off: "auto" refuses
+        assert r.status_code == 403 and r.json()["error"]["code"] == "checks_from_ui_disabled"
+        with override_settings(DEBUG=True):
+            r = _send(client, "post", "/redline/api/checks/runs", body)
+        assert r.status_code == 202, r.content
+        assert seen["base_url"] == "http://127.0.0.1:80"
+        run = client.get(f"/redline/api/checks/runs/{r.json()['id']}").json()
+        assert run["status"] == "running"
+        # bodies over DATA_UPLOAD_MAX_MEMORY_SIZE still reach the import endpoint
+        big = {"format": "redline-check-baseline", "version": 1, "requests": [],
+               "suite": {"name": "s", **CHECK_SUITE}, "created_at": 1767000000.0,
+               "pad": "x" * (3 * 1024 * 1024)}  # fmt: skip
+        r = _send(client, "post", "/redline/api/checks/baselines/import", big)
+        assert r.status_code == 201, r.content

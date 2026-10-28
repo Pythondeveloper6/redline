@@ -8,6 +8,85 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). While the
 version is below `1.0` the public API may change between minor versions.
 
+## Unreleased: 0.3.0a1
+
+The refactor check: prove a refactor is safe and measure what it gained. A 0.2 store is
+migrated in place to schema version 4 when 0.3 first opens it.
+
+### Added
+
+- Performance workflow UI: endpoint budgets, keyed JSON arrays, numeric tolerances,
+  environment labels and observed target runtime warnings, suite coverage, source analysis,
+  recording health, scoped suppressions and issue-to-check verification.
+- Deterministic findings for repeated writes/aggregate scans, deep OFFSET pagination,
+  cumulative round trips, pool waits, response/cache size, ORM instance construction and
+  explicitly measured cache decoding; sampled JSON decode hotspots and on-demand catalog
+  checks for wide columns, covering indexes and matching generated JSON expressions.
+- `redline analyze` and a pytest plugin, with query/outbound-call/issue assertions, explicit
+  no-query blocks and UI-inspectable test traces. See Performance workflows in the docs.
+- Real `/patterns` demo endpoints and clearly marked synthetic detector examples for UI
+  exploration; synthetic timings are not treated as measured application traffic.
+
+- **Refactor check** (`redline_core.check`). A suite of read-only requests (TOML or JSON, or
+  built in the UI) is replayed against the old code to make a **baseline** and against the new
+  code to make a **comparison**. Per endpoint: a response verdict (`same`, `changed`, `broken`,
+  with a JSON path or unified text diff that skips fields that change on every call) and a
+  performance verdict (`faster`, `slower`, `same`, `noisy`; Mann-Whitney U test at p < 0.01 plus
+  percentage and millisecond thresholds, interleaved requests, warmup, and a query-count rule).
+  Server-side query counts, SQL and new or fixed issues come from the app's own traces. See
+  [Refactor check](refactor-check.md).
+- **CLI**: `redline check record`, `compare`, `run`, `init --from-traces` and `show`; `--json`,
+  `--markdown` and `--junit` outputs; `--fail-on` (`slower`, `changed`, `broken`, `noisy`,
+  `faster`, `none`); exit codes `0`, `1`, `2`, `3` (app unreachable) and `130`.
+- **HTTP API**: `api/checks/suites` (list, create, get, update, delete, TOML export, draft from
+  seen traffic), `api/checks/runs` (start, list, get, stop, delete) and
+  `api/checks/baselines/import`. New error codes `invalid_suite`, `invalid_baseline`,
+  `checks_from_ui_disabled`, `suite_not_found`, `check_run_not_found`, `payload_too_large`;
+  `run_active` also covers check runs.
+- **UI**: Checks pages (suites, builder, suite, report with latency, response diff, new and fixed
+  SQL and issues, live progress, copy as Markdown).
+- **Settings**: `checks_from_ui` (`"auto"` by default: debug mode only) and the `checks`
+  feature switch.
+- **Storage**: schema version 4 with `check_suites`, `check_runs` and `check_results`; the 50
+  newest runs per suite are kept.
+- The `X-Redline-Check` request header tags traces with `check_run_id`, `check_req` and
+  `check_n`.
+
+### Changed
+
+- Refactor check: a request whose response is `broken` is no longer judged for perf (verdict
+  `n/a`, reason `broken`, "perf not judged: response broken"); its fixed issues, gone SQL and
+  query decrease are not reported as wins and it is left out of the overall speed and the
+  query totals.
+- Refactor check: requests that the baseline does not have get the response verdict `missing`,
+  which fails by default (`--fail-on` now defaults to `slower,changed,broken,missing`) and adds
+  a warning and `summary.missing` to the report. A baseline that has none of the suite's
+  requests is an error (exit 2; in the UI the run fails with the same message).
+- `redline check init` writes `base_url` only when `--base-url` is given or the traces show a
+  single host; otherwise a commented `# base_url = ...` line.
+- UI: a stopped run shows its partial results labelled "partial: stopped after N of M calls", or
+  "No results were kept", never both. The suite page can import a baseline file (up to
+  10 MiB), which then appears in the baseline picker.
+- The `production` preset sets `checks_from_ui = false`.
+- The Django, FastAPI, Flask and Litestar adapters pass `PUT` bodies to the API and accept
+  request bodies up to 11 MiB on `api/` routes (Django reads past
+  `DATA_UPLOAD_MAX_MEMORY_SIZE` after the access check; Litestar 2.13 or later gets
+  `request_max_body_size`), so a large baseline can be imported.
+- Tagged check traffic is kept when sampling would have dropped it, but only for a check run
+  that is known to the store.
+
+### Security
+
+- Starting a check from the UI is opt-in (`checks_from_ui`), refused in `read_only` mode and
+  when the `checks` feature is off. Suites accept only `GET`, `HEAD` and `OPTIONS`, and paths
+  only (no absolute URLs); UI runs are capped at 200 requests, 5 000 calls and 15 minutes.
+- `${env:NAME}` placeholders in suite headers are never expanded in anything stored or exported;
+  secret header values are masked in stored suites and API responses; baselines are redacted on
+  write and on import.
+- The `X-Redline-Check` tag cannot force storage: it is honoured only for a run that exists in
+  the store and is running (or ended less than a minute ago); otherwise its `check_*` tags are
+  stripped, and a request that sampling kept only because of the tag is dropped.
+
 ## 0.2.0a1 (2026-10-27)
 
 Frameworks, analysis, load testing and history. Everything in 0.1 keeps working: a 0.1

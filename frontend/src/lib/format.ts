@@ -50,7 +50,18 @@ export const ISSUE_LABEL: Record<string, string> = {
   blocking_in_async: 'Blocking in async', large_result: 'Large result', unbounded_query: 'Unbounded query',
   inefficient_count: 'Inefficient count', slow_serializer: 'Slow serializer', long_transaction: 'Long transaction',
   external_in_transaction: 'HTTP in transaction', slow_external: 'Slow external call', duplicate_external: 'Duplicate external call',
+  slow_cache_decode: 'Slow cache decode',
+  json_decode_hotspot: 'JSON decoding hotspot',
+  many_orm_instances: 'Many ORM instances',
   retry_storm: 'Retry storm',
+  repeated_writes: 'Repeated writes',
+  deep_offset: 'Deep offset',
+  database_round_trips: 'Database round trips',
+  connection_pool_wait: 'Connection pool wait',
+  large_response: 'Large response',
+  repeated_scan: 'Repeated scan',
+  large_cache_entry: 'Large cache entry',
+
 }
 /** Icon path (24x24 stroke icon) and tone per issue kind. */
 export const ISSUE_STYLE: Record<string, { tone: 'bad' | 'warn' | 'info'; d: string }> = {

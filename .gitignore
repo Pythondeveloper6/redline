@@ -19,3 +19,4 @@ frontend/screenshots/
 
 # agent worktrees
 .claude/
+*.baseline.json

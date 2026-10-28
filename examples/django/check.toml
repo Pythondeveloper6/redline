@@ -1,0 +1,55 @@
+# Refactor-check suite for the Django demo shop. See "Try the refactor check" in README.md.
+name = "django shop"
+base_url = "http://127.0.0.1:8000"
+timeout_s = 10
+repeat = 10
+warmup = 2
+
+[thresholds]
+slower_pct = 10
+slower_ms = 2
+max_query_increase = 0
+
+[[requests]]
+name = "list orders (N+1)"
+method = "GET"
+path = "/orders/"
+
+[[requests]]
+name = "dashboard"
+method = "GET"
+path = "/dashboard/"
+
+[[requests]]
+name = "products API"
+method = "GET"
+path = "/api/products/"
+
+[[requests]]
+name = "async summary"
+method = "GET"
+path = "/async/summary/"
+
+[[requests]]
+name = "slow view"
+method = "GET"
+path = "/slow/"
+
+[[requests]]
+name = "cached top products"
+method = "GET"
+path = "/cached/"
+
+[[requests]]
+name = "status (volatile fields)"
+method = "GET"
+path = "/status/"
+
+
+[[requests]]
+name = "performance patterns and response rules"
+method = "GET"
+path = "/patterns/"
+array_keys = { items = "id" }
+tolerances = { total = { absolute = 0.01 } }
+budgets = { max_queries = 4, forbidden_issues = [] }

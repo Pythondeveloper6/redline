@@ -9,10 +9,15 @@ import Issues from './pages/Issues'
 import Compare from './pages/Compare'
 import History from './pages/History'
 import Load from './pages/Load'
+import Checks from './pages/Checks'
+import CheckBuilder from './pages/CheckBuilder'
+import CheckSuite from './pages/CheckSuite'
+import CheckRun from './pages/CheckRun'
 import Database from './pages/Database'
 import Cache from './pages/Cache'
 import External from './pages/External'
 import Settings from './pages/Settings'
+import Analysis from './pages/Analysis'
 import Login from './pages/Login'
 import SnapshotApp from './SnapshotApp'
 import { getSnapshot } from './lib/snapshot'
@@ -33,10 +38,16 @@ export default function App() {
         <Route path="/database" element={<Database />} />
         <Route path="/cache" element={<Cache />} />
         <Route path="/external" element={<External />} />
+        <Route path="/analysis" element={<Analysis />} />
         <Route path="/settings" element={<Settings />} />
         <Route path="/history" element={<History />} />
         <Route path="/load" element={<Load />} />
         <Route path="/load/:id" element={<Load />} />
+        <Route path="/checks" element={<Checks />} />
+        <Route path="/checks/new" element={<CheckBuilder />} />
+        <Route path="/checks/suites/:id" element={<CheckSuite />} />
+        <Route path="/checks/suites/:id/edit" element={<CheckBuilder />} />
+        <Route path="/checks/runs/:id" element={<CheckRun />} />
         <Route path="*" element={<Navigate to="/requests" replace />} />
       </Route>
     </Routes>

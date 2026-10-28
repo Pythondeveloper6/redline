@@ -235,6 +235,11 @@ and log a warning.
   in separate processes, corrected for coordinated omission, that finds the **knee** and
   shows which query or endpoint got slower at which step. `--fail-p95-ms` makes it a CI
   gate.
+- **Refactor check.** `redline check record` before a refactor, `redline check compare`
+  after: the same read-only requests replayed against both versions, a per-endpoint verdict on
+  response changes (a diff that ignores fields that change on every call) and on speed (a
+  significance test, plus queries and new or fixed N+1), and an exit code, JUnit and a
+  Markdown PR comment for CI. Also in the UI under Checks.
 - **History.** Hourly rollups kept for 90 days, stamped with your release. Compare two
   releases: a verdict per endpoint, and the issues that are new or resolved.
 - **Flamegraphs.** Add `?_redline=profile` to a request; pyinstrument profiles it,
@@ -296,6 +301,19 @@ and log a warning.
     </td>
   </tr>
 </table>
+
+## Refactor check in a minute
+
+```bash
+redline check init --from-traces -o checks/orders.toml    # read-only endpoints Redline has seen
+redline check record checks/orders.toml --label before     # on the old code
+# ... refactor, restart the app ...
+redline check compare checks/orders.toml --markdown report.md --junit report.xml
+```
+
+It prints a verdict per endpoint (faster, slower, same, noisy; response same, changed,
+broken) and exits `1` when anything is slower, changed or broken.
+[Details](https://pythondeveloper6.github.io/redline/refactor-check/).
 
 ## Load testing in a minute
 

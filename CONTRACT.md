@@ -440,7 +440,7 @@ Concrete decisions (v0.2 implementation):
   `SqlStats`, `CacheStats`, `ExternalStats`, `History`, `ReleaseInfo`, `PeriodStats`, `PeriodComparison`,
   `IssueIndexEntry`, `Bottlenecks`; `Period = ("release", name) | ("range", start, end)` and
   `parse_period("release:<name>" | "range:<start>-<end>")` (raises `FilterError`).
-- **Schema.** `meta.schema_version` = 3. A v0.1/v0.2-early file is migrated in place on connect inside one
+- **Schema.** `meta.schema_version` = 3 (4 since v0.3: the refactor-check tables, §19.5a). A v0.1/v0.2-early file is migrated in place on connect inside one
   `BEGIN IMMEDIATE` (re-checked inside, so concurrent workers migrate once): the new tables are created and
   **backfilled from the stored traces**. Version 3 adds `traces.saved_seq INTEGER` (indexed; backfilled from
   rowid order) and the `meta.last_seq` counter: the writer reserves `seq` numbers inside its write transaction,
@@ -521,6 +521,8 @@ Concrete decisions (v0.2 implementation):
 | `POST api/runs` / `POST api/runs/{id}/stop` / `DELETE api/runs/{id}` | start (403 `load_disabled` unless `load_from_ui`; the target is always the app's own base URL, given by the adapter) / stop / delete |
 
 New error codes: 400 `invalid_period`, 403 `load_disabled`, 404 `run_not_found`, 409 `run_active`, 501 `not_supported`.
+v0.3 (refactor check, §19.5): 400 `invalid_suite`, 400 `invalid_baseline`, 403 `checks_from_ui_disabled`,
+404 `suite_not_found`, 404 `check_run_not_found`, 413 `payload_too_large` (`run_active` is reused for check runs).
 
 Concrete decisions (v0.2 implementation):
 
@@ -808,7 +810,8 @@ always an error.
 | basic_users | dict[user, hash] (secret) | {} | `basic`; hashes `pbkdf2_sha256$<iter>$<salt b64url>$<hash b64url>` (≥ 1000 iterations accepted, default 600 000) |
 | secret_key | str ≥ 16 \| None (secret) | None | signs login cookies; unset = random per-process key (single process only) |
 | read_only | bool | False | 403 `read_only` for every non-GET/HEAD/OPTIONS `api/` call except `api/explain`, `api/login`, `api/logout`; `POST api/explain` with `analyze` → 403 `read_only` (from the API) |
-| features | dict[str, bool] | all True | `explain`, `profile`, `replay`, `snapshot`, `load`, `logs`, `locals`, `sse` (unknown keys → error) |
+| features | dict[str, bool] | all True | `explain`, `profile`, `replay`, `snapshot`, `load`, `logs`, `locals`, `sse`, `checks` (unknown keys → error) |
+| checks_from_ui | "auto" \| bool | "auto" | start refactor-check runs from the UI (§19.5); `auto` = framework debug mode (the same flag as `server_timing="auto"`, read per request); `production` preset: False |
 | ui_enabled | bool | True | False: every Redline URL answers 404 (capture continues) |
 | mount_path | str \| None | None | FastAPI `prefix` / Flask `url_prefix` / Litestar `path` when that argument is not given (they now default to `None`); Django ignores it (the URLconf decides) |
 | session_ttl_s | int ≥ 1 | 43200 | login-cookie lifetime |
@@ -896,7 +899,7 @@ middleware `force_ok`, Django `DEBUG` or `may_force`), so an application request
 | `POST api/login` | body `{"token"}` (token) or `{"username", "password"}` (basic), ≤ 4 KiB → 200 `{"ok": true, "expires_at": epoch}` + `Set-Cookie`. 400 `invalid_json`/`invalid_body`, 401 `invalid_credentials`, 429 `too_many_requests`, 404 `not_found` for other policies, 405 for non-POST. Never redirects |
 | `POST api/logout` | 200 `{"ok": true}` + an expiring `Set-Cookie` (any policy) |
 | `GET api/config` | `{preset, file, settings: {name: value (secrets "***", callables as dotted names)}, sources: {name: source}, groups: {capture, sampling, detectors, storage, access, features, other: [names]}, warnings: [str]}` – warnings = config warnings + runtime notes of the gate |
-| `GET api/meta` | `features: {explain, profile, replay, snapshot, load, logs, locals, sse, load_from_ui}` (`load_from_ui` = setting and `load` and not `read_only`), `access: {policy, login: "token"\|"basic"\|null, read_only, preset}` |
+| `GET api/meta` | `features: {explain, profile, replay, snapshot, load, logs, locals, sse, checks, load_from_ui, checks_from_ui}` (`load_from_ui` = setting and `load` and not `read_only`; `checks_from_ui` = the setting resolved (auto → debug) and `checks` and not `read_only`), `access: {policy, login: "token"\|"basic"\|null, read_only, preset}` |
 
 (Contract change: login/logout answer 200 JSON instead of 204, so the UI's JSON client handles them uniformly.)
 
@@ -964,3 +967,361 @@ badge.js) sends `X-Redline-UI: 1`. Replay uses `credentials: "omit"` unless the 
 overwritten; a pre-existing directory's mode is never changed). The database is pre-created `0600` (SQLite gives
 `-wal`/`-shm` the database's mode) and an existing world-readable database, `-wal` or `-shm` is tightened to `0600`
 when opened. `runs/` is `0700`; scenario, log, pid and stop files are `0600`. No-op on Windows.
+
+## 19. Refactor check (`redline_core.check`, v0.3; extra `redline-core[load]` = httpx; CLI `redline check`)
+
+Purpose: prove a refactor is safe and show what it gained. Pick a set of **read-only** endpoints, record a
+**baseline** against the old code, run the same requests against the new code, and get a per-endpoint report
+of **performance** changes and **response** changes, plus an overall summary. Usable from the UI and the CLI;
+the CLI's exit code makes it a CI gate.
+
+**Non-goals (v0.3):** write endpoints (anything but `GET`/`HEAD`/`OPTIONS` is refused with a clear message),
+load/concurrency (that is `redline load`), comparing two *live* servers side by side, automatic code checkout.
+
+### 19.1 Suite (what to run)
+
+A suite is TOML (3.11+) or JSON, or stored in the Redline store when created in the UI (exportable to TOML):
+
+```toml
+name = "orders refactor"
+base_url = "http://127.0.0.1:8000"     # optional; CLI --base-url wins
+headers = { Authorization = "Bearer ${env:API_TOKEN}" }   # ${env:NAME} expanded at run time, never stored
+timeout_s = 10
+repeat = 20          # timed calls per request (perf); 1..1000
+warmup = 3           # untimed calls first; 0..100
+[thresholds]         # a request is "slower" only if BOTH hold and the change is significant (19.4)
+slower_pct = 10      # median slower by more than this %
+slower_ms = 2        # ... and by more than this many ms
+max_query_increase = 0   # more queries than baseline -> "slower" (queries) regardless of time
+
+[[requests]]
+name = "list orders"             # unique within the suite; default "<METHOD> <path>"
+method = "GET"                   # GET | HEAD | OPTIONS only
+path = "/orders?page=1"          # path + query, same origin as base_url (absolute URLs refused)
+headers = {}                     # merged over suite headers
+perf = true                      # default true
+response = true                  # default true
+ignore = ["data[*].created_at", "meta.request_id"]   # JSON paths excluded from the response diff
+ignore_headers = []              # response headers to compare: content-type always; add names here to drop
+expect_status = 200              # optional
+```
+
+- JSON path syntax (ignore rules and diff output): dotted keys, `[n]` indexes, `[*]` any index, `*` any key;
+  keys with dots or brackets are written `["a.b"]`.
+- Validation errors are reported with the suite file and request name; unknown keys are errors.
+- Suites are generated from what Redline has seen: `redline check init --from-traces [--store PATH]
+  [--route PATTERN ...] [--limit N]` writes a suite of the read-only endpoints (one concrete recorded path per
+  route, most recent; redacted header values are never copied; `${env:...}` placeholders are suggested for
+  `Authorization`/`Cookie` when the recorded request had them). The UI builder does the same (19.6).
+
+### 19.2 Runner
+
+- Sequential, single connection (httpx, keep-alive), no concurrency: the goal is a stable comparison, not
+  load. Per request: `warmup` untimed calls, then `repeat` timed calls. Requests are **interleaved round-robin**
+  across the suite (r1,r2,…,rN, r1,r2,…) so drift (CPU throttling, cache warm-up) spreads evenly.
+- Every call carries `X-Redline-Check: <check_run_id>;req=<index>;n=<call#>`. The store keeps these tags only
+  when that check run exists in it and is `running` or ended < 60 s ago (same rule and writer-thread cache as
+  `X-Redline-Run`, §13), so app-side traces of the check are tagged `check_run_id`, `check_req`, `check_n`.
+- Client-side per call: status, wall time (ms, `perf_counter`), response size, and for **two** of the timed calls
+  (first and last) the full response (status, content-type, headers subset, body ≤ 1 MiB; larger bodies are
+  compared by SHA-256 and size only).
+- Server-side per request (when the store is reachable – CLI `--store`, or always for UI runs): from the tagged
+  traces, median server duration, query count (median and max), query time, the set of SQL fingerprints with
+  counts, and the issues (kind + fingerprint/title) seen. If no tagged traces arrive (app not instrumented,
+  different store — check calls are kept even when sampling would drop them, see the keep rule in 19.5a),
+  server-side metrics are `null` and the report says so; client-side metrics still work.
+- Errors: connection errors/timeouts count as failed calls (status `null`); a request with ≥ 50 % failed calls
+  is `broken` in both baseline and compare.
+
+### 19.3 Baseline
+
+- `redline check record SUITE [--base-url URL] [--store PATH] [--out FILE] [--label TEXT]` runs the suite and
+  writes a baseline: JSON `{format: "redline-check-baseline", version: 1, suite (resolved, redacted like
+  §13 run configs — `${env:..}` stay as placeholders), label, git: {sha, branch, dirty} (best effort),
+  release, created_at, requests: [{name, method, path, perf: {samples_ms: [...], median, p95, mean, stdev,
+  failed}, server: {...19.2...}|null, response: {status, content_type, headers, body_kind: "json"|"text"|
+  "hash", body|sha256, size}, volatile: [paths]}]}`. Default `--out`: `<suite stem>.baseline.json` next to the
+  suite. Baseline bodies go through the redactor (`Redactor.body`/`text`) before writing.
+- **Volatile fields:** during `record`, the two captured responses of each request are diffed; every JSON path
+  that differs (and, for text bodies, every differing line) is recorded in `volatile` and excluded from later
+  comparisons, together with the user's `ignore` rules. The report lists them ("ignored: changes on every call").
+- Baselines are also stored (store table `check_runs`, `kind="baseline"`) when a store is available, so the UI can
+  compare against them.
+
+### 19.4 Compare and verdicts
+
+`redline check compare SUITE [--baseline FILE | --baseline-id ID] [--base-url URL] [--store PATH]
+[--json OUT] [--markdown OUT] [--junit OUT] [--fail-on slower,changed,broken,missing] [--slower-pct X] [--slower-ms Y]`
+runs the suite again and compares with the baseline. `redline check run SUITE` = record if no baseline file
+exists, else compare.
+
+Per request:
+- **Performance verdict** (`perf=true`): `faster` | `slower` | `same` | `noisy` | `n/a`.
+  - Change = after median vs before median (ms and %). Significance: two-sided Mann–Whitney U on the
+    timed samples, p < 0.01 (normal approximation with tie correction; pure Python). `slower` requires
+    significance AND both thresholds; `faster` requires significance AND the mirrored thresholds; otherwise
+    `same`. `noisy` when either side's coefficient of variation > 0.5 (advise more `repeat`).
+  - Query check (server-side available): `after.queries_median > before.queries_median + max_query_increase`
+    makes the verdict `slower` with reason `queries` even if time is `same`. New N+1/duplicate issues are listed
+    as `new_issues`; disappeared ones as `fixed_issues`.
+  - A request whose response is `broken` (including ≥ 50 % failed calls) is **not judged for perf**: the verdict
+    is `n/a` with `reason: "broken"` and `note: "perf not judged: response broken"`, the numbers stay in the
+    report, and `fixed_issues`, `gone_sql` and the query decrease are moved to `server.not_judged` (they are
+    not wins). Such a request is left out of the overall speed and the query totals.
+- **Response verdict** (`response=true`): `same` | `changed` | `broken` | `missing` | `n/a`.
+  - `missing`: the baseline has no request of that name. Perf is `n/a` (note "not in the baseline"). If **no**
+    request of the suite is in the baseline the compare is refused (`BaselineError`, exit 2, "baseline <label>
+    has none of this suite's requests — was it recorded from a different suite?"; in the UI the run fails with
+    that message).
+  - `broken`: status class changed to 4xx/5xx from 2xx/3xx, or `expect_status` not met, or ≥ 50 % failed calls.
+  - `changed`: status changed otherwise, content-type changed, or a body difference outside ignored/volatile
+    paths. JSON diff = list of `{path, kind: "added"|"removed"|"changed"|"type", before, after}` (values
+    truncated to 200 chars, at most 50 entries per request + a count); text diff = unified diff (≤ 200 lines).
+  - Arrays are compared index by index (no reordering heuristics in v0.3).
+- **Summary:** counts per verdict; **overall speed change** = geometric mean of after/before median ratios over
+  requests with `perf` and no failures, shown as a % (negative = faster), plus total query change; the biggest
+  wins and regressions (top 5 each).
+- **Exit code:** 0 if nothing matches `--fail-on` (default `slower,changed,broken,missing`), 1 otherwise, 2 for usage/
+  suite errors, 3 if the app could not be reached at all.
+- **Outputs:** terminal table (colour when a TTY), `--json` (full report, schema below), `--markdown` (PR
+  comment: summary line, table, collapsible diffs), `--junit` (one testcase per request; failures for verdicts in
+  `--fail-on`).
+- Report JSON: `{format: "redline-check-report", version: 1, suite, baseline: {id|file, label, git, created_at},
+  run: {id, git, created_at, base_url}, summary: {...}, requests: [{name, method, path, perf: {verdict, before,
+  after, change_ms, change_pct, p_value, reason}, server: {before, after, queries_change, new_issues,
+  fixed_issues, new_sql, gone_sql}, response: {verdict, status: [before, after], diff: [...], text_diff,
+  ignored: [...]}}]}`.
+
+### 19.4a Engine details (as implemented; additive to 19.1–19.4)
+
+- **Call numbering.** Warmup calls carry `n=0` (server metrics must skip them); timed calls `n=1…repeat`. A
+  request with `perf = false` only takes part in the first and last timed rounds (2 calls: enough for the
+  response and volatile fields).
+- **Report fields.** `perf.reason` ∈ `"time"` | `"queries"` | `"cv"` (= `noisy`) | `null`; free text goes to
+  `perf.note` (e.g. "not in the baseline", "≥ 50% failed calls"). `response.diff_total` = number of diff entries
+  before the cut at 50. `server.before`/`server.after` are the `ServerMetrics.for_check` dicts as returned
+  (`duration_ms_median`, `queries_median`, `queries_max`, `query_ms_median`, `sql`, `issues`,
+  `sample_trace_id`). `server.new_issues`/`fixed_issues` items: `{kind, title, fingerprint, sample_trace_id}`;
+  `new_sql`/`gone_sql` items: `{fingerprint, sql, count, sample_trace_id}` (trace id of the side the item comes
+  from). Summary also has `faster/slower/changed/broken/passed/failed/failing/fail_on`, `speed_ratio`,
+  `speed_change_pct`, `queries_before/after/change`, `wins`, `regressions`, `server_side`, `not_in_baseline`,
+  `not_in_suite`, `missing` (count) and `warnings` (strings, e.g. "2 of 5 requests are not in the baseline").
+- **Progress.** `run_suite(on_progress=)` receives `{done, total, current: "<request name>", run_id, phase:
+  "warmup"|"timed", idx, n, status, ms}` after every call.
+- **Headers.** Compared: `content-type` (always) plus `location`, `cache-control`, `content-encoding`,
+  `content-language`, `content-disposition`, `vary`, `allow`, `access-control-allow-origin` minus
+  `ignore_headers`. Header differences appear in `diff` with path `header:<name>`.
+- **Volatile.** Baseline entries have `volatile` (JSON paths for JSON bodies, `line:<n>` for text bodies, `$` for a
+  changed hash or body kind) and `volatile_headers`. Fields that differ between the compare run's own first and
+  last responses are ignored too (also reported as `volatile`).
+- **Redaction.** Both sides of a comparison go through the same redactor (JSON keys at any depth, without the
+  500-char string cut of `Redactor.mapping`; text through `Redactor.text`), so a masked secret never diffs.
+- `≥ 50 %` failed calls make the response verdict `broken` even when `response = false`.
+- **CLI.** `--store` defaults to the configured `storage_path` when that file exists; `--no-store` disables it.
+  `--fail-on` also accepts `noisy`, `faster` and `none`. Ctrl-C/SIGTERM exits 130 (no baseline written; a compare
+  prints the partial report). `--baseline-id` uses `redline_core.check.sink.load_baseline(store, id) ->
+  Baseline | dict | None`. `redline check show REPORT.json [--fail-on …] [--markdown OUT] [--junit OUT]`
+  re-prints a report (exit 0, or the `--fail-on` exit code when given). TOML suites on Python 3.10 need `tomli`
+  (else a clear error: use JSON).
+
+### 19.5 Storage and API (schema version 4, additive)
+
+- Tables: `check_suites(id, name, suite_json, created_at, updated_at)`,
+  `check_runs(id, suite_id NULL, kind "baseline"|"compare", baseline_id NULL, status "running"|"done"|"failed"|
+  "stopped", label, git_json, created_at, finished_at, summary_json, error)`,
+  `check_results(run_id, idx, name, data_json)` (per-request baseline data or comparison result).
+  Retention: keep the 50 most recent runs per suite; baselines referenced by a kept compare run are kept.
+- API (§5 rules, access gate §18; feature switch `checks`, default on; every non-GET refused under
+  `read_only`; starting runs from the UI also requires `load_from_ui`-style opt-in `checks_from_ui`, default
+  **true in debug mode, false otherwise**):
+  - `GET api/checks/suites` → `{items: [{id, name, requests, updated_at, last_baseline, last_compare}]}`;
+    `POST api/checks/suites` `{name, suite}` → created; `GET|PUT|DELETE api/checks/suites/{id}`;
+    `GET api/checks/suites/{id}/export` → TOML text (`text/plain`).
+  - `POST api/checks/suites/draft` `{routes?: [route], limit?}` → a suite object built from seen traffic
+    (19.1 rules) for the builder UI, not saved.
+  - `POST api/checks/runs` `{suite_id, kind: "baseline"|"compare", baseline_id?, label?}` → 202 `{id}`;
+    runs in a background process like UI load runs (§13 process control, `runs/<id>.*` files, own target =
+    `own_base_url()`, caps: ≤ 200 requests × `repeat` ≤ 5000 calls, ≤ 15 min).
+  - `GET api/checks/runs?suite_id=` → list; `GET api/checks/runs/{id}` → run + results (report JSON for
+    compares); `POST api/checks/runs/{id}/stop`; `DELETE api/checks/runs/{id}`.
+  - `POST api/checks/baselines/import` (baseline JSON body, ≤ 10 MiB) → stored baseline id, so a CI-produced
+    baseline can be viewed in the UI.
+
+#### 19.5a Storage, tagging and API as implemented
+
+- **Schema v4** (`storage/checks.py`, mixed into `SQLiteStore`): migrated inside the same single
+  `BEGIN IMMEDIATE` as earlier versions (version re-checked inside; new tables only). Extra columns beyond the
+  list above: `check_runs.suite_json` (redacted suite snapshot), `info_json` (`base_url`, `release`,
+  `source: "ui"|"import"`, `baseline: {id, label, git, created_at}` snapshot for compares), `progress_json`.
+  `check_results` has `PRIMARY KEY (run_id, idx)`. Writes are synchronous. `clear()` does not touch check tables.
+  Store methods: `create_check_suite(name, suite)`, `update_check_suite(id, name, suite)`, `get_check_suite`,
+  `list_check_suites`, `delete_check_suite` (with its runs); `create_check_run(run)` (upsert: keeps
+  `created_at`, merges info; then applies retention), `set_check_progress`, `finish_check_run(id, status,
+  summary, error)`, `add_check_result(run_id, idx, name, data)`, `get_check_results`, `get_check_run`,
+  `list_check_runs(suite_id=None, limit=50, kind=None)`, `delete_check_run`, `check_baseline(id)` (a finished
+  baseline as §19.3 JSON plus `id`, `status`, `base_url`), `import_check_baseline(doc, suite_id)`,
+  `known_check_runs()`, `prune_check_runs(suite_id, keep=50)`. A store lacking them → 501 `not_supported`.
+- **Retention:** on every create/import, per `suite_id` (NULL = one group): keep the 50 newest, running ones and
+  baselines referenced by a kept compare run.
+- **Dead runs:** like load runs (§11): a `running` check row older than 10 s whose `runs/<id>.pid` is missing or
+  dead becomes `failed`, `error = "the check process exited unexpectedly"` (only with a `runs/` dir beside the
+  store).
+- **Tagging.** `X-Redline-Check: <id>;req=<i>;n=<k>` → tags `check_run_id` (`[A-Za-z0-9_-]{1,64}`), `check_req`
+  (int ≥ 0), `check_n` (int; dropped when malformed); a malformed id/req tags nothing. Parsed in the same single
+  pass over the request headers as `X-Redline-Run`, so an untagged request pays nothing extra.
+- **Keep rule (no forced storage by anonymous clients).** When sampling would drop a request carrying a check
+  tag, `Sampler.keep(check=True)` keeps it *provisionally* with `sampled_by = "check"` – only if the store
+  declares `validates_check_tags = True` (SQLiteStore); other stores never receive such traces. The writer
+  thread checks every `check_run_id` against `known_check_runs()` (running, or finished < 60 s ago; 1 s cache):
+  an invalid tag on a `sampled_by="check"` trace drops the whole trace; on any other trace only the `check_*`
+  tags are stripped (its normal sampling decision stands). Run ids are random 128-bit hex known only to Redline
+  users, so a header cannot force storage. Profiling is never forced by the tag.
+- **Server metrics** (`check.sink.StoreServerMetrics.for_check(run_id, timeout_s)`): flushes this process's
+  writer, waits until `requests × (warmup + repeat)` tagged traces are stored or the count has been stable for
+  0.5 s (or the timeout), skips warm-up calls (`n=0`), then per `check_req`: `{calls, duration_ms_median,
+  queries_median, queries_max, query_ms_median, sql: {fingerprint16: {count (median executions per call over
+  the calls it ran in), max, calls, sql}}, issues: [{kind, fingerprint (16-hex of the issue's SQL fingerprint, or
+  the issue id), title, id, severity, calls}], sample_trace_id (the call nearest the median duration)}`.
+  `check.sink.load_baseline(store, id)` = `store.check_baseline(id)` (or `None`).
+- **API shapes:**
+  - `GET api/checks/suites` → `{items: [{id, name, requests (count), created_at, updated_at, last_baseline:
+    {id, status, label, git, created_at, summary}|null, last_compare: {same keys}|null}]}`.
+  - `POST api/checks/suites` `{name, suite}` → 201, `GET|PUT api/checks/suites/{id}` → 200: `{id, name, suite,
+    requests, created_at, updated_at}`. Secret header values (`redact_headers`/`redact_keys`) are shown as
+    `[redacted]` unless they are `${env:NAME}` placeholders (optionally after a scheme: `Bearer ${env:X}`); a PUT
+    that sends `[redacted]` back keeps the stored value. Bodies ≤ 1 MiB. Validation: the engine's
+    `Suite.from_dict` (plus read-only methods) → 400 `invalid_suite`. `DELETE` → `{deleted}` (409 `run_active`
+    while one of its runs is running). `GET …/export` → `text/plain` TOML (secrets masked), `Content-Disposition:
+    attachment; filename="<name>.toml"`.
+  - `POST api/checks/suites/draft` `{routes?: ["/orders/{id}" (as `GET api/endpoints` shows them), "GET /x",
+    {method, route}], limit?: 1..200 (default 50)}` → a suite object `{name, timeout_s, repeat, warmup,
+    thresholds, headers?, requests: [{name: "METHOD route", method, path}]}` from the last 7 days: read-only
+    methods, Redline's mount excluded, the most recent 2xx/3xx concrete path (query appended unless a value was
+    redacted; paths with redacted values skipped). `headers` only ever holds
+    `${env:REDLINE_CHECK_AUTHORIZATION}` / `${env:REDLINE_CHECK_COOKIE}` when recent requests carried those
+    headers. Per-route p50/queries for the builder come from `GET api/endpoints`.
+  - `POST api/checks/runs` `{suite_id, kind, baseline_id?, label?}`: 403 `checks_from_ui_disabled` (setting off,
+    or `auto` outside debug mode) → 400 `invalid_body` → 404 `suite_not_found` → compare: `baseline_id` defaults
+    to the suite's newest finished baseline (none → 400); unknown → 404 `check_run_not_found`; not a finished
+    baseline → 400 → 409 `run_active` while a run of the same suite is running → 501 without a file-backed
+    SQLite store → 400 when the target is unknown (same rules as §18 UI load runs: `base_url` setting, else
+    `own_base_url()`, never `Host`) → 400 `invalid_suite` over the caps (≤ 200 requests, ≤ 5000 calls =
+    Σ(warmup + repeat), GET/HEAD/OPTIONS, paths starting with one `/`). Answers 202 `{id, status: "running",
+    kind, suite_id, baseline_id}`.
+  - `GET api/checks/runs?suite_id=&kind=&limit=` → `{items: [Run]}`; `GET api/checks/runs/{id}` → `Run` plus
+    `suite` (redacted), `report` (compares: the §19.4 report built from the stored results: `{format, version,
+    suite, baseline, run: {id, git, created_at, base_url}, summary, requests}`; else null) and `requests`
+    (baselines: the §19.3 per-request array). `Run = {id, suite_id, kind, baseline_id, status, label, git,
+    created_at, finished_at, summary, error, progress: {done, total, current, …}|null, name, request_count,
+    base_url, release, source, baseline}` (epoch seconds). Progress is stored at most twice a second.
+  - `POST api/checks/runs/{id}/stop` → `{stopped: bool}` (false when not running); `DELETE api/checks/runs/{id}`
+    → `{deleted}`, 409 `run_active` while running; unknown ids → 404 `check_run_not_found`.
+  - `POST api/checks/baselines/import[?suite_id=]` (≤ 10 MiB, else 413 `payload_too_large`) → 201 `{id, kind:
+    "baseline", requests}`; `format`/`version`/shape (and the engine's `Baseline.from_dict`) → 400
+    `invalid_baseline`. Redacted on import: suite headers/URLs, request paths, response headers, JSON bodies by
+    key, text bodies by `Redactor.text`.
+- **Background process** (`check.control`): `check_hooks(store, settings)` pre-inserts the `running` row
+  (redacted suite, `base_url`, `source: "ui"`) and spawns `python -m redline_core.check.control run
+  runs/<id>.check.json --store PATH --run-id ID` (detached; log `runs/<id>.log`; pid file; the `.check.json`
+  holds the raw header values, mode 0600, removed at the end). The child runs `run_suite` with `StoreCheckSink`,
+  `StoreServerMetrics`, a stop event backed by `runs/<id>.stop` and a 15 min cap (then `stopped`, error
+  "stopped: runs started from the UI are limited to 15 min"); a failure before the engine starts still finishes
+  the row as `failed`. Adapters pass PUT bodies to `dispatch` and accept bodies up to `api.MAX_API_BODY`
+  (11 MiB): Django reads past `DATA_UPLOAD_MAX_MEMORY_SIZE` (after the access gate), Litestar ≥ 2.13 gets
+  `request_max_body_size`.
+
+
+### 19.6 UI (`#/checks`)
+
+- Nav: "Checks" in the More menu (hidden when the `checks` feature is off).
+- **Suites list**: name, requests, last baseline (label, git sha, age), last compare verdict badges; New suite.
+- **Builder**: pick endpoints from the routes Redline has seen (search, method filter: read-only only, with a
+  sample path per route and its last p50/queries), or add a request by hand; per request toggles Perf/Response,
+  ignore paths (with suggestions from volatile fields once a baseline exists), headers (values with `${env:…}`
+  hint; secret headers never pre-filled). Suite settings: repeat, warmup, thresholds. Save / Export TOML.
+- **Suite page**: Record baseline / Compare buttons (disabled with an explanation when not allowed), runs
+  history, baseline picker.
+- **Report page** (`#/checks/runs/{id}`): summary cards (passed / changed / broken / faster / slower, overall
+  speed change %, query change), sortable table (request, perf verdict, before → after median, Δ%, queries
+  before → after, response verdict); row expand: latency distribution of both runs (small box/strip plot),
+  response diff (JSON path list with before/after, or unified text diff), new/fixed issues and SQL with links to
+  sample traces, ignored fields. Copy as Markdown.
+- Live progress while a run is `running` (poll `GET api/checks/runs/{id}` every second).
+
+
+## 20. v0.3 selected feature expansion
+
+The selected IDs and stage status are recorded in PLAN.md. The four deferred IDs F03/F08/F14/F16 must not be implemented in this expansion.
+
+### 20.1 Response comparison rules and endpoint budgets
+
+Each check request may contain `array_keys` (JSON-path to identity-field mapping), `tolerances` (JSON-path to `{absolute, relative}` nonnegative finite numbers; relative is a fraction), and `budgets` (nonnegative finite numeric limits `max_queries`, `max_median_ms`, `max_p95_ms`, `max_external_calls`, plus `forbidden_issues`, a list of issue-kind strings). Defaults are empty and preserve exact existing behavior. Unknown fields and malformed paths are rejected consistently by CLI and API.
+
+Array identity rules apply only at the configured array path. All elements must be objects with unique, non-null string or finite numeric identities. Booleans are not identities. Missing/duplicate/invalid identities produce a visible comparison error that fails the response check; they never silently compare equal. Elements match by identity; additions/removals remain differences. Rules are opt-in because ordering may be part of an endpoint contract.
+
+Numeric tolerance at a configured path accepts a difference no greater than `max(absolute, relative * abs(before))`. Booleans are not numbers; type changes are still reported. Rules apply to existing numeric values, not missing fields. Ignore rules retain precedence. Applied rules are included in response reports.
+
+Budgets are evaluated against the current run, independently of baseline-relative verdicts. Query and outbound-call limits use maximum observed per-call counts. Missing required metrics, missing latency samples, and broken responses must never be reported as budget success. Budget failures fail the default check and all machine-readable outputs. The UI exposes the same rules in its suite editor and reports, and preserves rules through import/export and editing.
+
+### 20.2 Additional runtime findings
+
+New kinds: `repeated_writes`, `deep_offset`, `database_round_trips`, `connection_pool_wait`, `large_response`, `repeated_scan`, `large_cache_entry`. Settings default to 5 writes, OFFSET 10,000 rows, 10 round trips with 100 ms cumulative query time, 50 ms pool wait, 1,000,000 response/cache bytes, and 2 distinct aggregate projections. A zero threshold disables the corresponding rule. Findings include observed spans, thresholds and trace completeness. Repeated writes exclude executemany. Round-trip findings avoid an already exceeded query-count budget and classic repeated-query groups. Similar aggregate predicate shapes are review candidates, not proof of equivalent semantics. OFFSET detection is restricted to directly observed literal offsets, not guessed parameter values. Cache size requires explicit size metadata, never serialization solely for measurement.
+
+### 20.3 Test capture and diagnostics
+
+`pytest.mark.redline` accepts per-request `max_queries`, `max_external_calls`, `no_n_plus_one`, and `forbidden_issues`. Capture is context-local, includes sampled-out active instrumented requests, and restores context after tests. No captured request fails the assertion. Truncation fails assertions needing complete span or issue coverage. Disabled or ignored requests are not silently enabled. Stored test traces carry a redacted `test_name` tag and remain inspectable in the UI. The core does not import pytest outside its plugin.
+
+Trace diagnostics partition clamped request-time intervals into database-only, external-only, pool-wait-only, cross-category overlap, and remaining time. Concurrent spans of the same category are unioned. Remaining time is not labeled CPU. Truncation and dropped logs are explicit warnings. Observed span kinds do not prove which integrations are installed or exercised.
+
+Environment labels in a suite are user-declared target labels (`dataset`, `python`, `framework`, `database`, `configuration`); differences and absent metadata warn rather than silently certifying comparable environments. The runner's environment must not be represented as the target server's runtime. Coverage uses a bounded latest-retained trace sample and labels missing routes and single-input routes; unobserved traffic is unknown.
+
+### 20.4 Static analysis
+
+Python source analysis parses syntax without importing or executing application code. CLI project scanning is bounded, excludes dependency/generated directories and symlinks, and reports skipped/invalid inputs. UI analysis accepts bounded pasted/uploaded source or scans only the configured project root; it never accepts an arbitrary server filesystem root. Every finding includes kind, source location, explanation, confidence and limitations. Runtime use of data cannot be inferred from row counts alone. Aggregation and duration advice requires checking null, precision and rounding semantics; a successful rewrite is verified with a refactor check.
+
+
+### 20.5 Integrated surfaces and storage
+
+Additional kinds: `many_orm_instances` (default 500), `json_decode_hotspot` (50 sampled ms)
+and `slow_cache_decode` (50 explicitly measured ms). Django's post_init signal counts
+construction; SQLAlchemy's loaded_as_persistent event counts loads. Counters keep no model
+references. `cache_decode` measures a caller-selected decode block; automatic cache hooks
+observe only binary values already present. No extra serialization or database queries
+are added to request recording. OFFSET may use a directly observed integer bind; redacted
+or unresolved values are not guessed.
+
+Kept traces add `runtime` with target Python/framework metadata, cached by framework.
+Check server aggregates preserve observed metadata and warn on differences or disappearance.
+Declared environment labels do not certify database contents, hardware or runtime equality.
+Issue groups add `fingerprint` and summed `observed_total_ms`; these costs may overlap and
+are not predicted savings. Every finding exposes rule and evidence completeness alongside
+its span IDs; built-in evidence remains inspectable in the request UI.
+
+The SQLite schema remains v4 with an additive `issue_suppressions(id TEXT PRIMARY KEY,
+data TEXT NOT NULL)` table created on opening old or new stores. Suppressions are exact
+kind plus one or more route/fingerprint/location selectors, with a reason and optional
+finite epoch expiry. Expiry stops matching. API issue groups expose suppressed routes and
+whether all routes are suppressed. Raw stored issues and test/check policies are unchanged.
+
+The framework-neutral API adds GET analysis/health, GET analysis/coverage, POST
+analysis/source, POST analysis/trace, POST analysis/database, POST analysis/demo and
+GET/POST/DELETE suppressions routes, documented in docs/http-api.md. Existing access and
+read-only gates run first. Source scans and synthetic sample creation require
+`analysis_from_ui` (auto = framework debug; production = false). Source inputs never
+execute code; project scans use only configured project_root, not caller-provided roots.
+Trace previews accept only detector thresholds. Catalog reads are on demand, bounded to
+supported single-table shapes and never run application queries or DDL. Missing executor,
+unsupported store and malformed inputs use normal structured API errors.
+
+Synthetic examples are explicitly tagged, stored without large payload bodies, and labeled
+in the UI. Their timings are illustrative. Replay and real database inspection are disabled
+for synthetic evidence. The real demo shops also expose GET /patterns (Django with a
+trailing slash) and POST /patterns/writes; writes are rolled back. Their check suites
+include explicit array and numeric rules. scripts/check_demo_patterns.py exercises the
+four adapters in-process against disposable databases.
+
+All UI controls use existing components and tokens. Checks expose policies and generated
+pytest snippets; Analysis exposes source scans, coverage, recording quality and suppression
+management. Request detail exposes preview thresholds, evidence, time attribution and
+on-demand catalog inspection. Issues expose observed-impact sorting and a real-request
+link to a verification suite. Browser interactions do not execute arbitrary shell commands.

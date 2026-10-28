@@ -223,6 +223,8 @@ class IssueGroup:
     sample_span_ids: list[str]
     suggestion: Suggestion | None
     callsite: Callsite | None
+    observed_total_ms: float = 0.0
+    fingerprint: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -232,6 +234,8 @@ class IssueGroup:
             "title": self.title,
             "detail": self.detail,
             "occurrences": self.occurrences,
+            "observed_total_ms": round(self.observed_total_ms, 3),
+            "fingerprint": self.fingerprint,
             "first_seen": self.first_seen,
             "last_seen": self.last_seen,
             "routes": self.routes,

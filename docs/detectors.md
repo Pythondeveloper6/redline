@@ -6,6 +6,8 @@ Version 0.1 found four kinds of problem: N+1 queries, duplicate queries, slow qu
 requests with too many queries. Version 0.2 adds ten more, plus aggregate pages that look
 across requests. This page is the map; each family has its own page.
 
+Additional v0.3 development findings and their settings are described in [Performance workflows](performance-workflows.md#additional-runtime-findings).
+
 ## Every issue kind
 
 An *issue* is something the detectors found in one trace. Issues with the same identity
@@ -28,6 +30,16 @@ An *issue* is something the detectors found in one trace. Issues with the same i
 | `slow_external` | an outbound call takes at least this long | `slow_external_ms = 500` | [External calls](external-calls.md) |
 | `duplicate_external` | the same method and URL called twice or more | 2 | [External calls](external-calls.md) |
 | `retry_storm` | three or more calls to one host with at least one failure | 3 | [External calls](external-calls.md) |
+| `repeated_writes` | Repeated individual INSERT/UPDATE calls | 5 | [Performance workflows](performance-workflows.md) |
+| `deep_offset` | Large observed OFFSET | 10000 rows | [Performance workflows](performance-workflows.md) |
+| `database_round_trips` | Many queries with substantial cumulative cost | 10 queries and 100 ms | [Performance workflows](performance-workflows.md) |
+| `connection_pool_wait` | Long captured checkout wait | 50 ms | [Performance workflows](performance-workflows.md) |
+| `repeated_scan` | Distinct aggregates with matching predicate shape | 2 | [Performance workflows](performance-workflows.md) |
+| `large_response` | Response bytes exceed the threshold | 1000000 bytes | [Performance workflows](performance-workflows.md) |
+| `many_orm_instances` | Many model objects constructed or loaded | 500 | [Performance workflows](performance-workflows.md) |
+| `large_cache_entry` | Known binary cache payload size exceeds the threshold | 1000000 bytes | [Performance workflows](performance-workflows.md) |
+| `slow_cache_decode` | Explicitly instrumented cache decode exceeds the threshold | 50 ms | [Performance workflows](performance-workflows.md) |
+| `json_decode_hotspot` | Sampled standard-library JSON decoding cost | 50 ms | [Performance workflows](performance-workflows.md) |
 
 Severity is `info`, `warning` or `critical`. For most of the new detectors, a value at five
 times its threshold is `critical`.
