@@ -1,3 +1,6 @@
+import { DatabaseInspection } from '../components/DatabaseInspection'
+import { DetectorPreview } from '../components/DetectorPreview'
+import { TraceDiagnostics } from '../components/TraceDiagnostics'
 import { Fragment, lazy, Suspense, useEffect, useMemo, useState } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router-dom'
 import { api, ApiError } from '../api'
@@ -72,7 +75,7 @@ function SqlTab({ trace, issueBySpan, onOpen, onExplain }: { trace: Trace; issue
                         <tr key={s.id} className="border-t border-line hover:bg-raised/40 cursor-pointer" onClick={() => onOpen(s)}>
                           <td className="td num text-muted">{i + 1}</td><td className="td num">{ms(s.start_ms)}</td><td className="td num">{ms(s.duration_ms)}</td>
                           <td className="td mono max-w-[260px] truncate">{JSON.stringify(s.data.params ?? [])}</td><td className="td num">{s.data.rows ?? '-'}</td>
-                          <td className="td text-right">{onExplain && <button className="btn h-6" disabled={!s.data.explainable} onClick={e => { e.stopPropagation(); onExplain(s) }}>Explain</button>}</td>
+                          <td className="td text-right">{onExplain && <button className="btn h-6" disabled={!s.data.explainable} onClick={e => { e.stopPropagation(); onExplain(s) }}>Explain</button>}{onExplain && s.data.explainable && <DatabaseInspection traceId={trace.id} spanId={s.id} />}</td>
                         </tr>
                       ))}
                     </tbody>
@@ -179,10 +182,12 @@ export default function RequestDetail({ snapshotId }: { snapshotId?: string } = 
         <span className="mono font-bold text-[14px]">{trace.method}</span>
         <h1 className="m-0 text-[17px] font-semibold break-all">{trace.path}</h1>
         <Status code={trace.status} />
+        {trace.tags.synthetic_demo && <Pill tone="warn">Synthetic detector sample</Pill>}
         <span className="text-muted text-[12px] w-full sm:w-auto">{clock(trace.started_at)} · {trace.framework}{trace.route && trace.route !== trace.path ? <> · <span className="mono">{trace.route}</span></> : null}{trace.view ? <> · <span className="mono">{trace.view}</span></> : null}</span>
       </div>
       <div className="flex flex-wrap items-center gap-2">
-        <RequestActions trace={trace} offline={snap} />
+        <RequestActions trace={trace} offline={snap || !!trace.tags.synthetic_demo} />
+        {!snap && <DetectorPreview traceId={trace.id} />}
         {!snap && has('snapshot') && <a className="btn" href={api.snapshotUrl(trace.id)} download={`redline-${trace.id}.html`} title="Download a standalone HTML copy of this request"><Icon d={I.down} size={12} />Snapshot</a>}
       </div>
       {trace.error && (
@@ -208,6 +213,7 @@ export default function RequestDetail({ snapshotId }: { snapshotId?: string } = 
         <Card label="Query time" value={ms(trace.query_ms)} sub={trace.duration_ms ? `${Math.round((trace.query_ms / trace.duration_ms) * 100)}% of request` : undefined} />
         <Card label="Issues" value={trace.issues.length} tone={trace.issues.length ? 'text-bad' : 'text-ok'} sub={trace.issues.length ? trace.issues.map(i => i.kind.replace(/_/g, ' ')).join(', ') : 'clean'} />
       </div>
+      <TraceDiagnostics trace={trace} />
       <div>
         <Tabs value={tab} onChange={setTab} tabs={[
           { id: 'timeline', label: 'Timeline' },
@@ -220,7 +226,7 @@ export default function RequestDetail({ snapshotId }: { snapshotId?: string } = 
         ]} />
         <div className="pt-4">
           {tab === 'timeline' && <Waterfall spans={trace.spans} total={trace.duration_ms} issueSpanIds={issueSpanIds} onSelect={setSpan} selected={span?.id} />}
-          {tab === 'sql' && <SqlTab trace={trace} issueBySpan={issueBySpan} onOpen={setSpan} onExplain={snap || !has('explain') ? undefined : setExplain} />}
+          {tab === 'sql' && <SqlTab trace={trace} issueBySpan={issueBySpan} onOpen={setSpan} onExplain={snap || !!trace.tags.synthetic_demo || !has('explain') ? undefined : setExplain} />}
           {tab === 'issues' && <IssuesTab issues={trace.issues} spans={trace.spans} />}
           {tab === 'logs' && has('logs') && <LogsTab logs={trace.logs ?? []} dropped={trace.logs_dropped ?? 0} />}
           {tab === 'exception' && (trace.error ? <ExceptionTab error={trace.error} /> : <div className="card"><Empty title="No exception in this request" /></div>)}
@@ -243,7 +249,7 @@ export default function RequestDetail({ snapshotId }: { snapshotId?: string } = 
           )}
         </div>
       </div>
-      <SpanDrawer span={span} onClose={() => setSpan(null)} onExplain={snap || !has('explain') ? undefined : s => { setSpan(null); setExplain(s) }} />
+      <SpanDrawer span={span} onClose={() => setSpan(null)} onExplain={snap || !!trace.tags.synthetic_demo || !has('explain') ? undefined : s => { setSpan(null); setExplain(s) }} />
       {!snap && has('explain') && <ExplainDrawer traceId={trace.id} span={explain} onClose={() => setExplain(null)} />}
     </div>
   )

@@ -71,6 +71,7 @@ Presets are named bundles of defaults for the three situations most people are i
 | `badge` | `auto` (on in debug) | `auto` | **off** |
 | `server_timing` | `auto` (on in debug) | `auto` | **off** |
 | `load_from_ui` | off | off | off |
+| `checks_from_ui` | `auto` | `auto` | off |
 | `explain_analyze` | off | off | off |
 | `profile` | `opt_in` | `opt_in` | **off** |
 

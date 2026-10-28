@@ -48,6 +48,7 @@ from .storage.base import FilterError, Filters, Store, parse_period, parse_windo
 from .storage.derive import fingerprint_key
 
 __all__ = [
+    "MAX_API_BODY",
     "ExecutorFactory",
     "RawResponse",
     "RedlineAPI",
@@ -109,6 +110,9 @@ _RUN_STOP = re.compile(rf"^api/runs/{_ID}/stop$")
 _ISSUE_KINDS = ISSUE_KINDS
 _BUCKETS = {"1h": 3_600.0, "1d": 86_400.0}
 _LOAD_MODES = ("constant", "ramp", "steps")
+#: Largest request body adapters should hand to :meth:`RedlineAPI.dispatch` (an imported
+#: check baseline may be 10 MiB; the core answers 413 ``payload_too_large`` beyond it).
+MAX_API_BODY = 11 * 1024 * 1024
 #: ``GET api/indexes`` answers are cached this long per ``(window, db)``.
 INDEX_CACHE_S = 30.0
 
@@ -151,6 +155,9 @@ class RedlineAPI:
         run_stopper: RunStopper | None = None,
         config: Any = None,
         access: Any = None,
+        check_launcher: Callable[..., str] | None = None,
+        check_stopper: RunStopper | None = None,
+        debug: Callable[[], Any] | None = None,
     ) -> None:
         self.store = store
         self.settings = settings or Settings()
@@ -164,6 +171,26 @@ class RedlineAPI:
         self.run_stopper = run_stopper
         self._index_cache: dict[tuple[float, str], tuple[float, dict[str, Any]]] = {}
         self._index_lock = threading.Lock()
+        #: The framework's debug flag (``checks_from_ui="auto"``); default: the gate's.
+        self.debug = debug
+        from .api_checks import CheckRoutes
+
+        #: ``api/checks`` (§19.5). Without injected hooks they are built on first use from
+        #: the store (:func:`redline_core.check.control.check_hooks`).
+        self.checks = CheckRoutes(self, check_launcher, check_stopper)
+
+    def debug_mode(self) -> bool:
+        """Whether the framework is in debug mode right now (``debug`` callable, else the
+        access gate's ``debug``); errors count as "not debug"."""
+        fn = self.debug
+        if fn is None and self.access is not None:
+            fn = getattr(self.access, "debug", None)
+        if fn is None:
+            return False
+        try:
+            return bool(fn())
+        except Exception:
+            return False
 
     # routing ---------------------------------------------------------------
     def dispatch(
@@ -201,6 +228,12 @@ class RedlineAPI:
         body: bytes | str | Mapping[str, Any] | None,
         base_url: str | None,
     ) -> Response | RawResponse:
+        if path.startswith("api/analysis/"):
+            from .api_analysis import route
+
+            return route(self, method, path, params, body)
+        if path == "api/suppressions" or path.startswith("api/suppressions/"):
+            return self.suppression_routes(method, path, body)
         get_routes: dict[str, Callable[[Mapping[str, Any]], Response]] = {
             "api/compare": self.compare,
             "api/sql": self.sql,
@@ -213,6 +246,8 @@ class RedlineAPI:
         }
         if path in get_routes:
             return get_routes[path](params) if method == "GET" else _not_allowed()
+        if path == "api/checks" or path.startswith("api/checks/"):
+            return self.checks.route(method, path, params, body, base_url)
         if path == "api/runs":
             if method == "GET":
                 return self.list_runs(params)
@@ -291,6 +326,7 @@ class RedlineAPI:
         s = self.settings
         features = {name: s.feature(name) for name in FEATURES}
         features["load_from_ui"] = s.load_from_ui and s.feature("load") and not s.read_only
+        features["checks_from_ui"] = self.checks.from_ui_allowed()
         return features
 
     def _access_meta(self) -> dict[str, Any]:
@@ -347,6 +383,10 @@ class RedlineAPI:
             return error(404, "trace_not_found", f"No trace {trace_id!r}.")
         data = self._visible(trace.to_dict(include_profile=False))
         data["has_profile"] = self.store.has_profile(trace_id)
+        from .diagnostics import trace_diagnostics
+
+        data["diagnostics"] = trace_diagnostics(trace)
+        data["diagnostics"]["profile_available"] = data["has_profile"]
         return 200, data
 
     def get_profile(self, trace_id: str) -> Response:
@@ -368,6 +408,36 @@ class RedlineAPI:
             return error(400, "invalid_window", str(exc))
         return 200, {"items": [e.to_dict() for e in self.store.endpoints(window)]}
 
+    def suppression_routes(self, method, path, body):
+        from .suppressions import validate
+
+        list_rules = getattr(self.store, "list_suppressions", None)
+        if not callable(list_rules):
+            return error(501, "not_supported", "This store does not support suppressions.")
+        if path == "api/suppressions" and method == "GET":
+            return 200, {
+                "items": list_rules(),
+                "ci_effect": "none; test and check policies still inspect raw findings",
+            }
+        if path == "api/suppressions" and method == "POST":
+            try:
+                if isinstance(body, (bytes, str)) and len(body) > 8192:
+                    raise ValueError("Suppression input is too large")
+                data = json.loads(body) if isinstance(body, (bytes, str)) else body
+                rule = validate(data)
+                from .redact import Redactor
+
+                rule["reason"] = Redactor(self.settings).text(rule["reason"])
+                self.store.save_suppression(rule)
+                return 201, rule
+            except ValueError as exc:
+                return error(400, "invalid_suppression", str(exc))
+        match = re.fullmatch(r"api/suppressions/([a-f0-9]{32})", path)
+        if match and method == "DELETE":
+            self.store.delete_suppression(match[1])
+            return 200, {"deleted": True}
+        return _not_allowed()
+
     def issues(self, params: Mapping[str, Any]) -> Response:
         try:
             window = parse_window(_str_param(params, "window"))
@@ -376,7 +446,31 @@ class RedlineAPI:
         kind = _str_param(params, "kind")
         if kind is not None and kind not in _ISSUE_KINDS:
             return error(400, "invalid_kind", f"kind must be one of {', '.join(_ISSUE_KINDS)}.")
-        return 200, {"items": [g.to_dict() for g in self.store.issues(window, kind=kind)]}
+        from .suppressions import matches
+
+        items = [g.to_dict() for g in self.store.issues(window, kind=kind)]
+        rules = getattr(self.store, "list_suppressions", lambda: [])()
+        for item in items:
+            site = item.get("callsite")
+            location = f"{site['file']}:{site['line']}" if site else None
+            item["suppressed_routes"] = [
+                route
+                for route in item["routes"]
+                if any(
+                    matches(
+                        rule,
+                        kind=item["kind"],
+                        route=route,
+                        fingerprint=item.get("fingerprint"),
+                        location=location,
+                    )
+                    for rule in rules
+                )
+            ]
+            item["suppressed"] = bool(item["routes"]) and len(item["suppressed_routes"]) == len(
+                item["routes"]
+            )
+        return 200, {"items": items, "sampled": self.settings.sample_rate < 1}
 
     def explain(self, body: bytes | str | Mapping[str, Any] | None) -> Response:
         if isinstance(body, (bytes, bytearray, str)):

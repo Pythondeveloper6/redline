@@ -157,8 +157,8 @@ def build_blueprint(runtime: Any, url_prefix: str) -> Blueprint:
         params: dict[str, Any] = {}
         for key, values in request.args.lists():
             params[key] = values[0] if len(values) == 1 else values
-        body = request.get_data() if request.method == "POST" else None
-        # PUT/PATCH reach the core, which answers 405 `method_not_allowed`.
+        body = request.get_data() if request.method in ("POST", "PUT") else None
+        # PATCH reaches the core, which answers 405 `method_not_allowed`.
         # the server's own listening port (SERVER_PORT), never the Host header
         environ = request.environ
         base_url = own_base_url(

@@ -97,6 +97,7 @@ Run your app, make some requests and open **`/redline/`** as a superuser.
 - **Flamegraphs**: add `?_redline=profile` to any URL (or send `X-Redline-Profile: 1`) to profile
   that request with pyinstrument (needs the `profile` extra).
 - **Load-test correlation**: an `X-Redline-Run: <id>;step=<n>` request header tags the trace.
+- **Refactor-check correlation**: `X-Redline-Check: <id>;req=<i>;n=<k>` (sent by `redline check`) tags the trace, only for a check run that exists in the store.
 
 ## Settings
 

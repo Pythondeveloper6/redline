@@ -1,6 +1,8 @@
+import { mockTools, mockSuppressed } from './tools'
 import type { Trace, TraceFilters } from '../types'
 import { mockHistoryLoad } from './historyLoad'
 import { mockAnalysis } from './analysis'
+import { mockChecks } from './checks'
 import { ALL, genericTraceAt, EXPLAIN_PG, EXPLAIN_SQLITE, buildEndpoints, buildIssueGroups, buildProfile, summarize } from './data'
 
 let traces: Trace[] = ALL.slice()
@@ -40,14 +42,19 @@ export async function mockFetch(method: string, url: string, body: unknown): Pro
   const ok = (json: unknown) => ({ status: 200, json })
   const err = (status: number, code: string, message: string) => ({ status, json: { error: { code, message } } })
 
+  const tools = await mockTools(method, path, u.searchParams, body, traces)
+  if (tools) return tools
   if (path === 'api/meta') {
+    // Dev switches for the checks UI: ?ro=1 (read-only), ?checks_from_ui=0, ?checks=0 (feature off)
+    const q = new URLSearchParams(location.search)
+    const ro = q.get('ro') === '1'
     return ok({
-      version: '0.2.0a1', framework: 'django',
+      version: '0.3.0a1', framework: 'django',
       settings: { thresholds: { n_plus_one: 5, slow_query_ms: 100, too_many_queries: 50 }, sampling: { sample_rate: 1 }, profiling_enabled: true, explain_analyze_enabled: false },
       storage: { rows: traces.length, path: '.redline/redline.db' },
       project_root: '/Users/dev/shop', editor: 'vscode', editor_url_template: 'vscode://file/{file}:{line}', release: 'mock-1',
-      features: { load_from_ui: true, sse: true, snapshot: true, explain: true, profile: true, replay: true, load: true, logs: true, locals: true },
-      access: { policy: 'token', login: 'token', read_only: false, preset: 'dev' },
+      features: { load_from_ui: true, sse: true, snapshot: true, explain: true, profile: true, replay: true, load: true, logs: true, locals: true, checks: q.get('checks') !== '0', checks_from_ui: q.get('checks_from_ui') !== '0' && !ro },
+      access: { policy: 'token', login: 'token', read_only: ro, preset: 'dev' },
     })
   }
   if (path === 'api/config') {
@@ -99,7 +106,7 @@ export async function mockFetch(method: string, url: string, body: unknown): Pro
   let m = path.match(/^api\/traces\/([^/]+)\/profile$/)
   if (m) {
     const t = traces.find(x => x.id === m![1])
-    return t?.has_profile ? ok(buildProfile()) : err(404, 'no_profile', 'This request was not profiled.')
+    return t?.has_profile ? ok((t as Trace & { profile?: unknown }).profile ?? buildProfile()) : err(404, 'no_profile', 'This request was not profiled.')
   }
   m = path.match(/^api\/traces\/([^/]+)$/)
   if (m) {
@@ -135,7 +142,8 @@ export async function mockFetch(method: string, url: string, body: unknown): Pro
   if (path === 'api/endpoints') return ok({ items: buildEndpoints() })
   if (path === 'api/issues') {
     const kind = u.searchParams.get('kind')
-    return ok({ items: buildIssueGroups().filter(g => !kind || g.kind === kind) })
+    const samples = traces.filter(t => t.tags.synthetic_demo).flatMap(t => t.issues.map(i => ({ ...i, occurrences: 1, first_seen: t.started_at, last_seen: t.started_at, routes: [t.route ?? t.path], sample_trace_id: t.id, sample_span_ids: i.span_ids, observed_total_ms: i.total_ms })))
+    return ok({ items: [...buildIssueGroups(), ...samples].filter(g => !kind || g.kind === kind).map(g => ({ ...g, suppressed: mockSuppressed(g.kind, g.routes) })) })
   }
   if (path === 'api/explain') {
     const b = body as { trace_id: string; span_id: string; analyze: boolean }
@@ -146,6 +154,8 @@ export async function mockFetch(method: string, url: string, body: unknown): Pro
     if (!s.data.explainable) return err(400, 'not_explainable', 'Only SELECT queries can be explained.')
     return ok(s.data.vendor === 'sqlite' ? EXPLAIN_SQLITE : EXPLAIN_PG)
   }
+  const ck = await mockChecks(method, path, u.searchParams, body)
+  if (ck) return ck
   const an = mockAnalysis(method, path, u.searchParams)
   if (an) return an
   const hl = await mockHistoryLoad(method, path, u.searchParams, body)

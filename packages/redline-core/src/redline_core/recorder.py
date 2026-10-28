@@ -143,6 +143,7 @@ class TraceBuilder:
         "max_spans",
         "method",
         "on_finish",
+        "orm_instances",
         "overflow",
         "path",
         "path_params",
@@ -197,6 +198,7 @@ class TraceBuilder:
         self.active = active
         self.finished = False
         self.spans: list[Span] = []
+        self.orm_instances = 0
         self.query_count = 0
         self.query_ms = 0.0
         self.max_spans = recorder.settings.max_spans_per_trace or 0
@@ -456,6 +458,8 @@ class Recorder:
             trace.logs = list(builder.logs)
             trace.logs_dropped = builder.logs_dropped
             spans = sorted(builder.spans, key=lambda s: s.start_ms)
+            if builder.orm_instances:
+                trace.tags["orm_instances"] = str(builder.orm_instances)
             trace.query_count = builder.query_count
             trace.query_ms = round(builder.query_ms, 3)
             overflow = list(builder.overflow.values())
@@ -470,10 +474,26 @@ class Recorder:
             status=trace.status,
             duration_ms=duration,
             error=trace.error is not None,
-            profiled=profile is not None,
+            # an explicitly profiled request is kept even when the profiler caught no
+            # sample (a very fast request), so the keep rule does not depend on timing
+            profiled=builder.profiler is not None,
+            # a refactor-check call is kept provisionally only when the store validates
+            # the tag (its writer drops it for an unknown or finished check run)
+            check="check_run_id" in trace.tags
+            and getattr(self.store, "validates_check_tags", False) is True,
         )
+        from .testing import active_capture
+
+        capture = active_capture()
+        if capture is not None:
+            reason = reason or "test"
+            if capture[0]:
+                trace.tags["test_name"] = self.redactor.text(capture[0])
         if reason is None:
             return trace
+        from .runtime_info import target_runtime
+
+        trace.runtime = dict(target_runtime(trace.framework))
         trace.tags["sampled_by"] = reason
         if (
             isinstance(error, BaseException)
@@ -491,6 +511,8 @@ class Recorder:
             trace.issues = self.detector.detect(trace, overflow=overflow)
         except Exception:  # never let analysis break the response
             logger.exception("Redline failed to analyse trace %s", trace.id)
+        if capture is not None:
+            capture[1].append(trace)
         if self.store is not None:
             try:
                 self.store.save(trace)
@@ -1042,7 +1064,8 @@ def _apply_run_header(builder: TraceBuilder, headers: Any) -> None:
 
     ``X-Redline-Run: <run_id>;step=<n>`` (the load tester) becomes ``run_id`` / ``step``;
     ``X-Redline-Replay-Of: <trace id>`` (the UI's Replay) becomes ``replay_of`` when it is
-    a 32-character hex id.
+    a 32-character hex id; ``X-Redline-Check`` (the refactor check) becomes
+    ``check_run_id`` / ``check_req`` / ``check_n``. One pass over the headers either way.
     """
     if not headers:
         return
@@ -1055,6 +1078,9 @@ def _apply_run_header(builder: TraceBuilder, headers: Any) -> None:
             if _TRACE_ID.fullmatch(v.strip()):
                 builder.tags["replay_of"] = v.strip().lower()
             continue
+        if k == "x-redline-check":
+            _apply_check_header(builder, value)
+            continue
         if k != "x-redline-run":
             continue
         v = value.decode("latin-1") if isinstance(value, bytes) else str(value)
@@ -1065,6 +1091,33 @@ def _apply_run_header(builder: TraceBuilder, headers: Any) -> None:
             k2, _, v2 = part.partition("=")
             if k2.strip() == "step" and v2.strip():
                 builder.tags["step"] = v2.strip()[:16]
+
+
+_CHECK_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
+_CHECK_NUM = re.compile(r"-?[0-9]{1,9}")
+
+
+def _apply_check_header(builder: TraceBuilder, value: Any) -> None:
+    """``X-Redline-Check: <check run id>;req=<index>;n=<call#>`` (the refactor-check
+    runner) → tags ``check_run_id``, ``check_req``, ``check_n``. Malformed values are
+    ignored; the store keeps the tags only for a running check run (§19.2)."""
+    v = value.decode("latin-1") if isinstance(value, bytes) else str(value)
+    run_id, _, rest = v.partition(";")
+    run_id = run_id.strip()
+    if not _CHECK_ID.fullmatch(run_id):
+        return
+    parts = {}
+    for part in rest.split(";"):
+        k, _, val = part.partition("=")
+        parts[k.strip().lower()] = val.strip()
+    req = parts.get("req", "")
+    if not _CHECK_NUM.fullmatch(req) or req.startswith("-"):
+        return
+    builder.tags["check_run_id"] = run_id
+    builder.tags["check_req"] = req
+    n = parts.get("n", "")
+    if _CHECK_NUM.fullmatch(n):
+        builder.tags["check_n"] = n
 
 
 def _error_dict(

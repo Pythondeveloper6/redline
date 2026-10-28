@@ -71,6 +71,16 @@ IssueKind = Literal[
     "slow_external",
     "duplicate_external",
     "retry_storm",
+    "repeated_writes",
+    "deep_offset",
+    "database_round_trips",
+    "connection_pool_wait",
+    "large_response",
+    "repeated_scan",
+    "large_cache_entry",
+    "many_orm_instances",
+    "json_decode_hotspot",
+    "slow_cache_decode",
 ]
 Severity = Literal["info", "warning", "critical"]
 Framework = Literal["django", "fastapi", "flask", "litestar", "other"]
@@ -105,6 +115,16 @@ ISSUE_KINDS: tuple[str, ...] = (
     "slow_external",
     "duplicate_external",
     "retry_storm",
+    "repeated_writes",
+    "deep_offset",
+    "database_round_trips",
+    "connection_pool_wait",
+    "large_response",
+    "repeated_scan",
+    "large_cache_entry",
+    "many_orm_instances",
+    "json_decode_hotspot",
+    "slow_cache_decode",
 )
 SEVERITIES: tuple[str, ...] = ("info", "warning", "critical")
 FRAMEWORKS: tuple[str, ...] = ("django", "fastapi", "flask", "litestar", "other")
@@ -408,6 +428,8 @@ class Trace:
     #: The release (git sha, version...) the app was running; ``Settings.release``.
     release: str | None = None
 
+    runtime: dict[str, str] = field(default_factory=dict)
+
     # derived ---------------------------------------------------------------
     @property
     def has_profile(self) -> bool:
@@ -457,6 +479,7 @@ class Trace:
             "logs": [r.to_dict() for r in self.logs],
             "logs_dropped": self.logs_dropped,
             "release": self.release,
+            "runtime": dict(self.runtime),
         }
         if include_profile:
             data["profile"] = self.profile
@@ -503,6 +526,7 @@ class Trace:
             query_ms=float(data.get("query_ms", 0.0)),
             request=request,
             response=response,
+            runtime=dict(data.get("runtime") or {}),
             spans=[Span.from_dict(s) for s in data.get("spans") or ()],
             issues=[Issue.from_dict(i) for i in data.get("issues") or ()],
             tags={str(k): str(v) for k, v in (data.get("tags") or {}).items()},

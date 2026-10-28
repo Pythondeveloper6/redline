@@ -3,6 +3,8 @@ from django.urls import path
 from . import views
 
 urlpatterns = [
+    path("patterns/", views.patterns),
+    path("patterns/writes/", views.pattern_writes),
     path("", views.home),
     path("orders/", views.order_list),
     path("orders/page/", views.order_page),
@@ -14,4 +16,5 @@ urlpatterns = [
     path("api/products/", views.api_products),
     path("async/summary/", views.async_summary),
     path("cached/", views.cached),
+    path("status/", views.status),
 ]

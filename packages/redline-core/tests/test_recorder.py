@@ -358,6 +358,25 @@ def test_profiling_opt_in_produces_speedscope():
     assert t.profile is not None and "profiles" in t.profile and "shared" in t.profile
 
 
+def test_requested_profile_is_kept_even_without_samples(monkeypatch):
+    # a very fast request can end before the profiler's first sample; it was still
+    # explicitly profiled, so it must be kept (this used to depend on machine speed)
+    pytest.importorskip("pyinstrument")
+    from redline_core.profiler import RequestProfiler
+
+    real_stop = RequestProfiler.stop
+
+    def no_samples(self, name=None, *, trim=True):
+        real_stop(self, name, trim=trim)  # really stop pyinstrument, then report nothing
+        return None
+
+    monkeypatch.setattr(RequestProfiler, "stop", no_samples)
+    rec = make_recorder(sample_rate=0.0, always_keep_slower_than_ms=60_000)
+    b = rec.start_trace(method="GET", path="/", profile_requested=True)
+    t = rec.finish_trace(b, status=200)
+    assert t.profile is None and t.tags.get("sampled_by") == "profile"
+
+
 async def test_profiling_concurrent_async_requests():
     pytest.importorskip("pyinstrument")
     rec = make_recorder(profile="all")

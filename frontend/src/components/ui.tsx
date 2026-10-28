@@ -55,12 +55,12 @@ export function Sql({ sql, format = true, className = '' }: { sql: string; forma
   )
 }
 
-export function DiffView({ diff }: { diff: string }) {
+export function DiffView({ diff, title = 'Suggested diff', copyLabel = 'Copy diff' }: { diff: string; title?: string; copyLabel?: string }) {
   return (
     <div className="rounded-md border border-line overflow-hidden">
       <div className="flex items-center justify-between px-3 py-1.5 bg-raised border-b border-line">
-        <span className="text-[11px] font-medium text-muted">Suggested diff</span>
-        <CopyButton text={diff} label="Copy diff" className="h-6" />
+        <span className="text-[11px] font-medium text-muted">{title}</span>
+        <CopyButton text={diff} label={copyLabel} className="h-6" />
       </div>
       <pre className="m-0 overflow-x-auto py-1">
         {diff.split('\n').map((l, i) => {

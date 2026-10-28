@@ -15,6 +15,7 @@ export type IssueKind = 'n_plus_one' | 'duplicate_query' | 'slow_query' | 'too_m
   | 'blocking_in_async' | 'large_result' | 'unbounded_query' | 'inefficient_count'
   | 'slow_serializer' | 'long_transaction' | 'external_in_transaction'
   | 'slow_external' | 'duplicate_external' | 'retry_storm'
+  | 'repeated_writes' | 'deep_offset' | 'database_round_trips' | 'connection_pool_wait' | 'large_response' | 'repeated_scan' | 'large_cache_entry' | 'many_orm_instances' | 'json_decode_hotspot' | 'slow_cache_decode'
 export type Severity = 'info' | 'warning' | 'critical'
 export interface Issue {
   id: string; kind: IssueKind; severity: Severity; title: string; detail: string
@@ -27,6 +28,8 @@ export interface TraceError { type: string; message: string; traceback: string; 
 export type LogLevel = 'DEBUG' | 'INFO' | 'WARNING' | 'ERROR' | 'CRITICAL'
 export interface LogRecord { t_ms: number; level: LogLevel | string; logger: string; message: string; callsite: Callsite | null }
 export interface Trace {
+  runtime?: Record<string, string>
+  diagnostics?: { duration_ms: number; time_ms: Record<string, number>; observed_span_kinds: Record<string, number>; profile_available: boolean; complete_spans: boolean; warnings: string[]; note: string }
   id: string; framework: string; method: string; path: string; route: string | null
   view: string | null; status: number; started_at: number; duration_ms: number
   query_count: number; query_ms: number
@@ -53,6 +56,7 @@ export interface EndpointStats {
   series: { t: number; p95_ms: number; count: number }[]
 }
 export interface IssueGroup {
+  observed_total_ms?: number; fingerprint?: string | null; suppressed?: boolean; suppressed_routes?: string[]
   id: string; kind: IssueKind; severity: Severity; title: string; detail: string
   occurrences: number; first_seen: number; last_seen: number; routes: string[]
   sample_trace_id: string; sample_span_ids: string[]; suggestion: Suggestion | null; callsite: Callsite | null
@@ -75,7 +79,7 @@ export interface Meta {
   features?: Partial<Record<FeatureName, boolean>>
   access?: Access
 }
-export type FeatureName = 'load_from_ui' | 'sse' | 'snapshot' | 'explain' | 'profile' | 'replay' | 'load' | 'logs' | 'locals'
+export type FeatureName = 'load_from_ui' | 'sse' | 'snapshot' | 'explain' | 'profile' | 'replay' | 'load' | 'logs' | 'locals' | 'checks' | 'checks_from_ui'
 export interface Access {
   policy: 'local' | 'token' | 'basic' | 'framework' | 'custom' | 'open'
   login: 'token' | 'basic' | null
@@ -93,6 +97,7 @@ export interface ConfigResponse {
 }
 export type LoginBody = { token: string } | { username: string; password: string }
 export interface Speedscope {
+  $schema?: string
   shared: { frames: { name: string; file?: string; line?: number }[] }
   profiles: {
     type: 'evented' | 'sampled'; name: string; unit: string; startValue: number; endValue: number
@@ -179,3 +184,100 @@ export interface ExternalStat {
   errors: number; error_rate: number; duplicates: number; retries: number
 }
 export interface SnapshotData { trace: Trace; profile: Speedscope | null }
+
+// ---- v0.3 refactor check (CONTRACT §19) ----
+export type CheckMethod = 'GET' | 'HEAD' | 'OPTIONS'
+export interface CheckRequestDef {
+  name: string; method: CheckMethod; path: string
+  headers?: Record<string, string>
+  perf?: boolean; response?: boolean
+  ignore?: string[]; ignore_headers?: string[]
+  expect_status?: number | null
+  array_keys?: Record<string, string>
+  tolerances?: Record<string, { absolute?: number; relative?: number }>
+  budgets?: { max_queries?: number; max_median_ms?: number; max_p95_ms?: number; max_external_calls?: number; forbidden_issues?: string[] }
+}
+export interface CheckThresholds { slower_pct: number; slower_ms: number; max_query_increase: number }
+/** The suite object of §19.1 (JSON form of the TOML). */
+export interface CheckSuite {
+  name: string; base_url?: string | null
+  headers?: Record<string, string>
+  environment?: Record<string, string>
+  timeout_s?: number; repeat?: number; warmup?: number
+  thresholds?: Partial<CheckThresholds>
+  requests: CheckRequestDef[]
+}
+export interface CheckGit { sha?: string | null; branch?: string | null; dirty?: boolean | null }
+export type CheckRunKind = 'baseline' | 'compare'
+export type CheckRunStatus = 'running' | 'done' | 'failed' | 'stopped'
+/** Per-verdict counts of a finished compare (flat or under `counts`; the UI accepts both). */
+export interface CheckSummary {
+  budget_failed?: number
+  counts?: Partial<Record<PerfVerdict | ResponseVerdict | 'passed', number>>
+  faster?: number; slower?: number; same?: number; noisy?: number; changed?: number; broken?: number; missing?: number; passed?: number
+  /** Report-level warnings (e.g. requests missing from the baseline). */
+  warnings?: string[]
+  speed_change_pct?: number | null; queries_change?: number | null
+}
+/** Baseline summary: the fields of a baseline run needed to pick or describe it. */
+export interface CheckBaselineSummary { id: string; label: string | null; git?: CheckGit | null; created_at: number }
+export interface CheckRunItem {
+  id: string; suite_id: string | null; kind: CheckRunKind; baseline_id: string | null; status: CheckRunStatus
+  label: string | null; git?: CheckGit | null; created_at: number; finished_at: number | null
+  summary?: CheckSummary | null; error?: string | null
+  /** Optional live progress while running (calls done of total). */
+  progress?: { done: number; total: number; current?: string | null } | null
+}
+export interface CheckSuiteItem {
+  id: string; name: string; requests: number; updated_at: number
+  last_baseline: CheckBaselineSummary | null
+  last_compare: (Pick<CheckRunItem, 'id' | 'status' | 'created_at'> & { summary?: CheckSummary | null }) | null
+}
+export interface CheckSuiteDoc { id: string; name: string; suite: CheckSuite; created_at?: number; updated_at?: number }
+
+export type PerfVerdict = 'faster' | 'slower' | 'same' | 'noisy' | 'n/a'
+export type ResponseVerdict = 'same' | 'changed' | 'broken' | 'missing' | 'n/a'
+export interface PerfStats { samples_ms: number[]; median: number; p95: number; mean: number; stdev: number; failed: number }
+export interface ServerStats {
+  runtime?: Record<string, string>
+  duration_ms_median?: number | null; queries_median: number; queries_max?: number | null; query_ms_median?: number | null
+  sql?: Record<string, { count: number; max?: number; sql?: string }>
+  sample_trace_id?: string | null
+  issues?: { kind: IssueKind; title?: string; fingerprint?: string }[]
+}
+export interface JsonDiffEntry { path: string; kind: 'added' | 'removed' | 'changed' | 'type' | 'invalid_identity'; before: unknown; after: unknown }
+export interface ReportIssue { kind: IssueKind; title?: string; fingerprint?: string; sample_trace_id?: string | null }
+export interface ReportSql { fingerprint: string; sql: string; count?: number; sample_trace_id?: string | null }
+export interface ReportRequest {
+  budgets?: { rule: string; limit: number | string[]; observed: number | string[] | null; passed: boolean; reason?: string | null }[]
+  name: string; method: string; path: string
+  perf: { verdict: PerfVerdict; before: PerfStats | null; after: PerfStats | null; change_ms: number | null; change_pct: number | null; p_value: number | null; reason: string | null; note?: string | null }
+  server: { before: ServerStats | null; after: ServerStats | null; queries_change: number | null; new_issues: ReportIssue[]; fixed_issues: ReportIssue[]; new_sql: ReportSql[]; gone_sql: ReportSql[]
+    /** Wins that are not counted because the response is broken (fixed issues, gone SQL, query decrease). */
+    not_judged?: { fixed_issues: ReportIssue[]; gone_sql: ReportSql[]; queries_change: number | null }; note?: string | null } | null
+  response: { verdict: ResponseVerdict; status: [number | null, number | null]; diff: JsonDiffEntry[]; diff_total?: number; text_diff: string | null; ignored: string[]; rules?: { array_keys: Record<string, string>; tolerances: Record<string, { absolute?: number; relative?: number }> } }
+}
+export interface CheckReport {
+  format: 'redline-check-report'; version: number
+  suite: CheckSuite
+  baseline: { id?: string | null; file?: string | null; label: string | null; git?: CheckGit | null; created_at: number }
+  run: { id: string; git?: CheckGit | null; created_at: number; base_url: string }
+  summary?: CheckSummary
+  requests: ReportRequest[]
+}
+/** One recorded request of a baseline (§19.3). */
+export interface BaselineRequest {
+  name: string; method: string; path: string
+  perf: PerfStats | null
+  server: ServerStats | null
+  response: { status: number | null; content_type: string | null; headers?: Record<string, string>; body_kind: 'json' | 'text' | 'hash'; sha256?: string; size: number } | null
+  volatile: string[]
+}
+/** `GET api/checks/runs/{id}`: the run plus its results (`report` for compares, `requests` for baselines). */
+export interface CheckRunDetail extends CheckRunItem {
+  suite?: CheckSuite | null
+  report?: CheckReport | null
+  requests?: BaselineRequest[] | null
+}
+export interface CheckDraftBody { routes?: string[]; limit?: number }
+export type CheckStartBody = { suite_id: string; kind: CheckRunKind; baseline_id?: string; label?: string }

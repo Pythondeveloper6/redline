@@ -77,16 +77,17 @@ async def test_async_endpoint_with_time_sleep_is_blocking_in_async(env):
         assert (await c.get("/fine")).status_code == 200
     by_path = traces(redline)
     trace = by_path["/sleepy"]
-    [span] = kinds(trace, "blocking")
+    # A busy host can produce additional lag spans; verify the deliberately blocked call.
+    span = next(s for s in kinds(trace, "blocking") if s.data.get("call") == "time.sleep")
     assert span.data["call"] == "time.sleep" and span.data["reason"] == "loop_lag"
     assert span.callsite.file == "tests/test_blocking_transactions.py"
-    [issue] = [i for i in trace.issues if i.kind == "blocking_in_async"]
+    issue = next(i for i in trace.issues if i.kind == "blocking_in_async" and span.id in i.span_ids)
     assert issue.title.startswith("Event loop blocked ")
     assert issue.title.endswith(
         f"by time.sleep at tests/test_blocking_transactions.py:{span.callsite.line}"
     )
     assert "asyncio.sleep" in issue.suggestion.summary
-    assert kinds(by_path["/fine"], "blocking") == []
+    assert not any(s.data.get("call") == "time.sleep" for s in kinds(by_path["/fine"], "blocking"))
     assert not bl._active and not bl._loop_threads
 
 

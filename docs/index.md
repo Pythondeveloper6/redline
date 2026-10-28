@@ -168,6 +168,17 @@ Both packages are named in each command because Redline is not on PyPI: the adap
 
     [:octicons-arrow-right-24: Load testing](load-testing.md)
 
+-   :material-check-decagram-outline:{ .lg .middle } **Prove a refactor is safe**
+
+    ---
+
+    `redline check` replays a set of read-only requests against the old code and the new,
+    and reports what changed in the responses, which endpoints got faster or slower
+    (with a significance test), and which queries appeared or went away. Exit code and
+    PR comment included.
+
+    [:octicons-arrow-right-24: Refactor check](refactor-check.md)
+
 -   :material-chart-timeline-variant:{ .lg .middle } **Compare releases**
 
     ---

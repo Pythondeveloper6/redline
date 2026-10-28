@@ -299,3 +299,41 @@ def test_blocking_call_in_async_handler_is_recorded(make_app):
     spans = [s for s in trace.spans if s.kind == "blocking"]
     assert spans and spans[0].duration_ms >= 20
     assert trace.framework == "litestar"
+
+
+# ---------------------------------------------------------------------------- checks
+CHECK_SUITE = {"repeat": 1, "warmup": 0, "requests": [{"name": "home", "path": "/"}]}
+
+
+def test_checks_suites_and_runs(make_app, monkeypatch):
+    from redline_core.check import control as check_control
+
+    seen = {}
+
+    def fake_launch(suite, base_url, store_path, **kw):
+        seen.update(base_url=base_url, store_path=store_path, **kw)
+        return kw["run_id"]
+
+    monkeypatch.setattr(check_control, "launch_check", fake_launch)
+    app, _plugin = make_app(debug=False, settings={"access": "local"})
+    with _client(app) as c:
+        r = c.post("/_redline/api/checks/suites", json={"name": "s", "suite": CHECK_SUITE})
+        assert r.status_code == 201, r.text
+        sid = r.json()["id"]
+        r = c.put(f"/_redline/api/checks/suites/{sid}", json={"name": "s2", "suite": CHECK_SUITE})
+        assert r.status_code == 200 and r.json()["name"] == "s2"
+        r = c.post("/_redline/api/checks/runs", json={"suite_id": sid, "kind": "baseline"})
+        assert r.status_code == 403 and r.json()["error"]["code"] == "checks_from_ui_disabled"
+    app, _plugin = make_app(debug=True)  # "auto": allowed in debug mode
+    with _client(app) as c:
+        sid = c.post("/_redline/api/checks/suites", json={"name": "s", "suite": CHECK_SUITE})
+        sid = sid.json()["id"]
+        r = c.post("/_redline/api/checks/runs", json={"suite_id": sid, "kind": "baseline"})
+        assert r.status_code == 202, r.text
+        assert seen["base_url"] == "http://127.0.0.1:80"  # scope["server"], never Host
+        assert c.get(f"/_redline/api/checks/runs/{r.json()['id']}").json()["status"] == "running"
+        big = {"format": "redline-check-baseline", "version": 1, "requests": [],
+               "suite": {"name": "s", **CHECK_SUITE}, "created_at": 1767000000.0,
+               "pad": "x" * (10 * 1000 * 1000 + 10)}  # fmt: skip
+        r = c.post("/_redline/api/checks/baselines/import", json=big)  # > Litestar's 10 MB
+        assert r.status_code == 201, r.text

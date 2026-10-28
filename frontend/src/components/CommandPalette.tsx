@@ -46,7 +46,7 @@ export default function CommandPalette({ open, onClose, meta }: { open: boolean;
   }, [open])
 
   const all = useMemo<Item[]>(() => {
-    const items: Item[] = getRoutes().filter(r => r.path !== '/load' || feature(meta, 'load')).map(r => ({ id: 'p' + r.path, group: 'Pages', label: r.label, hint: r.hint, extra: r.keywords, to: r.path }))
+    const items: Item[] = getRoutes().filter(r => (r.path !== '/load' || feature(meta, 'load')) && (!r.path.startsWith('/checks') || feature(meta, 'checks')) && (r.path !== '/checks/new' || !meta?.access?.read_only)).map(r => ({ id: 'p' + r.path, group: 'Pages', label: r.label, hint: r.hint, extra: r.keywords, to: r.path }))
     if (meta?.access?.login) items.push({ id: 'a-logout', group: 'Actions', label: 'Log out', hint: 'End this session', extra: 'sign out logout', to: '', run: logout })
     for (const t of data?.traces ?? []) items.push({
       id: 't' + t.id, group: 'Requests', label: `${t.method} ${t.path}`, status: t.status,

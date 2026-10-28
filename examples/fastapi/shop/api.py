@@ -3,22 +3,31 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import time
+import uuid
 
 import httpx
 from fastapi import APIRouter, Request
 from pydantic import BaseModel
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
+from sqlalchemy.orm import selectinload
 
 from .db import AsyncSession, SyncSession
 from .models import AuditLog, Customer, Order, OrderItem, Product
 
 router = APIRouter()
 
+# SHOP_REFACTOR=1 simulates a refactor for `redline check` (see the README):
+# N+1 fixed, one endpoint slower, one response field changed, one endpoint broken.
+REFACTOR = os.environ.get("SHOP_REFACTOR") == "1"
+
 
 @router.get("/")
 async def index() -> dict:
     return {
         "try": [
+            "/patterns  (aggregation, deep pagination, ORM instances; check-suite rules)",
             "/orders  (N+1 on order items)",
             "/orders/customers  (N+1 on customers, many-to-one)",
             "/orders/1  (a healthy endpoint)",
@@ -38,6 +47,10 @@ async def index() -> dict:
 async def list_orders() -> list[dict]:
     """N+1: one query for the orders, then one per order for its items."""
     async with AsyncSession() as session:
+        if REFACTOR:  # refactor: one extra query instead of one per order
+            stmt = select(Order).options(selectinload(Order.items)).order_by(Order.id).limit(30)
+            orders = (await session.scalars(stmt)).all()
+            return [{"id": o.id, "status": o.status, "items": len(o.items)} for o in orders]
         orders = (await session.scalars(select(Order).order_by(Order.id).limit(30))).all()
         out = []
         for order in orders:
@@ -60,6 +73,8 @@ async def orders_with_customers() -> list[dict]:
 
 @router.get("/orders/{order_id}")
 async def get_order(order_id: int) -> dict:
+    if REFACTOR:  # refactor: a slower code path
+        await asyncio.sleep(0.05)
     async with AsyncSession() as session:
         order = (await session.execute(select(Order).where(Order.id == order_id))).scalar_one()
         total = await session.scalar(
@@ -75,6 +90,8 @@ async def duplicates() -> dict:
         counts = []
         for _ in range(4):
             counts.append(await session.scalar(select(func.count()).select_from(Product)))
+        if REFACTOR:  # refactor: the field is now a string
+            return {"products": str(counts[-1])}
         return {"products": counts[-1]}
 
 
@@ -100,9 +117,17 @@ async def slow() -> dict:
 @router.get("/sync/orders")
 def sync_orders() -> list[dict]:
     """A plain `def` endpoint (runs in the threadpool) lazy-loading a collection."""
+    if REFACTOR:  # refactor: a regression that breaks the endpoint
+        raise RuntimeError("tags backend not configured")
     with SyncSession() as session:
         orders = session.scalars(select(Order).order_by(Order.id).limit(20)).all()
         return [{"id": o.id, "tags": [t.name for t in o.tags]} for o in orders]
+
+
+@router.get("/status")
+async def status() -> dict:
+    """A health check with volatile fields (changes on every call)."""
+    return {"ok": True, "now": time.time(), "request_id": uuid.uuid4().hex}
 
 
 @router.get("/boom")
@@ -141,3 +166,40 @@ class Checkout(BaseModel):
 async def checkout(payload: Checkout) -> dict:
     """Send a body with secrets to see Redline redact them."""
     return {"ok": True, "email": payload.email}
+
+
+@router.get("/patterns")
+def patterns() -> dict:
+    """Aggregates, deep pagination and ORM hydration; refactor mode fixes the extra work."""
+    with SyncSession() as db:
+        if REFACTOR:
+            count, total = db.execute(
+                select(func.count(Product.id), func.sum(Product.price)).where(Product.price >= 0)
+            ).one()
+            rows = db.execute(
+                select(Product.id, Product.name, Product.price).order_by(Product.id).limit(30)
+            ).all()
+        else:
+            count = db.scalar(select(func.count(Product.id)).where(Product.price >= 0))
+            total = db.scalar(select(func.sum(Product.price)).where(Product.price >= 0))
+            db.execute(select(Product.id).order_by(Product.id).limit(5).offset(10000)).all()
+            rows = db.scalars(select(Product).order_by(Product.id).limit(30)).all()
+        items = [{"id": row.id, "name": row.name, "price": float(row.price)} for row in rows]
+        if REFACTOR:
+            items.reverse()
+        return {
+            "items": items,
+            "count": count,
+            "total": float(total or 0) + (0.005 if REFACTOR else 0),
+        }
+
+
+@router.post("/patterns/writes")
+def pattern_writes() -> dict:
+    """Execute six individual writes, then roll them all back. No changes are committed."""
+    with SyncSession() as db:
+        ids = db.scalars(select(Product.id).order_by(Product.id).limit(6)).all()
+        for ident in ids:
+            db.execute(update(Product).where(Product.id == ident).values(price=Product.price))
+        db.rollback()
+    return {"writes": len(ids), "rolled_back": True}

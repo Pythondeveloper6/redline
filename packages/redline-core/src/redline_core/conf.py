@@ -12,6 +12,7 @@ from __future__ import annotations
 import dataclasses
 import difflib
 import ipaddress
+import math
 import os
 import re
 import subprocess
@@ -67,6 +68,7 @@ FEATURES: tuple[str, ...] = (
     "logs",
     "locals",
     "sse",
+    "checks",
 )
 #: What each preset changes; a preset only sets defaults – any explicit value wins.
 PRESETS: dict[str, dict[str, Any]] = {
@@ -84,10 +86,20 @@ PRESETS: dict[str, dict[str, Any]] = {
         "badge": False,
         "server_timing": False,
         "load_from_ui": False,
+        "checks_from_ui": False,
+        "analysis_from_ui": False,
         "explain_analyze": False,
         "profile": "off",
     },
 }
+#: Settings that take ``"auto"`` besides True/False.
+_AUTO_FIELDS: tuple[str, ...] = (
+    "badge",
+    "server_timing",
+    "checks_from_ui",
+    "analysis_from_ui",
+    "cookie_secure",
+)
 #: Settings never shown in clear (``GET api/config``, ``redline config``).
 SECRET_SETTINGS: tuple[str, ...] = ("token", "secret_key", "basic_users")
 #: Prefix of the hashes made by ``redline hash-password``.
@@ -174,6 +186,18 @@ class Settings:
     long_transaction_ms: float = 200.0
     slow_external_ms: float = 500.0
 
+    orm_instances_threshold: int = 500
+    repeated_writes_threshold: int = 5
+    deep_offset_rows: int = 10000
+    round_trip_count: int = 10
+    repeated_scans_threshold: int = 2
+    large_response_bytes: int = 1000000
+    large_cache_bytes: int = 1000000
+    round_trip_ms: float = 100.0
+    pool_wait_ms: float = 50.0
+    json_decode_ms: float = 50.0
+    cache_decode_ms: float = 50.0
+
     # logs & exceptions
     capture_logs: bool = True
     #: Minimum level captured into a trace (case-insensitive; stored upper-case).
@@ -197,6 +221,10 @@ class Settings:
     # history & load testing
     history_retention_days: int | None = 90
     load_from_ui: bool = False
+    #: Start refactor-check runs (baseline / compare) from the UI; ``"auto"`` = only while
+    #: the framework is in debug mode (``CONTRACT.md`` §19.5).
+    checks_from_ui: bool | str = "auto"
+    analysis_from_ui: bool | str = "auto"
 
     # configuration & access control (CONTRACT.md section 18)
     #: ``dev`` / ``staging`` / ``production``: a set of defaults, see :data:`PRESETS`. It
@@ -248,6 +276,8 @@ class Settings:
             "log_level",
             "badge",
             "server_timing",
+            "checks_from_ui",
+            "analysis_from_ui",
             "cookie_secure",
             "preset",
             "access",
@@ -355,7 +385,7 @@ def _coerce(name: str, value: Any) -> Any:
         return "/" + value.strip().strip("/")
     if name in _MAP_FIELDS:
         return _coerce_mapping(name, value)
-    if name in ("badge", "server_timing", "cookie_secure") and isinstance(value, str):
+    if name in _AUTO_FIELDS and isinstance(value, str):
         return value.strip().lower() if value.strip().lower() == "auto" else value
     if name in _SEQ_FIELDS:
         if isinstance(value, str):
@@ -413,6 +443,13 @@ def _validate(s: Settings) -> None:
     ):
         _check_type(s, name, (bool,), "True or False")
     for name in (
+        "orm_instances_threshold",
+        "repeated_writes_threshold",
+        "deep_offset_rows",
+        "round_trip_count",
+        "repeated_scans_threshold",
+        "large_response_bytes",
+        "large_cache_bytes",
         "max_body_bytes",
         "n_plus_one_threshold",
         "duplicate_threshold",
@@ -448,6 +485,10 @@ def _validate(s: Settings) -> None:
         "sample_rate",
         "profile_sample_rate",
         "always_keep_slower_than_ms",
+        "round_trip_ms",
+        "pool_wait_ms",
+        "json_decode_ms",
+        "cache_decode_ms",
         "slow_query_ms",
         "blocking_ms",
         "slow_serializer_ms",
@@ -457,6 +498,10 @@ def _validate(s: Settings) -> None:
         _check_type(s, name, (int, float), "a number")
         if getattr(s, name) < 0:
             raise SettingsError(f"Redline setting {name!r} must not be negative.")
+    for name in ("round_trip_ms", "pool_wait_ms", "json_decode_ms", "cache_decode_ms"):
+        value = getattr(s, name)
+        if isinstance(value, float) and not math.isfinite(value):
+            raise SettingsError(f"Redline setting {name!r} must be finite.")
     for name in ("sample_rate", "profile_sample_rate"):
         if not 0.0 <= getattr(s, name) <= 1.0:
             raise SettingsError(f"Redline setting {name!r} must be between 0 and 1.")
@@ -473,7 +518,7 @@ def _validate(s: Settings) -> None:
             f"Redline setting 'log_level' must be one of {', '.join(LOG_LEVELS)} "
             f"(case-insensitive); got {s.log_level!r}."
         )
-    for name in ("badge", "server_timing", "cookie_secure"):
+    for name in _AUTO_FIELDS:
         value = getattr(s, name)
         if not isinstance(value, bool) and value != "auto":
             raise SettingsError(
