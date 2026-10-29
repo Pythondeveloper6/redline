@@ -208,6 +208,7 @@ class Settings:
     # detectors
     n_plus_one_threshold: int = 5
     duplicate_threshold: int = 2
+    sql_retry_storm_threshold: int = 3
     slow_query_ms: float = 100.0
     too_many_queries: int = 50
 
@@ -539,6 +540,7 @@ def _validate(s: Settings) -> None:
         "max_body_bytes",
         "n_plus_one_threshold",
         "duplicate_threshold",
+        "sql_retry_storm_threshold",
         "too_many_queries",
         "writer_queue_size",
         "large_result_rows",
@@ -569,6 +571,7 @@ def _validate(s: Settings) -> None:
     for name in (
         "n_plus_one_threshold",
         "duplicate_threshold",
+        "sql_retry_storm_threshold",
         "writer_queue_size",
         "session_ttl_s",
         "max_login_attempts",

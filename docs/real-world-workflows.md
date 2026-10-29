@@ -52,6 +52,11 @@ A raw rowcount of `-1` means unavailable. `dml_rowcount_unknown` on SQL Server c
 reviewing NOCOUNT, OUTPUT/returning results, batches and driver behavior; it does not prove
 NOCOUNT is enabled or that a write failed. A 404 alone never establishes that cause.
 
+`sql_retry_storm` groups attempts of the same statement and callsite inside one trace. It
+requires at least three attempts after a transient, disconnect, deadlock or timeout failure
+(the threshold is configurable). It reports the categories and total time; it never retries
+or resets anything.
+
 Direct session switches are observed without issuing probes or resets. SQL Server's
 NOCOUNT/XACT_ABORT/ANSI/ARITHABORT switches, transaction isolation level,
 `IDENTITY_INSERT`, language/date/timeout/deadlock settings and `sp_set_session_context`

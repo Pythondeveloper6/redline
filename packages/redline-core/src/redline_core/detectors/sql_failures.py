@@ -28,6 +28,71 @@ _ADVICE = {
 }
 
 
+_RETRY_CATEGORIES = {"transient", "disconnect", "deadlock", "timeout"}
+
+
+def _retry_storms(trace, settings):
+    """Same statement and callsite attempted repeatedly after a transient failure."""
+    threshold = max(1, settings.sql_retry_storm_threshold)
+    groups = defaultdict(list)
+    for span in trace.spans:
+        if span.kind != "sql" or not span.data.get("fingerprint"):
+            continue
+        location = span.callsite.location if span.callsite else None
+        groups[(span.data.get("db_alias"), span.data["fingerprint"], location)].append(span)
+    issues = []
+    for (_alias, fingerprint, _location), spans in groups.items():
+        failure = next(
+            (index for index, span in enumerate(spans) if span.data.get("error")),
+            None,
+        )
+        if failure is None:
+            continue
+        retries = len(spans) - failure - 1
+        if retries < threshold:
+            continue
+        categories = {
+            span.data["error"].get("category") for span in spans if span.data.get("error")
+        }
+        if not categories.intersection(_RETRY_CATEGORIES):
+            continue
+        total = sum(span.duration_ms for span in spans)
+        callsite = spans[0].callsite
+        location = callsite.location if callsite else None
+        severity = "critical" if retries >= 2 * threshold else "warning"
+        issues.append(
+            Issue(
+                id=issue_id("sql_retry_storm", fingerprint, location),
+                kind="sql_retry_storm",
+                severity=severity,
+                title=(
+                    f"SQL retry storm: {len(spans)} attempts, {retries} after a failure"
+                    + (f" at {location}" if location else "")
+                ),
+                detail=(
+                    f"The same statement was attempted {len(spans)} times "
+                    f"({total:.1f} ms in total); {retries} attempts followed a "
+                    f"{'/'.join(sorted(c for c in categories if c))} failure. Retrying a "
+                    "failed statement inside one request multiplies latency and load. "
+                    "Retry only safe reads or whole transactions, with a small cap and "
+                    "backoff; never retry a write blindly."
+                ),
+                span_ids=[span.id for span in spans],
+                fingerprint=fingerprint,
+                callsite=callsite,
+                count=len(spans),
+                total_ms=round(total, 3),
+                extra={
+                    "attempts": len(spans),
+                    "retries": retries,
+                    "categories": sorted(c for c in categories if c),
+                    "db_alias": _alias,
+                },
+            )
+        )
+    return issues
+
+
 def detect(trace, settings):
     groups = defaultdict(list)
     for span in trace.spans:
@@ -183,4 +248,4 @@ def detect(trace, settings):
                 },
             )
         )
-    return issues
+    return issues + _retry_storms(trace, settings)
