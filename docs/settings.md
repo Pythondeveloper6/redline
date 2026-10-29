@@ -118,6 +118,7 @@ See [N+1 detection](n-plus-one.md).
 |---|---|---|---|---|
 | `n_plus_one_threshold` | `int` | `5` | 2 | The same read from the same line at least this many times is an N+1 |
 | `duplicate_threshold` | `int` | `2` | 2 | Identical SQL and params at least this many times is a duplicate |
+| `sql_retry_storm_threshold` | `int` | `3` | 2 | Attempts after a transient SQL failure (same statement and callsite) before a `sql_retry_storm` finding |
 | `slow_query_ms` | `float` | `100` | 0 | A query at least this slow is a slow query. `0` flags every query. It also feeds the N+1 and duplicate severity rules |
 | `too_many_queries` | `int` | `50` | 0 | A request with at least this many queries is over budget. `0` disables the check |
 | `blocking_ms` | `float` | `20` | 0 | A stall of the event loop of at least this long is reported. See [Blocking in async](async-blocking.md) |

@@ -15,6 +15,7 @@ version is below `1.0` the public API may change between minor versions.
 - SQL failure recordings and issue groups, raw rowcounts, comment-placeholder findings,
   connection lifecycle evidence and observed session-state checks for SQL Server isolation,
   `IDENTITY_INSERT`, value switches, session context and PostgreSQL/MySQL session state.
+  A SQL retry-storm finding groups repeated attempts after a transient failure.
 - SQL Server identity, estimated/opt-in actual XML plan collection, logical-read summaries
   and bounded catalog inspection. Live driver validation remains required.
 - Offline `redline check-sql`, explicit online compilation and schema snapshots, bounded

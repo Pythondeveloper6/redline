@@ -57,6 +57,7 @@ export const ISSUE_LABEL: Record<string, string> = {
   json_decode_hotspot: 'JSON decoding hotspot',
   many_orm_instances: 'Many ORM instances',
   retry_storm: 'Retry storm',
+  sql_retry_storm: 'SQL retry storm',
   repeated_writes: 'Repeated writes',
   deep_offset: 'Deep offset',
   database_round_trips: 'Database round trips',
@@ -82,5 +83,6 @@ export const ISSUE_STYLE: Record<string, { tone: 'bad' | 'warn' | 'info'; d: str
   slow_external: { tone: 'bad', d: 'M12 3a9 9 0 100 18 9 9 0 000-18zM12 7v5l3 2' },
   duplicate_external: { tone: 'warn', d: 'M9 9h10v10H9zM5 15V5h10' },
   retry_storm: { tone: 'bad', d: 'M20 11a8 8 0 00-14.9-3M4 4v4h4M4 13a8 8 0 0014.9 3M20 20v-4h-4' },
+  sql_retry_storm: { tone: 'bad', d: 'M4 6c0-1.7 3.6-3 8-3s8 1.3 8 3-3.6 3-8 3-8-1.3-8-3zM4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6M17 13h-6M13 10l-3 3 3 3' },
   schema_drift: { tone: 'warn', d: 'M4 6c0-1.7 3.6-3 8-3s8 1.3 8 3-3.6 3-8 3-8-1.3-8-3zM4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6M8 12h8M13 9l3 3-3 3' },
 }
