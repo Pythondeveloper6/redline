@@ -912,11 +912,15 @@ Jobs use existing trace endpoints, with `method = "TASK"` and tags such as `job.
 GET api/traces?method=TASK&limit=100
 GET api/traces?tag=job.id:example-task
 GET api/traces?tag=request_id:example-request
+GET api/jobs/summary?window=1d&limit=200
 ```
 
 `job.outcome` distinguishes success, failure and retry observations. Stage spans use the
-existing `custom` kind with `job_stage` metadata. Row outcomes are bounded counters by
-reason digest, not captured rows/IDs. `commit_observed_before_failure` is evidence that
+existing `custom` kind with `job_stage` metadata; the first stage that raises is tagged as
+`job.first_failing_stage`. The summary endpoint aggregates retained task recordings (at
+most 500, newest first) into outcome, latency and first-failing-stage counts without
+reading span payloads. Row outcomes are bounded counters by reason digest, not captured
+rows/IDs. `commit_observed_before_failure` is evidence that
 an observed commit preceded a later failure, not proof that the whole job completed.
 `user_id` is an explicitly resolved identifier; request IDs are labels, not authorization.
 

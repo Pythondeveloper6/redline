@@ -519,6 +519,7 @@ Concrete decisions (v0.2 implementation):
 | `GET api/releases` | `{items: [{release, first_seen, last_seen, requests}]}` |
 | `GET api/history/compare?a=&b=` | `a`/`b` are `release:<name>` or `range:<start>-<end>` (epoch seconds). `{a, b, endpoints: [{route, method, a: Stats, b: Stats, delta_p95_pct, delta_queries, verdict: "regressed"\|"improved"\|"same"\|"new"\|"gone"}], issues: {new: [...], resolved: [...], persisting: [...]}}`; regressed = p95 +20% and +5 ms, or avg queries +1 |
 | `GET api/lifecycle?window=&limit=` | `{window, items: [{bucket, release, db_alias, vendor, connects_hour, fresh_failures_hour, updated_at}]}`; hourly gauges, newest first, at most 500 rows |
+| `GET api/jobs/summary?window=1d&limit=200` | `{window, sampled, total, truncated, outcomes: {outcome: count}, first_failing_stages: {stage: count}, unattributed_failures, jobs: [{name, queue, total, outcomes, first_failing_stages, p50_ms, p95_ms, last_started_at}]}`; at most 500 retained task recordings, newest first |
 | `GET api/runs` / `GET api/runs/{id}` | runs list / `{id, name, status, config, created_at, finished_at, steps: [Step], summary: {knee_step, max_ok_rps, verdict}}` with `Step = {step, target_rps, achieved_rps, sent, ok, errors, dropped, p50_ms, p95_ms, p99_ms, max_ms, error_rate, error_breakdown}` |
 | `GET api/runs/{id}/bottlenecks` | `{steps: [{step, target_rps}], items: [{key, kind, label, callsite, per_step: [{step, mean_ms, p95_ms, count}], growth: float}]}` sorted by growth – the "query X went 3 ms → 410 ms" view |
 | `POST api/runs` / `POST api/runs/{id}/stop` / `DELETE api/runs/{id}` | start (403 `load_disabled` unless `load_from_ui`; the target is always the app's own base URL, given by the adapter) / stop / delete |
@@ -1385,8 +1386,11 @@ issue. The first run establishes a baseline; it never runs migrations or repairs
 Job helpers produce TASK traces with nested stage spans, bounded reason-digest outcome
 counters and no arguments/results/row samples. Celery is optional and installed in the
 worker process. Parent/request correlation, success/failure/retry states and observed
-commits before later failures are inspectable. No pre-start task execution is invented.
-Flask nested mode requires a shared recorder/store and reuses an active outer context.
+commits before later failures are inspectable. The first stage that raises is tagged as
+`job.first_failing_stage`, and `GET api/jobs/summary` aggregates retained task outcomes,
+latency and first failing stages without reading span payloads. No pre-start task
+execution is invented. Flask nested mode requires a shared recorder/store and reuses an
+active outer context.
 
 Secondary SQLite stores are opened read-only for request/job/profile browsing. Aggregates,
 history, live tails and mutations remain primary-only; secondary database inspection is
