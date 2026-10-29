@@ -131,17 +131,26 @@ redline check-sql app/queries.py --dsn "$DEV_DATABASE_DSN" \
 ```
 
 Run the snapshot command after a migration to compare the default schema's column names,
-types and nullability. It updates the local snapshot and recompiles all extracted
-statements; it does not automatically run migrations or certify that all application SQL
-was extracted. Snapshots are capped at 200 tables and 500 columns per table.
+types and nullability, plus SQL Server trigger and routine-parameter metadata. It updates
+the local snapshot and, when a previous snapshot exists, recompiles only extracted
+statements that reference an added, removed or changed table (including a table whose
+triggers changed). An unchanged schema skips statement compilation; routine-parameter
+changes recompile everything because those dependencies are not statically resolved. It
+does not automatically run migrations or certify that all application SQL was extracted.
+Snapshots are capped at 200 tables, 500 columns per table, 1000 triggers and 2000 routine
+parameters.
 
 Compilation uses SQLite EXPLAIN, PostgreSQL EXPLAIN without ANALYZE, MySQL server-side
-PREPARE/DEALLOCATE, or SQL Server NOEXEC with cleanup on a dedicated connection. Only
-supported single statements are accepted. Parameter values are NULL placeholders;
-type-dependent validity, temporary objects, stored procedures and runtime permissions may
-remain unresolved. In particular, SQL Server NOEXEC supports deferred name resolution.
-Use an isolated development login/database: server compilation can involve extensions or
-planner functions. Driver messages and DSNs are not included in machine-readable results.
+PREPARE/DEALLOCATE, or SQL Server NOEXEC with cleanup on a dedicated connection. SQL
+Server parameter types are read from `sp_describe_undeclared_parameters` and declared in
+the NOEXEC batch; a single read statement also gets `sp_describe_first_result_set` so a
+literal `row["col"]` read that the SELECT no longer returns is reported as a low-confidence
+candidate. Only supported single statements are accepted. Parameter values are NULL
+placeholders; type-dependent validity, temporary objects, stored procedures and runtime
+permissions may remain unresolved. In particular, SQL Server NOEXEC supports deferred name
+resolution. Use an isolated development login/database: server compilation can involve
+extensions or planner functions. Driver messages and DSNs are not included in
+machine-readable results.
 
 ## Safer shared-development recording
 

@@ -529,4 +529,14 @@ def command(args, out, err):
             f"{len(report['skipped'])} unresolved inputs",
             file=out,
         )
+        for item in report.get("compilation", ()):
+            selective = item.get("selective")
+            if selective:
+                print(
+                    f"online: {selective['compiled']} compiled, "
+                    f"{selective['skipped_unchanged']} skipped "
+                    f"({selective['reason']})",
+                    file=out,
+                )
+                break
     return 2 if report["skipped"] else 1 if fresh else 0

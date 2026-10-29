@@ -1364,7 +1364,10 @@ SQL Server compilation asks the server for parameter types and, for a single rea
 statement, result columns, declares those types under NOEXEC and never exports driver
 messages. A literal `row["col"]`/`row.col` read that the described SELECT does not return
 is a low-confidence candidate, not proof. Schema snapshots contain bounded
-default-schema column metadata, not rows.
+default-schema column, SQL Server trigger and routine-parameter metadata, not rows. When
+a previous snapshot exists, only statements referencing added, removed or changed tables
+(including trigger changes) are recompiled; an unchanged schema and routine-only changes
+have explicit skip/full-compile rules.
 
 Job helpers produce TASK traces with nested stage spans, bounded reason-digest outcome
 counters and no arguments/results/row samples. Celery is optional and installed in the
