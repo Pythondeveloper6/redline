@@ -616,3 +616,41 @@ def test_live_postgres_catalog_and_unused(pg, store):
     assert "orders_never" in unused
     assert "orders_pkey" not in unused
     assert unused["orders_never"]["size_bytes"] > 0
+
+
+def test_mssql_unused_indexes_use_usage_dmv():
+    from redline_core.index_advisor import unused_indexes
+
+    seen = []
+
+    def executor(sql, params):
+        seen.append(sql)
+        assert "sys.dm_db_index_usage_stats" in sql
+        return [("dbo", "orders", "ix_orders_never", 0, 16384)]
+
+    rows = unused_indexes(executor, "mssql")
+    assert seen and "TOP (100)" in seen[0]
+    assert rows == [
+        {
+            "schema": "dbo",
+            "table": "orders",
+            "index": "ix_orders_never",
+            "scans": 0,
+            "size_bytes": 16384,
+            "drop_sql": "DROP INDEX [ix_orders_never] ON [dbo].[orders];",
+        }
+    ]
+
+
+def test_api_indexes_mssql_without_executor_reports_unused_unavailable(store):
+    now = time.time()
+    span = sql_span("SELECT * FROM orders WHERE customer_id = @p0", [1])
+    span.data["vendor"] = "mssql"
+    store.save(make_trace(started_at=now - 5, spans=[span]))
+    api = RedlineAPI(store, Settings(), explain_executor=lambda alias, vendor: None)
+    status, payload = api.dispatch("GET", "api/indexes")
+    assert status == 200
+    assert payload["vendor"] == "mssql"
+    assert payload["unused_supported"] is False
+    assert payload["unused_error"]["code"] == "explain_unavailable"
+    assert "sys.dm_db_index_usage_stats" in payload["unused_error"]["message"]

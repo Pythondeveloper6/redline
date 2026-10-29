@@ -602,11 +602,13 @@ Concrete decisions (v0.2 implementation):
   - **est_saving_ms** = Σ over credited requirements of (time share × 0.8 when that query's EXPLAIN showed a scan
     of the table, else × 0.4). **confidence**: `high` = a scan was seen; `medium` = B-tree not explained; `low` =
     non-B-tree (not a drop-in, see `note`) or every covered query is already planned without a scan.
-  - **Unused** (PostgreSQL only): `pg_stat_user_indexes` with `idx_scan = 0`, excluding primary keys, unique
-    indexes and constraint-backing indexes, by `pg_relation_size` desc, ≤ 100 (counts since the last stats reset).
-    Other vendors: `unused_supported: false`, `unused_error: null`. PostgreSQL without an executor:
-    `unused_error.code = "explain_unavailable"` (the would-be 501), a failed query: `explain_failed`; the response
-    itself stays 200.
+  - **Unused** (PostgreSQL and SQL Server): PostgreSQL reads `pg_stat_user_indexes` with `idx_scan = 0` and
+    `pg_relation_size`; SQL Server reads `sys.dm_db_index_usage_stats` with zero seeks/scans/lookups and
+    `sys.dm_db_partition_stats` size. Both exclude primary keys, unique indexes and constraint-backing indexes,
+    order by size desc, cap at 100 and report counts since the statistics last reset (SQL Server also resets on
+    restart). SQLite/MySQL: `unused_supported: false`, `unused_error: null`. A supported vendor without an
+    executor: `unused_error.code = "explain_unavailable"` (the would-be 501), a failed query:
+    `explain_failed`; the response itself stays 200.
   - **Cache.** Answers are cached per `(window, db)` for 30 s in the `RedlineAPI` instance (`cached: true`);
     `refresh=1` bypasses it. Errors: 400 `invalid_window`.
 

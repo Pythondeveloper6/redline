@@ -27,6 +27,8 @@ version is below `1.0` the public API may change between minor versions.
   Server triggers and routine parameters, and schema drift recompiles only statements that
   reference affected tables. `redline schema-watch` polls the comparison, writes a baseline
   on its first run and can persist a `schema_drift` issue without running migrations.
+  Unused-index analysis covers SQL Server's usage DMV, and repeated raw `text()` SQL gets a
+  batching hint when no ORM relationship matches.
 - Generic jobs/stages/row outcomes, optional Celery signals, retry outcomes and commit-before-
   failure evidence; Jobs, SQL checker and redaction-preview UI surfaces. Jobs record the
   first failing stage and `GET api/jobs/summary` aggregates outcome, latency and stage

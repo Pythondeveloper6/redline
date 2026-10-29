@@ -97,9 +97,10 @@ says the advisor is not available and the API answers `501 not_supported`.
 
 ## Unused indexes
 
-On **PostgreSQL**, Redline lists indexes that have **never been scanned** since the
-statistics were last reset (primary keys, unique indexes and indexes backing a constraint
-are excluded):
+On **PostgreSQL** and **SQL Server**, Redline lists indexes that have **never been scanned**
+since the statistics were last reset (primary keys, unique indexes and indexes backing a
+constraint are excluded). SQL Server additionally resets its usage counters when the
+instance restarts:
 
 | Column | Meaning |
 |---|---|
@@ -108,10 +109,11 @@ are excluded):
 | Size | disk it occupies |
 | Copy DROP | the `DROP INDEX` statement |
 
-Support is **PostgreSQL only** (it reads `pg_stat_user_indexes`). For SQLite and MySQL the
-page says the detection is not supported (`unused_supported: false` in the API). If the
-database connection for the alias is missing or the statistics query fails on PostgreSQL,
-`unused_error` carries the reason.
+PostgreSQL reads `pg_stat_user_indexes`; SQL Server reads
+`sys.dm_db_index_usage_stats` and sizes from `sys.dm_db_partition_stats`. For SQLite and
+MySQL the page says the detection is not supported (`unused_supported: false` in the API).
+If the database connection for the alias is missing or the statistics query fails on a
+supported vendor, `unused_error` carries the reason.
 
 The advisor result is cached for 30 seconds per window and database, because it runs
 catalog reads and EXPLAINs. Add `refresh=1` to recompute at once; the response says
@@ -119,8 +121,8 @@ catalog reads and EXPLAINs. Add `refresh=1` to recompute at once; the response s
 
 Before dropping anything:
 
-- Statistics **reset** on restart, failover or `pg_stat_reset()`. A freshly restarted
-  database makes every index look unused.
+- Statistics **reset** on restart, failover or `pg_stat_reset()` (SQL Server also resets
+  on restart). A freshly restarted database makes every index look unused.
 - Check a **replica** and a **full business cycle**: month-end reports use indexes that
   nothing else touches.
 - Unique and primary-key indexes enforce constraints even when they are never scanned. Do
