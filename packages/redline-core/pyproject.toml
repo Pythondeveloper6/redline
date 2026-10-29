@@ -89,10 +89,12 @@ dev = [
 ]
 
 [tool.hatch.build.targets.wheel]
+core-metadata-version = "2.4"
 packages = ["src/redline_core"]
 exclude = ["**/__pycache__", "**/*.py[cod]", "**/.DS_Store"]
 
 [tool.hatch.build.targets.sdist]
+core-metadata-version = "2.4"
 include = ["/src/redline_core", "/tests", "/README.md", "/LICENSE"]
 exclude = ["**/__pycache__", "**/*.py[cod]", "**/.DS_Store"]
 

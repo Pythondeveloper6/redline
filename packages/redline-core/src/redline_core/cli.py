@@ -547,12 +547,25 @@ def _doctor_checks(resolved: Any) -> list[tuple[str, str, str]]:
         probe = parent
         while probe and not os.path.exists(probe):
             probe = os.path.dirname(probe) if os.path.dirname(probe) != probe else ""
-        if os.path.exists(target) and not os.access(target, os.W_OK):
-            checks.append(("fail", "storage", f"{target} is not writable"))
-        elif probe and os.access(probe, os.W_OK | os.X_OK):
-            checks.append(("ok", "storage", f"{target} is writable"))
-        else:
+        try:
+            import tempfile
+
+            if not probe:
+                raise OSError("No existing parent directory")
+            if os.path.lexists(target):
+                # Check the kernel's write permission without truncating or changing
+                # the configured database. Parent creation is needed for SQLite WAL.
+                fd = os.open(target, os.O_WRONLY)
+                os.close(fd)
+            # access(W_OK) can succeed on procfs/read-only mounts under root while
+            # actual file creation fails. Probe only an owned temporary file.
+            with tempfile.TemporaryFile(dir=probe, prefix=".redline-doctor-") as temporary:
+                temporary.write(b"x")
+                temporary.flush()
+        except OSError:
             checks.append(("fail", "storage", f"cannot create or write {target}"))
+        else:
+            checks.append(("ok", "storage", f"{target} is writable"))
 
     # UI bundle
     if ui.is_built():

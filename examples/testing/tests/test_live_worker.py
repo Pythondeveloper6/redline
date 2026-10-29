@@ -1,7 +1,7 @@
 """Actual Redis delivery and prefork worker lifecycle, only in disposable Compose.
 
 This suite intentionally runs separately from package tests. The runner supplies
-REDLINE_COMPOSE_TESTS=1, REDLINE_TEST_REDIS_URL and REDLINE_TEST_WORKER_STORE.
+REDLINE_TEST_COMPOSE=1, REDLINE_TEST_REDIS_URL and REDLINE_TEST_WORKER_STORE.
 It starts/stops its own worker process group, never purges Redis or controls other workers.
 """
 
@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 
 pytestmark = pytest.mark.skipif(
-    os.environ.get("REDLINE_COMPOSE_TESTS") != "1", reason="disposable Compose opt-in required"
+    os.environ.get("REDLINE_TEST_COMPOSE") != "1", reason="disposable Compose opt-in required"
 )
 ROOT = Path(__file__).resolve().parents[3]
 

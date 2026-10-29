@@ -74,10 +74,12 @@ dev = [
 redline-core = { workspace = true }
 
 [tool.hatch.build.targets.wheel]
+core-metadata-version = "2.4"
 packages = ["src/fastapi_redline"]
 exclude = ["**/__pycache__", "**/*.py[cod]", "**/.DS_Store"]
 
 [tool.hatch.build.targets.sdist]
+core-metadata-version = "2.4"
 include = ["/src/fastapi_redline", "/tests", "/README.md", "/LICENSE"]
 exclude = ["**/__pycache__", "**/*.py[cod]", "**/.DS_Store"]
 
