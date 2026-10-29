@@ -52,7 +52,10 @@ def test_failed_statement_does_not_leak_state(tmp_path):
                 pass
             conn.execute(text("select 1")).all()
     sql = [s.data["sql"] for s in rec.last_trace.spans if s.kind == "sql"]
-    assert sql == ["select 1"]
+    assert sql == ["select * from missing", "select 1"]
+    spans = [s for s in rec.last_trace.spans if s.kind == "sql"]
+    assert spans[0].data["error"] and "error" not in spans[1].data
+    assert "sql_error" in rec.last_trace.issue_kinds
 
 
 def test_instrument_is_idempotent(tmp_path):

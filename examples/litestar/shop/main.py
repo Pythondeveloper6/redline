@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from litestar import Litestar
@@ -18,7 +19,7 @@ app = Litestar(
             settings={
                 "slow_query_ms": 40,
                 "always_keep_slower_than_ms": 300,
-                "access": "local",
+                "access": os.environ.get("REDLINE_ACCESS", "local"),
                 "checks_from_ui": True,
                 "analysis_from_ui": True,
                 "project_root": str(Path(__file__).resolve().parent.parent),

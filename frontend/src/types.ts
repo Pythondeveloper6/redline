@@ -11,7 +11,7 @@ export interface Suggestion {
   summary: string; code: string | null; diff: string | null
   confidence: 'high' | 'medium' | 'low'; docs_url: string | null
 }
-export type IssueKind = 'n_plus_one' | 'duplicate_query' | 'slow_query' | 'too_many_queries'
+export type IssueKind = 'application_error' | 'sql_error' | 'placeholder_in_comment' | 'dml_rowcount_unknown' | 'session_state_leak' | 'fresh_connection_failure' | 'connection_churn' | 'connection_failure' | 'n_plus_one' | 'duplicate_query' | 'slow_query' | 'too_many_queries'
   | 'blocking_in_async' | 'large_result' | 'unbounded_query' | 'inefficient_count'
   | 'slow_serializer' | 'long_transaction' | 'external_in_transaction'
   | 'slow_external' | 'duplicate_external' | 'retry_storm'
@@ -38,10 +38,13 @@ export interface Trace {
   spans: Span[]; issues: Issue[]; tags: Record<string, string>
   error: TraceError | null
   logs?: LogRecord[]; logs_dropped?: number; release?: string | null
-  truncated?: { dropped_spans: number; max_spans: number } | null
+  truncated?: { dropped_spans?: number; max_spans?: number; capture_limits?: boolean;
+    capture_errors?: number; incomplete_evidence?: boolean; analysis_failed?: boolean;
+    reason?: string; sql_errors?: number; connection_errors?: number } | null
   has_profile: boolean
 }
 export interface TraceSummary {
+  ambiguous_trace_id?: boolean
   id: string; method: string; path: string; route: string | null; view: string | null
   status: number; started_at: number; duration_ms: number; query_count: number; query_ms: number
   issue_count: number; issue_kinds: IssueKind[]; has_profile: boolean; tags: Record<string, string>
@@ -66,6 +69,7 @@ export interface PlanNode {
   actual_ms: number | null; children: PlanNode[]; flags: string[]
 }
 export interface ExplainResult {
+  statistics?: { logical_reads?: Record<string, number>; note?: string }
   vendor: string; analyzed: boolean; plan: unknown; text: string; tree: PlanNode
   findings: { severity: Severity; title: string; detail: string }[]
   suggested_indexes: string[]
@@ -79,12 +83,12 @@ export interface Meta {
   features?: Partial<Record<FeatureName, boolean>>
   access?: Access
 }
-export type FeatureName = 'load_from_ui' | 'sse' | 'snapshot' | 'explain' | 'profile' | 'replay' | 'load' | 'logs' | 'locals' | 'checks' | 'checks_from_ui'
+export type FeatureName = 'replay_writes' | 'load_from_ui' | 'sse' | 'snapshot' | 'explain' | 'profile' | 'replay' | 'load' | 'logs' | 'locals' | 'checks' | 'checks_from_ui'
 export interface Access {
   policy: 'local' | 'token' | 'basic' | 'framework' | 'custom' | 'open'
   login: 'token' | 'basic' | null
   read_only: boolean
-  preset: 'dev' | 'staging' | 'production'
+  preset: 'dev' | 'shared-dev' | 'staging' | 'production'
 }
 export type ConfigSource = 'default' | 'adapter' | 'preset' | 'file' | 'env' | 'framework'
 export interface ConfigResponse {
@@ -108,7 +112,7 @@ export interface Speedscope {
 }
 export interface TraceFilters {
   q?: string; method?: string; status?: string; min_ms?: string; min_queries?: string; has_issues?: string
-  replay_of?: string; route?: string; sql?: string; since?: string
+  replay_of?: string; route?: string; sql?: string; since?: string; tag?: string
 }
 
 export interface CompareResult {

@@ -10,7 +10,8 @@ import { I, Icon } from './ui'
 export default function RequestActions({ trace, offline = false }: { trace: Trace; offline?: boolean }) {
   const [replay, setReplay] = useState(false)
   const replayOn = useFeatures().has('replay')
-  const canReplay = !offline && replayOn
+  const writeReplay = useFeatures().has('replay_writes')
+  const canReplay = !offline && replayOn && trace.method !== 'TASK' && !trace.tags.synthetic_demo && (['GET', 'HEAD'].includes(trace.method) || writeReplay)
   const [msg, setMsg] = useState<{ text: string; ok: boolean } | null>(null)
   const spec = { method: trace.method, path: trace.path, query: trace.request.query, headers: trace.request.headers, body: trace.request.body }
 
@@ -23,8 +24,8 @@ export default function RequestActions({ trace, offline = false }: { trace: Trac
   }
   return (
     <>
-      <button className="btn" onClick={() => copy(buildCurl, 'cURL')}><Icon d={I.copy} size={12} />Copy as cURL</button>
-      <button className="btn" onClick={() => copy(buildHttpie, 'HTTPie')}><Icon d={I.copy} size={12} />Copy as HTTPie</button>
+      {trace.method !== 'TASK' && <><button className="btn" onClick={() => copy(buildCurl, 'cURL')}><Icon d={I.copy} size={12} />Copy as cURL</button>
+      <button className="btn" onClick={() => copy(buildHttpie, 'HTTPie')}><Icon d={I.copy} size={12} />Copy as HTTPie</button></>}
       {canReplay && <button className="btn" onClick={() => setReplay(true)}><Icon d={I.play} size={11} />Replay</button>}
       {msg && <span role="status" className={`text-[12px] ${msg.ok ? 'text-muted' : 'text-bad'}`}>{msg.text}</span>}
       {canReplay && <ReplayModal trace={trace} open={replay} onClose={() => setReplay(false)} />}

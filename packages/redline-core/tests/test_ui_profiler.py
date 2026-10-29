@@ -59,7 +59,7 @@ def test_profiler_missing_is_tagged_not_raised(monkeypatch):
     rec = Recorder(Settings(profile="all"))
     b = rec.start_trace(method="GET", path="/")
     t = rec.finish_trace(b, status=200)
-    assert t.profile is None and "install it" in t.tags["profile_error"]
+    assert t.profile is None and t.tags["profile_error"] == "ProfilerUnavailable"
 
 
 def test_request_profiler_roundtrip():

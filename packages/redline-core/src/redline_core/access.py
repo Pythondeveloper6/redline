@@ -58,6 +58,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from redline_core.diagnostics import capture_failure
+
 from .conf import PASSWORD_HASH_PREFIX, Settings, SettingsError, check_token_strength
 
 __all__ = [
@@ -585,6 +587,17 @@ class Access:
         if self._startup_logged:
             return
         self._startup_logged = True
+        if self.settings.preset == "shared-dev":
+            logger.warning(
+                "Redline shared-dev capture: request_body=%s response_body=%s locals=%s "
+                "SQL_values=%s logs=%s log_level=%s",
+                self.settings.capture_request_body,
+                self.settings.capture_response_body,
+                self.settings.capture_locals,
+                self.settings.capture_sql_params,
+                self.settings.capture_logs,
+                self.settings.log_level,
+            )
         if self.locked():
             logger.error(
                 "Redline at %s answers 404 to everyone: the 'access' setting is not set and "
@@ -667,6 +680,14 @@ class Access:
                 local = is_loopback(client.ip, unix_socket=self.settings.trust_unix_socket)
             local = local or _in(client.addr, self._allowed)
             if not local:
+                note = (
+                    "Redline refused a non-loopback UI request. In Docker, use "
+                    "access='token' and configure allowed_hosts/trusted_proxies as "
+                    "needed."
+                )
+                if note not in self._notes:
+                    self._notes.add(note)
+                    logger.warning(note)
                 return _deny(
                     403,
                     "forbidden",
@@ -744,7 +765,7 @@ class Access:
             try:
                 ok = self._custom(info)
             except Exception:
-                logger.exception("Redline access_check raised; refusing the request")
+                capture_failure("Redline access_check raised; refusing the request")
                 ok = False
             if not ok:
                 return _deny(403, "forbidden", "You do not have access to Redline.")

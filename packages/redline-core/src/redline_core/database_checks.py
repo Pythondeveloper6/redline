@@ -12,6 +12,10 @@ _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def inspect_query(sql: str, vendor: str, executor) -> dict:
+    if vendor == "mssql":
+        from .database_mssql import inspect_query as inspect_mssql
+
+        return inspect_mssql(sql, executor)
     table = sqlmod.primary_table(sql)
     tables = sqlmod.tables(sql)
     qualified = any(

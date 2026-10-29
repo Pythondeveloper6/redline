@@ -1,3 +1,4 @@
+import { captureNotice } from '../lib/captureQuality'
 import { DatabaseInspection } from '../components/DatabaseInspection'
 import { DetectorPreview } from '../components/DetectorPreview'
 import { TraceDiagnostics } from '../components/TraceDiagnostics'
@@ -39,7 +40,7 @@ function SqlTab({ trace, issueBySpan, onOpen, onExplain }: { trace: Trace; issue
       .sort((a, b) => b.total - a.total)
   }, [trace])
   const [open, setOpen] = useState<Set<string>>(new Set())
-  if (!groups.length) return <div className="card"><Empty title="No queries in this request" /></div>
+  if (!groups.length) return <div className="card"><Empty title={trace.truncated || trace.query_count ? "No SQL spans retained" : "No queries recorded"} /></div>
   const maxTotal = groups[0].total
   return (
     <div className="card divide-y divide-line">
@@ -75,7 +76,7 @@ function SqlTab({ trace, issueBySpan, onOpen, onExplain }: { trace: Trace; issue
                         <tr key={s.id} className="border-t border-line hover:bg-raised/40 cursor-pointer" onClick={() => onOpen(s)}>
                           <td className="td num text-muted">{i + 1}</td><td className="td num">{ms(s.start_ms)}</td><td className="td num">{ms(s.duration_ms)}</td>
                           <td className="td mono max-w-[260px] truncate">{JSON.stringify(s.data.params ?? [])}</td><td className="td num">{s.data.rows ?? '-'}</td>
-                          <td className="td text-right">{onExplain && <button className="btn h-6" disabled={!s.data.explainable} onClick={e => { e.stopPropagation(); onExplain(s) }}>Explain</button>}{onExplain && s.data.explainable && <DatabaseInspection traceId={trace.id} spanId={s.id} />}</td>
+                          <td className="td text-right">{onExplain && <button className="btn h-6" disabled={!s.data.explainable} onClick={e => { e.stopPropagation(); onExplain(s) }}>Explain</button>}{onExplain && !s.data.auto_engine && <DatabaseInspection traceId={trace.id} spanId={s.id} />}</td>
                         </tr>
                       ))}
                     </tbody>
@@ -190,6 +191,9 @@ export default function RequestDetail({ snapshotId }: { snapshotId?: string } = 
         {!snap && <DetectorPreview traceId={trace.id} />}
         {!snap && has('snapshot') && <a className="btn" href={api.snapshotUrl(trace.id)} download={`redline-${trace.id}.html`} title="Download a standalone HTML copy of this request"><Icon d={I.down} size={12} />Snapshot</a>}
       </div>
+      {trace.method === 'TASK' && <div className="card p-4 space-y-2"><h2 className="font-semibold">Job outcome: {trace.tags['job.outcome'] ?? 'unknown'}</h2><p>Task {trace.tags['job.id'] ?? 'unknown'} · queue {trace.tags['job.queue'] ?? 'unknown'} · attempt {trace.tags['job.attempt'] ?? 'unknown'}</p>{trace.tags['job.row_outcomes'] && <><p className="text-muted">Row outcome counts grouped by reason digest. Row identifiers and values are not retained.</p><pre className="overflow-x-auto">{trace.tags['job.row_outcomes']}</pre></>}{trace.tags.parent_trace_id && <Link className="text-info" to={`/requests/${trace.tags.parent_trace_id}`}>Open parent recording</Link>}</div>}
+      {trace.tags.secondary_store && <p className="text-muted">This recording came from secondary store {trace.tags.secondary_store}. History, aggregates and mutations apply to the primary store. Database inspection requires the worker’s own binding.</p>}
+      {trace.tags.commit_observed_before_failure && <div className="card p-4 border-warn/40"><strong>A commit was observed before this failure.</strong><p>Inspect transaction and stage spans before rerunning. This does not prove the whole job completed.</p></div>}
       {trace.error && (
         <div className="rounded-lg border border-bad/30 bg-bad/5 p-3">
           <div className="flex items-center gap-2 text-bad font-semibold"><Icon d={I.alert} size={15} />{trace.error.type}</div>
@@ -202,7 +206,7 @@ export default function RequestDetail({ snapshotId }: { snapshotId?: string } = 
           <span className="text-warn mt-0.5"><Icon d={I.alert} size={15} /></span>
           <div>
             <div className="font-semibold">Trace truncated</div>
-            <div className="text-[12px] text-muted">This request produced more than {trace.truncated.max_spans} spans; {trace.truncated.dropped_spans} were counted but not stored. Query counts, query time and N+1 / slow-query issues still include them. Raise <code>max_spans_per_trace</code> to keep more.</div>
+            <div className="text-[12px] text-muted">{captureNotice(trace.truncated)}</div>
           </div>
         </div>
       )}
@@ -211,7 +215,7 @@ export default function RequestDetail({ snapshotId }: { snapshotId?: string } = 
         <Card label="Duration" value={ms(trace.duration_ms)} tone={slow ? 'text-bad' : ''} sub={`${trace.spans.length} spans`} />
         <Card label="Queries" value={trace.query_count} tone={trace.query_count >= 50 ? 'text-warn' : ''} sub={trace.query_count ? `${ms(trace.query_ms / trace.query_count)} avg` : undefined} />
         <Card label="Query time" value={ms(trace.query_ms)} sub={trace.duration_ms ? `${Math.round((trace.query_ms / trace.duration_ms) * 100)}% of request` : undefined} />
-        <Card label="Issues" value={trace.issues.length} tone={trace.issues.length ? 'text-bad' : 'text-ok'} sub={trace.issues.length ? trace.issues.map(i => i.kind.replace(/_/g, ' ')).join(', ') : 'clean'} />
+        <Card label="Issues" value={trace.issues.length} tone={trace.issues.length ? 'text-bad' : trace.truncated ? 'text-warn' : 'text-ok'} sub={trace.issues.length ? trace.issues.map(i => i.kind.replace(/_/g, ' ')).join(', ') : trace.truncated ? 'incomplete evidence' : 'none detected'} />
       </div>
       <TraceDiagnostics trace={trace} />
       <div>

@@ -94,3 +94,17 @@ The packages are versioned in lockstep; a fix ships as a new version of all of t
   rather than capturing everything.
 - Client addresses come from the connection. `X-Forwarded-For` is honoured only from
   `trusted_proxies`; list only proxies you operate.
+
+## Data egress
+
+Importing and using the recorder does not start an exporter or send recordings to an
+external collector. Optional instrumentations observe application operations; existing
+load/check commands contact their explicitly configured targets. Online SQL compilation
+contacts only the explicitly supplied development DSN.
+
+`redline export` previews a bounded OTLP summary locally by default. Transmission requires
+`--send` and an explicit collector endpoint. Its initial summary format excludes bodies,
+SQL values/text, arbitrary tags and exception messages, and does not follow redirects.
+There is no automatic background export. Review configuration, logging and redaction
+before recording shared-environment data; key-pattern profiles are not a compliance
+certification.

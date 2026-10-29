@@ -1,6 +1,6 @@
 name = "flask shop browse"
 description = "Browse the demo shop: N+1 on orders and customers, a duplicate report and a full-scan search."
-base_url = "http://127.0.0.1:8000"
+base_url = "http://127.0.0.1:8012"
 timeout_s = 10
 
 [[requests]]

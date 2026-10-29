@@ -1,279 +1,239 @@
-# Production
+# Production deployment
 
-[← Index](index.md)
+Redline's next release targets production recording across several codebases. Readiness
+is established for a particular combination of framework, driver, process model, traffic
+and storage; passing a SQLite unit test does not establish SQL Server or broker-worker
+behavior. The release must retain its development status until the required deployment
+checks below have evidence.
 
-Redline was designed first for development, where recording everything is exactly right.
-It can be run in production, with care, and this page is the care. The short version:
-**sample, always keep the slow and the failed, cap retention, put the UI behind real
-authentication, and leave the expensive features off.**
+<a id="the-production-preset"></a>
 
-!!! warning "Not production-hardened yet"
+## Start with recording and stored-data inspection
 
-    This is an alpha. The hardened production mode (a shared Postgres store, tested
-    multi-process behaviour) is planned for [v1.0](roadmap.md). Everything below is
-    about making a single-node, SQLite-backed install as safe as it can be. If you cannot
-    afford a surprise, start in staging, watch the numbers on
-    [Performance and overhead](performance.md), and enable it for a fraction of traffic.
+Use a separate configuration and private storage directory for **each application and
+environment**. Do not point a profiler store at the application's database. For an initial
+production canary, make active tools unavailable explicitly:
 
-## The production preset
+```toml
+preset = "production"
+access = "token"
+token_file = "/run/secrets/redline-token"
+# Supply REDLINE_SECRET_KEY separately through the deployment secret provider.
+storage_path = "/var/lib/redline/myapp-production/{role}.db"
+storage_role = "web"
+release = "myapp-release-identifier"
 
-The quickest safe start is one line. `preset = "production"` sets defaults for a
-production instance; anything you set explicitly still wins.
+sample_rate = 0.01
+always_keep_errors = true
+always_keep_slower_than_ms = 500
+max_rows = 5000
+max_age_days = 2
+history_retention_days = 7
+writer_queue_size = 64
+max_spans_per_trace = 500
+max_sql_bytes = 16384
+max_span_data_bytes = 8192
+max_tag_bytes = 2048
+max_trace_bytes = 262144
 
-```bash
-REDLINE_PRESET=production
-REDLINE_TOKEN=...                 # from your secret store
+capture_request_body = false
+capture_response_body = false
+capture_sql_params = false
+capture_locals = false
+capture_logs = false
+capture_error_details = false
+read_only = true
+profile = "off"
+badge = false
+server_timing = false
+load_from_ui = false
+checks_from_ui = false
+analysis_from_ui = false
+explain_analyze = false
+
+[features]
+explain = false
+profile = false
+replay = false
+replay_writes = false
+load = false
+checks = false
+logs = false
+locals = false
 ```
 
-| What the preset does | Value |
-|---|---|
-| Sampling | `sample_rate = 0.05`, `always_keep_errors = True`, plus every slow request (`always_keep_slower_than_ms`, default 500) |
-| Request and response bodies | not captured |
-| Exception locals | not captured |
-| Logs | `log_level = "WARNING"` |
-| Access | `access = "token"`, **required** (24+ characters): without a token Redline raises a `SettingsError` at startup |
-| Read-only | on: every non-GET `api/` call is refused with `403 read_only`, and so is EXPLAIN ANALYZE |
-| Floating badge, `Server-Timing` | both off |
-| Load tests from the UI, `explain_analyze` | off |
-| Profiling | `profile = "off"`: `X-Redline-Profile` / `?_redline=profile` do nothing |
+Supply `secret_key` through `REDLINE_SECRET_KEY` or the application's secret provider
+instead of committing it to a file. Use a strong token of at least 24 characters. Different codebases and
+environments should have different tokens/signing keys and storage access permissions.
+A signing key is shared only among workers intentionally serving the same Redline UI.
 
-Django keeps its superuser (`PERMISSION`) check under the preset (a preset does not change `access` there).
-Also set `secret_key` (`REDLINE_SECRET_KEY`) when you run several workers, and
-`trusted_proxies` when a proxy is in front.
+The count/byte controls above match the production preset: queue `64`, span count `500`,
+SQL text `16384`, span data `8192`, tag value `2048` and completed trace `262144` bytes.
+The sample, trace/history retention and always-keep rules shown are canary choices.
+The production preset is a starting point; explicit settings override it. Inspect the
+resolved configuration with `redline config`, and run `redline doctor` in the deployment's
+working directory. A configuration file alone is not evidence that the intended workers
+loaded it. Confirm through the UI's effective configuration and recording health.
 
-It does **not** choose your retention, your storage path or your ignore list, so still set
-those (below). Run `redline doctor` after deploying, and `redline config` to see exactly
-what is in effect. A staging environment gets `preset = "staging"`: 25% sampling, a token,
-no locals. See [Configuration](configuration.md#presets) and
-[Access control](access-control.md#recipes).
+For Flask, FastAPI and Litestar, pass this settings mapping to the existing adapter. Django
+maps the same settings from `REDLINE`, with its framework permission policy retained when
+configured. An explicit native permission hook must authorize the intended operator, not
+ordinary application users. Authentication details are in [Access control](access-control.md).
 
-## The recipe
+## Data minimization and privacy
 
-If you prefer to spell it out, or need to deviate:
+Disabling SQL values withholds bound parameters, normalizes inline literals and removes
+associated SQL source/fix snippets. This also makes EXPLAIN unavailable for those recordings.
+`reads_only` is an explicit opt-in, not a privacy boundary: SELECT parameters can contain
+personal data too.
 
-=== "Django"
+Bodies, locals and logs are separate capture surfaces. Keep all three off for the first
+production canary. Exception type and structured database codes are useful without treating
+free-form exception messages as safe. Follow [Security](security.md) for the exact captured
+surfaces and the current exception-detail controls. Profiles and route rules are pattern
+matching, not a guarantee that arbitrary clinical notes, identifiers or secrets are absent.
 
-    ```python
-    DEBUG = False
+Before rollout, use invented sentinel values in the actual application's headers, query
+strings, routes, SQL, logs and exceptions. Inspect the stored trace, issue data, source
+snippets and exported snapshot, then scan the disposable store. `redline audit-store`
+reports bounded key-pattern candidates without printing values; it is not a complete
+privacy audit and does not prove an existing store is clean. With
+`capture_error_details = false`, Redline retains error types and structured database
+codes without formatting exception messages or tracebacks; project exception locals
+are also disabled. This preserves failure counts while reducing free-text exposure.
 
-    REDLINE = {
-        "SAMPLE_RATE": 0.05,                    # 5% of requests...
-        "ALWAYS_KEEP_SLOWER_THAN_MS": 500,      # ...plus every slow one...
-        "ALWAYS_KEEP_ERRORS": True,             # ...plus every failure
-        "CAPTURE_RESPONSE_BODY": False,         # smaller store, less data at rest
-        "MAX_ROWS": 5_000,
-        "MAX_AGE_DAYS": 2,
-        "PROFILE": "opt_in",                    # flamegraphs only when asked
-        "EXPLAIN_ANALYZE": False,
-        "STORAGE_PATH": "/var/lib/myapp/redline.db",
-        "PERMISSION": "myproject.redline.is_superuser",
-    }
-    ```
+## Network and operator access
 
-=== "Flask"
+Expose the application normally, but place the Redline mount behind the intended operator
+network/authentication boundary. Use TLS. Configure `trusted_proxies` with the actual proxy
+peers; do not trust every address for convenience. Set `cookie_secure = true` when the
+operator entrypoint is always HTTPS and the proxy is configured correctly.
 
-    ```python
-    app.config["REDLINE"] = {
-        "preset": "production",
-        "max_rows": 5_000,
-        "max_age_days": 2,
-        "storage_path": "/var/lib/myapp/redline.db",
-        "release": os.environ.get("GIT_SHA"),
-    }
-    Redline(app, engine=engine, permission=require_superuser)
-    ```
+`access = "local"` can fail behind a Docker bridge, or accidentally accept a same-host
+proxy. Use the token/framework policy instead of switching to open access. Test unauthenticated,
+wrong-token, insufficient-role and cross-origin requests against every worker.
 
-=== "Litestar"
+Read-only API policy does not govern the application's own endpoints. Replay is a browser
+request to that application, so disabling `features.replay` is part of recording-only mode.
+Estimated plans and catalog inspection also contact a database and are separate from reading
+stored traces; they remain off in the recipe. Load generation, refactor-check runs, source
+scans, online compilation and actual plans belong in an isolated development environment.
 
-    ```python
-    RedlinePlugin(engine=engine, guards=[require_superuser], settings={
-        "preset": "production",
-        "max_rows": 5_000,
-        "max_age_days": 2,
-        "storage_path": "/var/lib/myapp/redline.db",
-    })
-    ```
+<a id="process-models"></a>
 
-=== "FastAPI"
+## Storage and process models
 
-    ```python
-    install(
-        app,
-        engine=engine,
-        settings={
-            "sample_rate": 0.05,
-            "always_keep_slower_than_ms": 500,
-            "always_keep_errors": True,
-            "capture_response_body": False,
-            "max_rows": 5_000,
-            "max_age_days": 2,
-            "profile": "opt_in",
-            "explain_analyze": False,
-            "storage_path": "/var/lib/myapp/redline.db",
-        },
-        dependencies=[Depends(require_superuser)],
-    )
-    ```
+Use local disk or a local-filesystem Docker named volume with private directory/file
+permissions. Do not share a writable SQLite file through NFS/SMB or an arbitrary remote
+filesystem. WAL being available is necessary, but does not prove the underlying volume is
+safe under multiple containers. A writable store refuses a non-WAL result. Non-development
+presets refuse an in-repository store unless explicitly overridden.
 
-## Sampling
+`{role}`, `{hostname}` and `{pid}` path placeholders help choose separate files. They are not
+an application namespace automatically added to a shared store. Use an application/environment
+prefix yourself. Files from unrelated codebases must not be mixed accidentally.
 
-With `sample_rate = 0.05` and the safety nets on, you store:
-
-| Request | Stored? | `sampled_by` |
+| Deployment | Intended storage arrangement | Validation needed |
 |---|---|---|
-| a fast success, 5% of the time | yes | `rate` |
-| a fast success, otherwise | **no** | n/a |
-| anything slower than `always_keep_slower_than_ms` | yes | `slow` |
-| an unhandled exception or a 5xx | yes | `error` |
-| a request you profiled by hand | yes | `profile` |
+| One application, one process | One private local file | Retention, shutdown, disk errors and normal traffic |
+| Several workers on one host | Local shared file only after a concurrent-writer test, or per-worker files | Contention, busy timeout, pruning, loss and shutdown |
+| Web and task workers | Explicit web/worker roles, preferably separate files | Worker initialization, fork behavior and correlation |
+| Several replicas/hosts | A private local file per replica | Replica-local inspection and lifecycle; no network-file sharing |
+| Several independent codebases | Separate processes, settings, credentials and store paths | No cross-application traces or operator access |
 
-That is the right trade for finding problems: the failures and the outliers are all there,
-and the typical request is represented by a sample.
+The SQLite writer starts lazily and has fork/PID handling, but validate the actual gunicorn,
+uWSGI, ASGI or task-worker start model. Database engines must also follow the database
+library's fork lifecycle. Redline's storage handling does not make an inherited application
+connection pool safe.
 
-!!! warning "What sampling does *not* reduce"
+Multiple applications in one interpreter need explicit per-application recorders and
+integration tests. The default recorder and some integration hooks are process-wide; do not
+assume that repeatedly calling `configure()` provides application isolation. Queue-independent
+`job()` accepts an explicit recorder. Initialize Celery instrumentation in the intended worker
+lifecycle and confirm actual broker delivery, retries and prefork behavior.
 
-    Sampling is applied **when the request ends**. Every non-ignored request still pays
-    the recording cost as it runs: timing each query, fingerprinting, capturing the
-    callsite, redacting query parameters. Only the **analysis** (detectors, suggestions,
-    header and body redaction), the **serialising** and the **disk write** are skipped
-    for dropped requests. To remove the cost entirely for a path, add it to `ignore_paths`,
-    and to turn the whole thing off, set `enabled` to false.
+`extra_stores` provides read-only request/job/profile browsing from existing worker files.
+It does not combine history, aggregates, live-tail events or mutations. Independent files
+should use independent trace IDs. Duplicate IDs are marked in request/job listings;
+inspection, profiles and single-ID deletion are refused rather than choosing another
+store's evidence. Cross-file reads are not an atomic distributed snapshot. Secondary
+EXPLAIN/catalog requests are refused because a web process cannot establish the worker's
+database binding. This is not a distributed store.
 
-    So `sample_rate = 0.01` is not "1% of the overhead". Measure.
+<a id="sampling"></a>
 
-### Dev default versus production
+## Capacity and failure behavior
 
-| | Development | Production |
+Sampling is applied when a recording finishes. Unretained requests still pay the span,
+fingerprint and callsite cost. A sample rate of 1% is not 1% of the instrumentation overhead.
+Slow/error keep rules can retain much more than the nominal sample during an incident.
+
+The writer queue is bounded and drops/counts traces rather than blocking request code when
+full. SQL text, span data and tags have separate byte budgets, and the completed serialized
+trace is checked against `max_trace_bytes` before saving. Budget enforcement may shorten
+or discard evidence; keep truncation/drop notices visible and inspect preserved failure
+counts. See [Settings](settings.md#capture-byte-budgets) for defaults and scope.
+
+These controls do not establish an absolute process-memory or disk-size ceiling. Active
+requests, application objects, analysis, serialization and writer batches also consume memory.
+Measure representative large traces as well as the median request. Retention runs
+periodically, so a configured row cap is not an instantaneous disk-size guarantee.
+
+Measure and monitor:
+
+- Application throughput, median/tail latency, CPU and memory with recording disabled and enabled.
+- Queue drops, writer failures, storage growth and time spent draining at shutdown.
+- SQL-heavy requests, large results, errors, retries, streaming and concurrent jobs.
+- Full disk, unwritable directories, SQLite contention and sudden process termination.
+
+Use `GET api/meta` recording/drop indicators and the `redline` logger. SQLite's
+`storage.dropped` includes queue overflow, closed-store loss and failed writer batches;
+it does not distinguish all those causes. `flush()` signals that queued work was processed,
+not that every trace persisted successfully: check loss counters and verify expected
+recordings. Recorder-side capture/sink failures must also be checked in operational
+logs and independent monitoring. Do not treat sampled
+endpoint percentiles as an unbiased application SLO. Keep application monitoring independent
+so a profiler failure cannot hide an application incident.
+
+FastAPI/Litestar shutdown hooks and Flask/Django exit hooks flush pending traces. Give the
+process enough graceful-shutdown time and verify that the hook runs in the deployment.
+A forced kill can lose queued traces; state the acceptable loss window before rollout.
+
+## Production release gate
+
+The implementation includes local unit, adapter and fixture checks. SQL Server driver,
+Celery broker/prefork, cross-container volume, sustained-load and real browser checks must
+be recorded separately. The local validation report is `IMPLEMENTATION_STATUS.md` in the
+repository. An environment restriction is a blocked test, not a passing product assertion.
+
+The current local evidence and remaining qualification have different scopes:
+
+| Area | Confirmed locally | Still required before deployment qualification |
 |---|---|---|
-| `sample_rate` | `1.0` | `0.01` to `0.1` |
-| Request and response bodies | captured | request bodies only if you need them; consider **off** |
-| Profiling | `opt_in`, or `all` for a session | `opt_in` or `off` |
-| `explain_analyze` | on if you like | **off** |
-| Access | you, on localhost | a superuser or SSO-protected role |
+| Capture boundaries | Deterministic cycle/Unicode/custom-object/size-limit tests and safe minimal-fallback tests | Representative memory/latency at intended request concurrency and payload sizes |
+| Runtime privacy and storage loss | Local sentinel privacy checks and deterministic queue/writer-failure checks | Real disk-full/permissions, shared-volume and shutdown behavior in the target environment |
+| Framework SQL recording | Native Django SQLite and SQLAlchemy adapter tests, including caught failures and capture-off row counts | Selected MySQL and SQL Server backend/DBAPI versions, reconnects, failed statements and session behavior |
+| SQL Server tooling | Showplan/parser fixtures and fake-driver protocol/cleanup checks | Live isolated driver/server tests; Django SQL Server EXPLAIN remains unsupported |
+| Jobs | Direct job and eager Celery execution tests | Actual broker delivery, retries, prefork/restart and worker lifecycle |
 
-Django does the first part for you: with `DEBUG = False` and no `SAMPLE_RATE`, the default
-is `0.1`. Setting `1.0` with `DEBUG = False` triggers the warning
-`django_redline.W005`.
+Local checks do not establish the unvalidated live behavior in the final column. Record
+framework, database/server, backend/driver and process versions with the results.
 
-## Retention
+A production recommendation requires evidence for each target deployment:
 
-Two limits, both applied by the writer thread every 200 saved traces and by
-`manage.py redline_prune`.
+1. Exact supported Python/framework/driver/queue versions and the process/storage topology.
+2. Unit and adapter suites, installed-wheel tests, UI checks and documentation build passing.
+3. Live driver tests for failed statements, reconnects, parameter styles and session cleanup;
+   SQL Server plan/compile tests only against an isolated database with appropriate permissions.
+4. Broker-worker success/failure/retry, prefork/restart, correlation and graceful shutdown tests.
+5. Concurrent writers, retention, backpressure and fault-injection tests under expected traffic.
+6. Sentinel privacy checks across stored traces, issues, callsites, logs and exports.
+7. A low-traffic canary with an immediate `enabled = false` rollback and independent monitoring.
 
-| Setting | Effect | Note |
-|---|---|---|
-| `max_age_days` | delete older than this | `0` or `None` disables the age rule |
-| `max_rows` | keep only the newest N | `0` or `None` disables the row cap |
+The [full-stack Compose test project](testing.md) supplies a repeatable baseline for
+these checks. Its current report must be green; merely adding its test files is not
+qualification. Validate deployment-specific conditions as well.
 
-History is separate: hourly rollups, the issue index and load runs are kept for
-`history_retention_days` (default 90) and take little space, because they hold aggregates, not
-requests. See [History](history.md#retention).
-
-Size depends on what you store. Measured (`benchmarks/storage.py`): about **1.6 KiB** for
-a trace with no queries, **31 KiB** with 20 queries and **260 KiB** with 200, roughly
-1.3 KiB per SQL span. See [Storage: size](storage.md#size). The ceiling you set with
-`max_rows` times the size of your *largest* typical trace is your upper bound, and
-`max_spans_per_trace` (default 2000) bounds the largest trace.
-
-## What to leave off
-
-| Feature | Why not in production |
-|---|---|
-| `profile: "all"` | Every request pays the profiler's overhead |
-| `explain_analyze: True` | It **executes** the query on your production database, on demand, as whoever can reach the UI |
-| `capture_locals` | Variable values can contain personal data; the production preset turns it off |
-| `capture_logs` at `DEBUG` | Chatty and may contain data; use `WARNING` |
-| `badge` | Injects a script tag into your pages; leave it to development |
-| `server_timing` | Exposes timings to every client; turn off if you do not want that |
-| `load_from_ui: True` | Lets a UI user generate real load on your instance |
-| `checks_from_ui: True` | Lets a UI user start refactor-check runs (sequential `GET` requests, up to 5 000 calls) against your instance. `auto` is off outside debug mode, and the production preset sets it to `false` |
-| `access = "open"` | Refused without `REDLINE_ALLOW_OPEN=1`, and never right here |
-| `capture_response_body: True` | Response bodies are the biggest and most sensitive thing stored. Keep them off unless you are debugging a specific problem |
-| `sample_rate: 1.0` | The cost scales with traffic and the store churns |
-| Opening the UI to the internet | See [Security](security.md#who-can-open-the-ui) |
-
-## What NOT to do
-
-- **Do not use `local` access in front of a proxy.** The loopback check sees a proxy on
-  the same host as localhost. Use `access = "token"`, and set `trusted_proxies` if you need
-  real client addresses (and so that each client gets its own login rate-limit bucket and
-  `X-Forwarded-Proto` marks the cookie `Secure`). Since 0.2 an unset `access` answers `404`
-  outside debug mode, so this only happens if you set `local` yourself. See
-  [Access control](access-control.md#behind-a-reverse-proxy).
-- **Do not run load tests against production.** `redline load` is for environments you own and
-  can afford to saturate.
-- **Do not skip authentication** on the grounds that it is "just a profiler". It shows
-  SQL, request bodies and runs EXPLAIN.
-- **Do not point `storage_path` at your application database file.** Always use a
-  separate path. Use a writable volume that **survives restarts** if you want history,
-  and expect to lose it if the container filesystem is ephemeral (which is fine).
-- **Do not run multiple replicas against one shared network file.** SQLite over NFS and
-  similar is unreliable. Each instance should have its own local file.
-- **Do not treat Endpoints percentiles as your SLO dashboard.** They are computed on a
-  sample that over-represents slow requests. See
-  [Issues and endpoints](issues-and-endpoints.md).
-- **Do not forget that data on disk is data you hold.** Request bodies and SQL parameters
-  contain whatever your users sent, minus the keys that matched the redaction patterns.
-  Check it covers your fields.
-
-## Process models
-
-**Django.** The runtime (settings, store, writer thread) is built **lazily** on first use
-in each process, not at import, so it is safe with gunicorn's pre-fork model and with
-management commands (`migrate` never creates `.redline/`). Each worker process gets its
-own writer thread writing to the same file (see below).
-
-**FastAPI, Flask and Litestar.** `install()`, `Redline(app)` and the plugin create the store
-when called, typically at import time (Litestar: when the app is built). The writer thread
-starts lazily, on the first trace saved in each process.
-
-**Fork-safe in both.** The store notices when it is used in a new process
-(`os.register_at_fork`, plus a PID check on every call) and opens its own SQLite
-connection, queue and writer thread there; the connection inherited from the parent is
-never used or closed in the child. So gunicorn `--preload`, uWSGI without `lazy-apps`
-and `multiprocessing` with the fork start method all work: traces recorded in a worker
-are written by that worker. This is covered by a test that forks a process with a running
-writer. With `uvicorn --workers N` each worker imports the app itself anyway.
-
-**Several workers.** All workers write to the **same SQLite file**. SQLite serialises
-writers (WAL mode, a 10-second busy timeout), and each worker prunes on its own schedule,
-so counts and retention are approximate. This is not covered by the test suite. If you
-want per-worker isolation, give each worker its own `storage_path` (for example with the
-PID in it), at the cost of having to look at each file separately.
-
-## Graceful shutdown
-
-Pending traces are written by a background thread, so a hard kill loses the last
-second or so.
-
-- **FastAPI:** the wrapped lifespan flushes and closes the store on shutdown (it waits for
-  the queue, up to 5 seconds).
-- **Litestar:** the plugin's `on_shutdown` hook does the same.
-- **Flask:** an `atexit` hook flushes and closes the store.
-- **Django:** an `atexit` hook flushes and closes the runtime.
-
-`SIGKILL` skips both. That is acceptable for a profiler.
-
-## Checklist
-
-- [ ] You used `preset = "production"` (or reproduced it) and ran `redline doctor`
-- [ ] `sample_rate` is below 1 and the always-keep rules are on
-- [ ] UI access is authenticated by something stronger than "it is on localhost", and
-      `read_only` is on
-- [ ] `explain_analyze` is off
-- [ ] `profile` is `opt_in` or `off`
-- [ ] `max_rows` and `max_age_days` are set to what you can afford
-- [ ] `storage_path` is outside the app database and on local disk, and `.redline/` is in
-      `.gitignore`
-- [ ] You checked what your request bodies contain against `redact_keys`
-- [ ] `ignore_paths` includes health checks, metrics endpoints and anything chatty
-- [ ] `release` is set to something that changes every deploy, so [History](history.md) can compare
-- [ ] You looked at [Performance and overhead](performance.md) and measured your own app
-- [ ] (Django) `manage.py check --deploy` and `manage.py check` are clean, including the
-      `django_redline.*` checks
-
-## Watching Redline itself
-
-`GET api/meta` (also at `<mount>/api/meta`) reports `storage.rows` and `storage.dropped`.
-Alert on `dropped` rising: it means the writer cannot keep up and you are losing traces.
-Redline's own problems are logged on the `redline` logger. Route it to your logging setup.
+Once these pass, expand one codebase at a time. Keep active tools disabled on production even
+when the development demo exercises them. See [Real-world workflows](real-world-workflows.md)
+for individual feature setup and [Performance](performance.md) for measurement limitations.

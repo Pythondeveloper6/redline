@@ -51,7 +51,11 @@ def detect(trace: Trace, settings: Settings) -> list[Issue]:
         clean = sqlmod.structural_sql(text).strip()
         fp = span.data.get("fingerprint") or sqlmod.fingerprint(text)
         site = span.callsite.location if span.callsite else None
-        if re.match(r"^(INSERT|UPDATE)\b", clean, re.I) and not span.data.get("many"):
+        if (
+            any(k in {"INSERT", "UPDATE", "DELETE", "MERGE"} for k in sqlmod.effective_kinds(text))
+            and not span.data.get("many")
+            and not span.data.get("error")
+        ):
             writes[(span.data.get("db_alias") or "default", fp, site)].append(span)
         offset = sqlmod.offset_value(text, span.data.get("params"))
         if settings.deep_offset_rows and offset is not None and offset >= settings.deep_offset_rows:

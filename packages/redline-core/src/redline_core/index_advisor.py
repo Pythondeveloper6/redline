@@ -213,6 +213,11 @@ def query_requirements(
     """
     if not sql or not sqlmod.is_explainable(sql):
         return []
+    if vendor == "mssql" and any(
+        len(parts := sqlmod._split_qualified(m.group("table"))) > 1 and parts[-2].lower() != "dbo"
+        for m in sqlmod._TABLE_REF.finditer(sql)
+    ):
+        return []
     try:
         preds = predmod.analyze_predicates(sql, params)
         fp = sqlmod.fingerprint(sql)
@@ -414,7 +419,21 @@ def load_catalog(vendor: str, executor: ExplainExecutor) -> Catalog:
     Raises whatever the executor raises; :func:`advise` treats that as "not verified".
     """
     cat = Catalog()
-    if vendor == "postgresql":
+    if vendor == "mssql":
+        rows = executor(
+            "SELECT TOP (5000) o.name, i.name, c.name, i.has_filter "
+            "FROM sys.tables o JOIN sys.schemas s ON s.schema_id=o.schema_id "
+            "JOIN sys.indexes i ON i.object_id=o.object_id "
+            "JOIN sys.index_columns ic ON ic.object_id=i.object_id AND ic.index_id=i.index_id "
+            "JOIN sys.columns c ON c.object_id=ic.object_id AND c.column_id=ic.column_id "
+            "WHERE s.name='dbo' AND i.is_disabled=0 AND i.is_hypothetical=0 "
+            "AND ic.is_included_column=0 AND ic.key_ordinal>0 "
+            "ORDER BY o.name,i.name,ic.key_ordinal",
+            None,
+        )
+        cat.tables.update(_text(r[0]).lower() for r in rows)
+        _add_grouped(cat, ((r[0], r[1], r[2], "btree", bool(r[3])) for r in rows))
+    elif vendor == "postgresql":
         scope = "schemaname = ANY (current_schemas(false))"
         for row in executor(f"SELECT tablename FROM pg_tables WHERE {scope}", None):
             cat.tables.add(_text(row[0]).lower())
@@ -749,7 +768,7 @@ def advise(
     def executor_for(vendor: str) -> ExplainExecutor | None:
         if vendor not in executors:
             ex = None
-            if executor_factory is not None and vendor in _TEXT_KIND:
+            if executor_factory is not None and vendor in (*_TEXT_KIND, "mssql"):
                 try:
                     ex = executor_factory(db, vendor)
                 except Exception:

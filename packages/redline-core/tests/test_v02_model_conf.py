@@ -259,7 +259,8 @@ def test_registry_exception_is_skipped(registry, caplog):
     trace = Trace(id="d" * 32, framework="other", method="GET", path="/")
     issues = Detector().detect(trace)
     assert [i.kind for i in issues] == ["retry_storm"]
-    assert "boom" in caplog.text
+    assert "RuntimeError" in caplog.text
+    assert "boom" not in caplog.text
 
 
 def test_new_issue_kinds_accepted_by_api(store):

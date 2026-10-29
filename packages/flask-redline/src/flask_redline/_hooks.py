@@ -74,8 +74,20 @@ def install_hooks(app: Flask, on_first_request: Any = None) -> None:
             request.view_args or None,
         )
 
+    @app.after_request
+    def resolve_user_id(response):
+        builder = current()
+        if builder is not None and builder.recorder.settings.user_resolver:
+            from redline_core.privacy import resolve_user
+
+            resolve_user(builder, request._get_current_object())
+        return response
+
     def on_exception(sender: Flask, exception: BaseException, **extra: Any) -> None:
         request.environ[ERROR_KEY] = exception
+        builder = current()
+        if builder is not None and builder.tags.get("nested.framework"):
+            builder.nested_error = exception
         for ctx in reversed(_open_templates.get() or []):  # a render that raised
             ctx.__exit__(type(exception), exception, None)
         _open_templates.set(None)
