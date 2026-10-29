@@ -522,8 +522,10 @@ The workload index advisor and the unused-index list. Parameters: `window` (defa
 (`pg_trgm`, FTS5 or `FULLTEXT`; those have `confidence: "low"` and a `note`). `verified`
 says the existing indexes were read from the database catalog, `already_indexed` how many
 requirements an existing index already served, `explained` how many queries were checked
-with a plain `EXPLAIN`. `unused` is **PostgreSQL only** (`unused_supported` is `false`
-elsewhere); `unused_error` is `{code, message}` when it could not be read. Nothing is ever
+with a plain `EXPLAIN`. `unused` comes from PostgreSQL's `pg_stat_user_indexes` or SQL
+Server's `sys.dm_db_index_usage_stats` (`unused_supported` is `false` for SQLite and
+MySQL); `unused_error` is `{code, message}` when it could not be read. Counters reflect
+the period since the statistics were last reset (SQL Server resets on restart). Nothing is ever
 executed besides catalog `SELECT`s and plain `EXPLAIN`s. Answers `501 not_supported` if the
 store cannot provide the workload. See [Database](database.md#index-advisor).
 

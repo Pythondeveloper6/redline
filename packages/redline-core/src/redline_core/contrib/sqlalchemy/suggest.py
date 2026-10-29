@@ -47,6 +47,7 @@ __all__ = ["SQLAlchemyFixSuggester"]
 DOCS_URL = "https://docs.sqlalchemy.org/en/20/orm/queryguide/relationships.html"
 DOCS_LOAD_ONLY = "https://docs.sqlalchemy.org/en/20/orm/queryguide/columns.html"
 DOCS_QUERYING = "https://docs.sqlalchemy.org/en/20/orm/queryguide/select.html"
+DOCS_RAW = "https://docs.sqlalchemy.org/en/20/core/sqlelement.html#sqlalchemy.text"
 
 _WIDE_TYPES = (Text, LargeBinary, JSON)
 
@@ -119,11 +120,16 @@ class SQLAlchemyFixSuggester:
         filters, _tables = _param_filters(sql)
         if not filters:
             return None
+        callsite = issue.callsite or spans[0].callsite
         mappers = self._mappers()
         candidates = _candidates(mappers, filters)
+        raw_hint = "(text(" in ((callsite.code or "") if callsite else "")
+        if not candidates or raw_hint:
+            raw = self._raw_sql(issue, spans, filters, _tables, callsite)
+            if raw is not None:
+                return raw
         if not candidates:
             return None
-        callsite = issue.callsite or spans[0].callsite
         ranked = self._rank(candidates, callsite)
         best = ranked[0]
         located = best[1]
@@ -153,6 +159,42 @@ class SQLAlchemyFixSuggester:
             diff=None,
             confidence="medium" if unique else "low",
             docs_url=DOCS_URL,
+        )
+
+    def _raw_sql(
+        self,
+        issue: Issue,
+        spans: list[Span],
+        filters: list[tuple[str, str]],
+        tables: list[str],
+        callsite: Any,
+    ) -> Suggestion | None:
+        """A batching hint for repeated ``text()``/driver SQL without ORM metadata."""
+        if not filters or not tables:
+            return None
+        table, column = filters[0]
+        many = bool(spans[0].data.get("many"))
+        batch = (
+            "executemany() already batches these writes"
+            if many
+            else ("replace the per-row SELECT with one IN query, or join it into the parent query")
+        )
+        code = (
+            "from sqlalchemy import bindparam, text\n"
+            "\n"
+            f'stmt = text("SELECT ... FROM {table} WHERE {column} IN :ids")\n'
+            'stmt = stmt.bindparams(bindparam("ids", expanding=True))\n'
+            'session.execute(stmt, {"ids": ids})'
+        )
+        return Suggestion(
+            summary=(
+                f"Batch the repeated SELECT on {table}.{column}: {batch}. The callsite uses "
+                "raw SQL, so this is a batching hint rather than an ORM loader change."
+            ),
+            code=code,
+            diff=None,
+            confidence="medium" if callsite and callsite.code else "low",
+            docs_url=DOCS_RAW,
         )
 
     # ranking -----------------------------------------------------------------
