@@ -129,7 +129,7 @@ def test_redline_logger_ignored():
     assert [r.message for r in run(make(), work).logs] == ["mine"]
 
 
-def test_capture_install_is_idempotent_and_removed_on_reconfigure():
+def test_capture_install_is_idempotent_and_preserved_on_reconfigure():
     from redline_core import recorder as recmod
 
     root = logging.getLogger()
@@ -142,9 +142,11 @@ def test_capture_install_is_idempotent_and_removed_on_reconfigure():
     assert installed.previous is original  # one wrapper, not two
     assert root.handlers == handlers  # no handler is ever added
     configure(Settings(project_root=HERE, capture_logs=False))
-    assert logging.getLogRecordFactory() is original
+    # Other recorders can still be active; capture policy belongs to each trace.
+    assert logging.getLogRecordFactory() is installed
     configure(Settings(project_root=HERE))
-    assert logging.getLogRecordFactory().previous is original
+    assert logging.getLogRecordFactory() is installed
+    assert installed.previous is original
 
 
 def test_uninstall_restores_the_previous_factory_and_is_chain_safe():

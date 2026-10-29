@@ -1,3 +1,4 @@
+import { JOB_EXAMPLE } from './jobExample'
 import { mockTools, mockSuppressed } from './tools'
 import type { Trace, TraceFilters } from '../types'
 import { mockHistoryLoad } from './historyLoad'
@@ -5,7 +6,7 @@ import { mockAnalysis } from './analysis'
 import { mockChecks } from './checks'
 import { ALL, genericTraceAt, EXPLAIN_PG, EXPLAIN_SQLITE, buildEndpoints, buildIssueGroups, buildProfile, summarize } from './data'
 
-let traces: Trace[] = ALL.slice()
+let traces: Trace[] = [...ALL, JOB_EXAMPLE as Trace]
 const delay = (n = 120) => new Promise(r => setTimeout(r, n + Math.random() * 80))
 
 const statusOk = (s: number, f: string) =>
@@ -14,7 +15,8 @@ const statusOk = (s: number, f: string) =>
 function filtered(sp: URLSearchParams): Trace[] {
   const f: TraceFilters = Object.fromEntries(sp.entries())
   return traces.filter(t => {
-    if (f.q && !(t.path + ' ' + (t.route ?? '') + ' ' + (t.view ?? '')).toLowerCase().includes(f.q.toLowerCase())) return false
+    if (f.q && !(t.path + ' ' + (t.route ?? '') + ' ' + (t.view ?? '') + ' ' + (t.tags.request_id ?? '') + ' ' + (t.tags.user_id ?? '') + ' ' + (t.tags['job.id'] ?? '')).toLowerCase().includes(f.q.toLowerCase())) return false
+    if (f.tag) { const [key, ...rest] = f.tag.split(':'); if (t.tags[key] !== rest.join(':')) return false }
     if (f.method && t.method !== f.method) return false
     if (f.status && !statusOk(t.status, f.status)) return false
     if (f.min_ms && t.duration_ms < Number(f.min_ms)) return false
@@ -49,7 +51,7 @@ export async function mockFetch(method: string, url: string, body: unknown): Pro
     const q = new URLSearchParams(location.search)
     const ro = q.get('ro') === '1'
     return ok({
-      version: '0.3.0a1', framework: 'django',
+      version: '0.4.0a1', framework: 'django',
       settings: { thresholds: { n_plus_one: 5, slow_query_ms: 100, too_many_queries: 50 }, sampling: { sample_rate: 1 }, profiling_enabled: true, explain_analyze_enabled: false },
       storage: { rows: traces.length, path: '.redline/redline.db' },
       project_root: '/Users/dev/shop', editor: 'vscode', editor_url_template: 'vscode://file/{file}:{line}', release: 'mock-1',

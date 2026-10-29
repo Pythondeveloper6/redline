@@ -1,3 +1,4 @@
+import { SQL_EXAMPLE, SQL_EXAMPLE_REPORT } from '../lib/sqlExample'
 import type { Trace } from '../types'
 import { SOURCE_EXAMPLE, SOURCE_REPORT } from '../lib/sourceExample'
 import { DETECTOR_SAMPLES } from './detectorSamples'
@@ -13,6 +14,11 @@ export async function mockTools(method: string, path: string, params: URLSearchP
   const ro = new URLSearchParams(location.search).get('ro') === '1'
   if (!path.startsWith('api/analysis/') && !path.startsWith('api/suppressions')) return null
   if (method !== 'GET' && ro) return error(403, 'This demo is read-only.')
+  if (path === 'api/analysis/sql' && method === 'POST') {
+    const b = body as {source?: string; dialect?: string}
+    return b.source === SQL_EXAMPLE && b.dialect === 'mssql' ? ok(SQL_EXAMPLE_REPORT) : error(501, 'Demo mode supports the fixed SQL example. Use a running backend for arbitrary source.')
+  }
+  if (path === 'api/analysis/redaction') return error(501, 'A running backend is required to preview its actual redaction policy.')
   if (path === 'api/analysis/source' && method === 'POST') {
     const b = body as { source?: string }
     return b.source === SOURCE_EXAMPLE ? ok(SOURCE_REPORT) : error(501, 'Demo mode supports Load example. Use a running backend to analyze other source or a project.')

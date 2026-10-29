@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 import math
+import sys
 from collections import Counter
 
 from .model import Trace
@@ -60,3 +62,15 @@ def trace_diagnostics(trace: Trace) -> dict:
         "note": "Remaining time is uninstrumented time, not measured CPU time. "
         "Overlap contains time with multiple instrumented categories active.",
     }
+
+
+def capture_failure(message: str, *args) -> None:
+    """Log a fixed operation label and exception type, without exception values."""
+    failure = sys.exc_info()[0]
+    try:
+        logging.getLogger("redline").error(
+            message + " (%s)", *args, failure.__name__ if failure else "Error"
+        )
+    except Exception:
+        # Application handlers can themselves fail; observation stays fail-open.
+        pass

@@ -143,7 +143,9 @@ def test_reused_cursor_counts_rows_per_execute_without_stacking(rt):
     from redline_core.recorder import Recorder
 
     install_connection(connection)
-    rec = Recorder(Settings.from_mapping({"max_spans_per_trace": 0}))
+    rec = Recorder(
+        Settings.from_mapping({"max_spans_per_trace": 0, "max_trace_bytes": 16 * 1024 * 1024})
+    )
     with connection.cursor() as cursor:
         with rec.recording(method="GET", path="/x"):
             for _ in range(1200):

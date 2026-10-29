@@ -115,8 +115,8 @@ export default function Requests() {
       if (isTyping(e) || e.metaKey || e.ctrlKey || e.altKey || document.querySelector('[aria-modal="true"]')) return
       if (e.key === 'j') setSel(s => Math.min(items.length - 1, s + 1))
       else if (e.key === 'k') setSel(s => Math.max(0, s - 1))
-      else if (e.key === 'Enter' && items[sel]) nav('/requests/' + items[sel].id)
-      else if (e.key === 'x' && items[sel]) toggle(items[sel].id)
+      else if (e.key === 'Enter' && items[sel] && !items[sel].ambiguous_trace_id) nav('/requests/' + items[sel].id)
+      else if (e.key === 'x' && items[sel] && !items[sel].ambiguous_trace_id) toggle(items[sel].id)
       else if (e.key === 'c' && picked.length === 2) nav(`/compare/${picked[0]}/${picked[1]}`)
     }
     window.addEventListener('keydown', h)
@@ -194,16 +194,17 @@ export default function Requests() {
             <tbody>
               {!head && Array.from({ length: 8 }, (_, i) => <tr key={i} className="border-b border-line"><td colSpan={5} className="td"><div className="h-3 rounded bg-raised animate-pulse" /></td></tr>)}
               {items.map((t, i) => (
-                <tr key={t.id} data-sel={i === sel} onClick={() => nav('/requests/' + t.id)} onMouseEnter={() => setSel(i)}
+                <tr key={t.id} data-sel={i === sel} onClick={() => { if (!t.ambiguous_trace_id) nav('/requests/' + t.id) }} onMouseEnter={() => setSel(i)}
                   className={`border-b border-line last:border-0 cursor-pointer hover:bg-raised/60 ${flash.has(t.id) ? 'row-flash' : ''}`}>
                   <td className="td !pr-0 w-8" onClick={e => e.stopPropagation()}>
                     <input type="checkbox" className="accent-[rgb(var(--accent))] cursor-pointer" aria-label={`Select ${t.method} ${t.path} for compare`}
-                      checked={picked.includes(t.id)} onChange={() => toggle(t.id)} />
+                      disabled={t.ambiguous_trace_id} checked={picked.includes(t.id)} onChange={() => toggle(t.id)} />
                   </td>
                   <td className="td mono font-semibold text-[11.5px] w-[64px] hidden sm:table-cell">{t.method}</td>
                   <td className="td max-w-[150px] sm:max-w-[420px]">
                     <div className="truncate font-medium" title={t.path}><span className="sm:hidden mono text-[11px] font-semibold mr-1.5">{t.method}</span>{t.path}</div>
                     <div className="sm:hidden flex items-center gap-1 mt-0.5 text-[11px] text-muted">{t.issue_kinds.map(k => <IssueBadge key={k} kind={k} />)}<span className="num">{ago(t.started_at, now)}</span></div>
+                    {t.ambiguous_trace_id && <p className="text-warn text-[11px]">Duplicate trace ID across stores. Inspection and comparison are unavailable.</p>}
                     {t.route && t.route !== t.path && <div className="truncate mono text-[11px] text-faint" title={t.route}>{t.route}</div>}
                   </td>
                   <td className="td"><Status code={t.status} /></td>

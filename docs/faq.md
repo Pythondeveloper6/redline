@@ -4,12 +4,12 @@
 
 ## How finished is this?
 
-**Alpha, and open source.** The version is `0.2.0a1`, the classifier is
-`Development Status :: 3 - Alpha`, and the code is on GitHub under the MIT licence. It is
-**not on PyPI yet**: you install it from GitHub (see [Getting started](getting-started.md#install)).
-Redline has four planned parts; the first two (Profile and Analyze) and the third (Stress)
-exist. The fourth (Compare / CI) has started: the [refactor check](refactor-check.md) is built
-in the unreleased 0.3.0a1, and the rest of it is next.
+**Alpha, and open source.** This checkout develops `0.4.0a1` under the
+`Development Status :: 3 - Alpha` classifier and MIT licence. Published prereleases are
+available on PyPI; they may lag this branch. [Getting started](getting-started.md#install)
+covers both published and local workspace installs. Profile, Analyze, Stress and Compare/CI
+have implementations. The [real-world guide](real-world-workflows.md) covers SQL failures,
+jobs and shared-environment additions, including their support boundaries.
 
 What that means in practice:
 
@@ -36,17 +36,20 @@ What that means in practice:
 - **Not yet proven in production.** It is designed to be usable there with the
   [production preset](production.md#the-production-preset), but multi-process behaviour in
   particular has had little real-world exercise.
-- **Not built.** A pytest plugin and `redline ci` (v0.3), a shared Postgres store,
-  Celery stitching, and everything else on the [roadmap](roadmap.md).
+- **Development additions.** Pytest budgets, refactor-check CI reports and explicit summary export
+  exist; 0.4 adds job/Celery recording and database/privacy workflows. Live MySQL/SQL Server,
+  broker/prefork and deployment load qualification remain pending. A shared Postgres store,
+  distributed tracing and RQ/Dramatiq integrations are not implemented.
 
 Use it in development and staging first, and on an internal service second.
 
-## Why is it not on PyPI?
+## Can I install it from PyPI?
 
-Publishing a package under a name is a commitment to maintain it, and the project is still
-in alpha. For now you install from GitHub, naming both the adapter and `redline-core` in one
-command so pip can satisfy the adapter's pin. See
-[Getting started](getting-started.md#install). Publishing to PyPI is a later decision.
+Yes. Install the published prerelease adapter for your framework, such as
+`pip install --pre django-redline`; the matching core is an exact dependency.
+[Getting started](getting-started.md#install) lists all four adapters and optional extras.
+A published version may not include this checkout's unreleased features. Use a reviewed
+local workspace or matching Git commit to test those changes.
 
 ## How is it different from django-silk?
 

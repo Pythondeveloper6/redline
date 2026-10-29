@@ -8,7 +8,37 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). While the
 version is below `1.0` the public API may change between minor versions.
 
-## Unreleased: 0.3.0a1
+## Unreleased: 0.4.0a1
+
+### Added
+
+- SQL failure recordings and issue groups, raw rowcounts, comment-placeholder findings,
+  connection lifecycle evidence and observed session-state checks.
+- SQL Server identity, estimated/opt-in actual XML plan collection, logical-read summaries
+  and bounded catalog inspection. Live driver validation remains required.
+- Offline `redline check-sql`, explicit online compilation and schema snapshots, bounded
+  store auditing, import checks and explicit sanitized OTLP summary export.
+- Generic jobs/stages/row outcomes, optional Celery signals, retry outcomes and commit-before-
+  failure evidence; Jobs, SQL checker and redaction-preview UI surfaces.
+- Shared-dev defaults, SQL value capture policies, privacy profiles and route rules,
+  log filters, user/request correlation, read-only secondary trace browsing and nested
+  Flask/FastAPI recording.
+- pytest SQL-error/session-state assertions and `--redline-all`.
+
+### Changed
+
+- Failed SQL attempts remain visible even when application code catches the exception.
+- SQL observers preserve application results and original errors when capture fails;
+  recorder ownership isolates engines shared by several applications.
+- Bounded SQL/parameters, span data, tags and complete trace payloads; production capture
+  uses smaller budgets, value-free diagnostics and safe metadata on privacy failure.
+- Duplicate trace IDs across secondary stores are marked and cannot select unrelated evidence.
+- Routine CI and docs deploy only after pushes/merges to main; no PR-triggered runs.
+- All five distributions move together to 0.4.0a1. See Real-world workflows for support
+  boundaries and the local validation report before publishing.
+
+## 0.3.0a1
+
 
 The refactor check: prove a refactor is safe and measure what it gained. A 0.2 store is
 migrated in place to schema version 4 when 0.3 first opens it.

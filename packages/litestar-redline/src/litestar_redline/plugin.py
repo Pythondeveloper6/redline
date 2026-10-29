@@ -142,7 +142,7 @@ class RedlinePlugin(InitPluginProtocol):
             alias = alias_for(engine, self.engines)
         self.engines[alias] = engine
         if self.settings.enabled:
-            instrument_engine(engine, alias)
+            instrument_engine(engine, alias, recorder=self.recorder)
         return alias
 
     def _executor_for(self, alias: str, vendor: str) -> ExplainExecutor | None:

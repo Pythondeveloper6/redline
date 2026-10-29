@@ -44,7 +44,7 @@ __all__ = [
 #: ``executor(sql, params) -> rows``; must run in a rolled-back transaction.
 ExplainExecutor = Callable[[str, Any], Sequence[Sequence[Any]]]
 
-VENDORS = ("postgresql", "mysql", "sqlite")
+VENDORS = ("postgresql", "mysql", "sqlite", "mssql")
 
 
 class ExplainError(Exception):
@@ -66,9 +66,11 @@ class ExplainResult:
     tree: PlanNode
     findings: list[Finding] = field(default_factory=list)
     suggested_indexes: list[str] = field(default_factory=list)
+    statistics: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            **({"statistics": self.statistics} if self.statistics else {}),
             "vendor": self.vendor,
             "analyzed": self.analyzed,
             "plan": self.plan,
@@ -82,6 +84,8 @@ class ExplainResult:
 def explain_statement(sql: str, vendor: str, *, analyze: bool = False) -> str:
     """The EXPLAIN statement for ``sql`` on ``vendor``."""
     body = sql.strip().rstrip(";")
+    if vendor == "mssql":
+        return body
     if vendor == "postgresql":
         opts = "ANALYZE, BUFFERS, FORMAT JSON" if analyze else "FORMAT JSON"
         return f"EXPLAIN ({opts}) {body}"
@@ -126,13 +130,30 @@ def run_explain(
         analyze = False  # EXPLAIN QUERY PLAN has no ANALYZE form
     statement = explain_statement(sql, vendor, analyze=analyze)
     try:
-        rows = list(executor(statement, params))
+        if vendor == "mssql":
+            plan_executor = getattr(
+                executor, "mssql_actual_plan" if analyze else "mssql_estimated_plan", None
+            )
+            if plan_executor is None:
+                raise ExplainError(
+                    "explain_unavailable",
+                    "This executor cannot safely toggle SHOWPLAN on a dedicated connection.",
+                    501,
+                )
+            rows = list(plan_executor(statement, params))
+        else:
+            rows = list(executor(statement, params))
     except ExplainError:
         raise
     except Exception as exc:
         raise ExplainError("explain_failed", f"{type(exc).__name__}: {exc}", 422) from exc
-    plan = _raw_plan(vendor, rows)
-    analysis = analyze_plan(vendor, plan, sql, params)
+    try:
+        plan = _raw_plan(vendor, rows)
+        analysis = analyze_plan(vendor, plan, sql, params)
+    except ExplainError:
+        raise
+    except Exception as exc:
+        raise ExplainError("explain_failed", "Returned plan could not be parsed", 422) from exc
     return ExplainResult(
         vendor=vendor,
         analyzed=analyze,
@@ -141,6 +162,9 @@ def run_explain(
         tree=analysis.tree,
         findings=analysis.findings,
         suggested_indexes=analysis.suggested_indexes,
+        statistics=rows[0][1]
+        if vendor == "mssql" and rows and len(rows[0]) > 1 and isinstance(rows[0][1], dict)
+        else {},
     )
 
 
@@ -153,6 +177,8 @@ def _raw_plan(vendor: str, rows: list[Sequence[Any]]) -> Any:
     value = first[0] if isinstance(first, (list, tuple)) else first
     if isinstance(value, (bytes, bytearray)):
         value = value.decode("utf-8")
+    if vendor == "mssql":
+        return value
     if isinstance(value, str):
         try:
             value = json.loads(value)

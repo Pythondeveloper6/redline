@@ -42,6 +42,8 @@ import weakref
 from collections import defaultdict
 from typing import Any
 
+from redline_core.diagnostics import capture_failure
+
 from ..histogram import Histogram
 from ..model import Callsite, Issue, Trace
 from ..runs import Run, RunStep
@@ -339,7 +341,12 @@ class SQLiteStore(CheckStoreMixin):
         )
         conn.row_factory = sqlite3.Row
         if self.path != ":memory:":
-            conn.execute("PRAGMA journal_mode=WAL")
+            mode = conn.execute("PRAGMA journal_mode=WAL").fetchone()[0]
+            if str(mode).lower() != "wal":
+                conn.close()
+                raise RuntimeError(
+                    "Redline storage requires SQLite WAL on a compatible local filesystem"
+                )
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.executescript(_SCHEMA)
         _migrate(conn)
@@ -370,7 +377,7 @@ class SQLiteStore(CheckStoreMixin):
         try:
             self._conn = self._connect()
         except Exception:  # pragma: no cover - e.g. the file vanished
-            logger.exception("Redline could not reopen its store after fork")
+            capture_failure("Redline could not reopen its store after fork")
             self._closed = True
 
     def _check_pid(self) -> None:
@@ -397,13 +404,21 @@ class SQLiteStore(CheckStoreMixin):
         """Build from a :class:`~redline_core.conf.Settings`."""
         days = getattr(settings, "history_retention_days", 90)
         kwargs.setdefault("history_retention_s", float(days) * 86_400.0 if days else None)
-        return cls(
-            settings.storage_path,
+        from .safety import prepare_path
+
+        primary = cls(
+            prepare_path(settings),
             queue_size=settings.writer_queue_size,
             max_rows=settings.max_rows,
             max_age_s=settings.max_age_s,
             **kwargs,
         )
+
+        if settings.extra_stores:
+            from .multiple import MultipleStores
+
+            return MultipleStores(primary, settings.extra_stores)
+        return primary
 
     # writing ---------------------------------------------------------------
     def save(self, trace: Trace) -> None:
@@ -413,7 +428,11 @@ class SQLiteStore(CheckStoreMixin):
             self.dropped += 1
             return
         if not self.background:
-            self._write([trace])
+            try:
+                self._write([trace])
+            except Exception:
+                self.dropped += 1
+                raise
             return
         try:
             self._ensure_writer().put_nowait(trace)
@@ -454,8 +473,11 @@ class SQLiteStore(CheckStoreMixin):
             if batch:
                 try:
                     self._write(batch)
-                except Exception:  # keep the writer alive whatever happens
-                    logger.exception("Redline writer failed to store %d trace(s)", len(batch))
+                except Exception as exc:  # keep the writer alive whatever happens
+                    self.dropped += len(batch)
+                    logger.error(
+                        "Redline writer dropped %d trace(s) (%s)", len(batch), type(exc).__name__
+                    )
             for m in markers:
                 m.set()
             if stop:
@@ -655,9 +677,12 @@ class SQLiteStore(CheckStoreMixin):
             like = _like(f.q)
             clauses.append(
                 "(lower(t.path) LIKE ? ESCAPE '\\' OR lower(coalesce(t.route, '')) LIKE ? "
-                "ESCAPE '\\' OR lower(coalesce(t.view, '')) LIKE ? ESCAPE '\\')"
+                "ESCAPE '\\' OR lower(coalesce(t.view, '')) LIKE ? ESCAPE '\\' "
+                "OR EXISTS (SELECT 1 FROM trace_tags g WHERE g.trace_id=t.id "
+                "AND g.key IN ('request_id','user_id','job.id') "
+                "AND lower(g.value) LIKE ? ESCAPE '\\'))"
             )
-            params += [like, like, like]
+            params += [like, like, like, like]
         if f.method:
             clauses.append("t.method = ?")
             params.append(f.method)

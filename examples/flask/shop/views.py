@@ -25,6 +25,7 @@ REFACTOR = os.environ.get("SHOP_REFACTOR") == "1"
 def index() -> dict:
     return {
         "try": [
+            "/workflows  (v0.4 SQL failures, dynamic engines, privacy and jobs)",
             "/patterns  (aggregation, deep pagination, ORM instances; check-suite rules)",
             "/orders  (N+1 on order items)",
             "/orders/customers  (N+1 on customers, many-to-one)",

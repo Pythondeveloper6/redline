@@ -74,6 +74,7 @@ export function ExplainDrawer({ traceId, span, onClose }: { traceId: string; spa
             {!res.analyzed && !readOnly && <button className="btn" onClick={() => run(true)} disabled={loading || analyzeOff} title={analyzeOff ? analyzeHint : 'Runs the query for real to get actual timings'}>Run with ANALYZE</button>}
           </div>
           <div className="card p-3"><Node n={res.tree} depth={0} maxCost={maxOf(res.tree)} /></div>
+          {res.statistics?.logical_reads && <div className="card p-3"><h3 className="font-semibold">Logical reads</h3><pre className="overflow-x-auto">{JSON.stringify(res.statistics.logical_reads, null, 2)}</pre><p className="text-muted">{res.statistics.note}</p></div>}
           {res.findings.length > 0 && (
             <div>
               <div className="text-[12px] font-semibold mb-2">Findings</div>

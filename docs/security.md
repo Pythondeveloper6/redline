@@ -18,8 +18,8 @@ For every kept request, on local disk, in `.redline/redline.db`:
 | **Query string** | key and value | values whose key matches `redact_keys` are masked |
 | **Request body** | text, capped at `max_body_bytes` | JSON, form and multipart keys matching `redact_keys` are masked; multipart files become `[file: name, N bytes]`; any other text (plain, XML, GraphQL, JSON that does not parse) goes through the free-text rule |
 | **Response body** | text, capped | JSON, form and multipart keys are masked; HTML and other text are **not** scanned (cost); only if `capture_response_body` is on |
-| **SQL text** and **parameters** | verbatim SQL; parameters as JSON | parameters bound to a column, or a table, matching `redact_keys` are masked (`authtoken_token.key`, `django_session.session_key`) |
-| **Callsites** | file, line, function and the **source line** | no |
+| **SQL text** and **parameters** | controlled by `capture_sql_params` | `false` withholds values and normalizes literals; `reads_only` retains values only for recognized reads; otherwise configured column/table/profile patterns mask parameters |
+| **Callsites** | file, line, function and optional **source line** | SQL capture/route restrictions remove associated source and generated fix snippets; other captured source can contain literals |
 | **Tracebacks** and exception messages | text | the free-text rule (URL passwords, secret query values, `key=value` secrets, JWTs, card numbers), chained exceptions included |
 | **Exception locals** (project frames: names and `repr` of variables) | text, at most 30 per frame, 300 characters each | variables whose **name** matches `redact_keys` are masked; containers have secret keys masked to a depth of 4, and the whole `repr` goes through the free-text rule (`key=value` pairs, URLs). Values under innocent names are **not** |
 | **Log records** emitted during the request | level, logger, message (2,000 characters), callsite | the free-text rule: `key=value`, `key: value` and `"key": "value"` pairs whose key matches `redact_keys` are masked, and so are URL passwords and secret query values. Bare secrets in a sentence are not |
@@ -36,8 +36,8 @@ Everything is JSON in a SQLite file readable by anyone who can read the file.
 ## Redaction
 
 Redaction is **on by default** and cannot be turned off by accident: there is no
-"disable redaction" switch. It runs on the trace before it is handed to the store, so a
-secret never reaches disk. It is mostly **key-based**: it looks at the *name* of a field
+"disable redaction" switch. It runs on the trace before it is handed to the store, so values recognized by the configured rules are masked before persistence.
+Unrecognized sensitive data can still reach disk. It is mostly **key-based**: it looks at the *name* of a field
 (header, query key, JSON key, column, table, route parameter). Free text (log messages,
 exception messages, tracebacks, text bodies) additionally has JWTs and Luhn-valid card
 numbers masked by shape.
@@ -89,9 +89,9 @@ Be clear-eyed about this. Anything not matched by **key name** is stored in clea
 | Not masked | Why | What to do |
 |---|---|---|
 | A secret in the **URL path** under an innocent parameter name (`/users/<email>/`, `/invite/<slug>/`) | Only parameters named like a secret are masked | Put the path in `ignore_paths`, or avoid secrets in paths |
-| **Personal data** under ordinary keys (`email`, `name`, `address`, `phone`, `dob`) | They do not match the default pattern | Add patterns to `redact_keys`, or turn bodies off |
+| **Personal data** under ordinary keys (`email`, `name`, `address`, `phone`, `dob`) | They do not all match the default credential pattern | Add reviewed profiles/custom patterns, and keep bodies off in production |
 | **Bare secrets in text request bodies**, and anything in **HTML or other non-JSON response bodies** | Text request bodies only get the free-text rule (`key=value`, `<key>`, JWTs, cards); response text is not scanned | Turn off `capture_request_body` / `capture_response_body`, or `ignore_paths` |
-| **Literal values inlined in SQL text** (raw SQL built with f-strings) | Masking covers bound parameters, not the statement text | Use bound parameters |
+| **Literal values inlined in SQL text** when SQL value capture is enabled | Key masking does not identify arbitrary statement literals | Use bound parameters and `capture_sql_params = false` in production |
 | **SQL parameters** bound to columns *and* tables whose names look innocent (`settings.value`, `kv.data`) | Matching is on the column and table name | Add patterns, or accept it |
 | **Bare secrets in exception messages** (`ValueError: bad abc123`) | Only the free-text rule applies (`token=abc123` and `token: abc123` *are* masked) | Do not put secrets in exception messages |
 | **Source lines** in callsites | They are your code | n/a, but note they land on disk |
@@ -371,17 +371,18 @@ Never expose it with a dependency or permission that lets everyone in, or `acces
 | **Static assets** | Served through the same access check. Hashed asset names are cached for a year; the path is resolved (symlinks and `..` included) and refused unless it stays inside the bundle directory, so `assets/../../conf.py` is a `404` |
 | **`X-Redline-Trace` header** | Django only, and only when `DEBUG` is true: the id of the trace is added to the response, so you can find it. It is not sent in production |
 | **Rendering** | The UI renders stored text through React, which escapes it: there is no `dangerouslySetInnerHTML` or `innerHTML` anywhere. The SQL highlighter returns tokens rendered as text nodes, the diff view renders each line as text, and a suggestion's docs link is only rendered when it is `http(s)` (never `javascript:`). Trace ids are URL-encoded in API calls |
-| **Outbound network** | Redline makes **no** network calls of its own: no telemetry, no update check |
+| **Outbound network** | Recording starts no telemetry, update check or exporter. Explicit load/check, online SQL compilation and export operations contact their configured targets |
 | **Dependencies** | `redline-core` has **no runtime dependencies** |
 | **The profiler** | Optional; adds `pyinstrument` |
 
-## Supply chain: installing from Git
+## Supply chain: published and source installs
 
-Redline is not on PyPI yet. See
-[Getting started](getting-started.md#install) for why you must name `redline-core` in the
-same install command. Do not run an unqualified `pip install redline-core` against PyPI:
-the project does not own that name there, and a third party could. Install from the GitHub
-repository, and pin a tag or a commit in your lock file.
+Published prereleases are available from the project's PyPI packages; use the adapter
+for your framework so its exact core dependency is resolved together. Pin the matching
+adapter/core versions in a reviewed lock file. See [Getting started](getting-started.md#install).
+For an unreleased source install, use adapter and core from the same reviewed Git commit,
+not moving branches or unrelated versions. Verify package/project links and distribution
+provenance rather than relying only on a similar package name.
 
 ## A short threat model
 
@@ -398,3 +399,49 @@ repository, and pin a tag or a commit in your lock file.
 | Someone with read access to the disk or backups | Everything stored | redaction, retention, file permissions. **Not** encryption |
 | An admin with the UI | Run arbitrary SQL | Not possible: EXPLAIN takes a trace and span id, never SQL, and is limited to **recorded single read-only `SELECT`s** (no locking clause, no data-modifying CTE, no second statement; see [EXPLAIN: safety](explain.md#safety)), in a rolled-back transaction. They can read what was recorded and, if `explain_analyze` is on, make the server re-run recorded queries |
 | Someone who can write the store file | Plant SQL for EXPLAIN | The same `is_explainable` check runs again before EXPLAIN, on the stored text; side-effecting *functions* in a planted `SELECT` would only run under `explain_analyze` (off by default), in a rolled-back transaction |
+
+
+## Shared-environment controls in 0.4
+
+The [real-world guide](real-world-workflows.md#safer-shared-development-recording) describes
+`capture_sql_params`, profiles, table patterns, route modes, logger filters and redaction
+preview. The production recipe additionally disables log capture and active tools explicitly.
+Route rules are applied after the route template is known and before persistence; `values`
+preserves JSON structure while masking values, and `body` removes body contents. They also
+restrict SQL values, query values, source snippets, log messages and exception detail for
+that recording. Review source/fix snippets and nested issue evidence as capture surfaces too.
+
+A user resolver is an explicit synchronous callable returning an identifier. Request-ID
+headers are configurable, can be redacted, and are not proof of identity or authorization.
+Do not use a client-supplied request ID to choose a store, authorize access or attach a trace
+to another tenant. A person ID can still be personal data even when it is not a name.
+
+For multiple codebases, separate stores, credentials and processes are the initial isolation
+boundary. Secondary stores deliberately expose those files to the same authorized UI users;
+read-only file access does not create per-codebase authorization. Configure `extra_stores`
+only when that sharing is intended.
+
+## Explicit outbound operations
+
+Recording does not start an exporter automatically. Existing load/check commands contact
+their configured target. Online SQL checks contact an explicitly supplied development DSN.
+`redline export` previews summary JSON by default; `--send` and an explicit collector URL
+are required to transmit it. The initial format omits bodies, SQL and arbitrary tags/error
+messages and does not follow redirects. It is not a full production telemetry pipeline.
+See the repository's `SECURITY.md` data-egress statement.
+
+
+For recording in shared or production environments, `capture_error_details = false`
+keeps exception types and structured database codes while suppressing free-text
+messages, formatted tracebacks and exception locals. Set `capture_logs = false` as
+well: warning/error severity does not make a log message free of personal data. These
+are defaults of both `shared-dev` and `production`; explicit configuration can override
+them. SQL failure messages also require that statement's SQL parameter capture policy
+to allow capture. Counts and structured error categories remain useful when text is off.
+
+
+Capture byte budgets reduce the amount of SQL, span data and tag text retained. They do
+not replace redaction: a secret can fit inside a short value. The bounded value converter
+uses standard JSON primitives and avoids arbitrary application object conversion methods.
+Oversized, deep, cyclic or unsupported metadata is incomplete evidence, never a clean bill
+of health. Validate secret canaries separately from size-limit tests.

@@ -137,7 +137,7 @@ class RequestTracker:
             monitor = _monitor_for(loop)
             monitor.add(self)
         except Exception:  # pragma: no cover - never break the request
-            _rec.logger.exception("Redline failed to start the event-loop monitor")
+            _rec._capture_failure("Redline failed to start the event-loop monitor")
             return
         self.monitor = monitor
         hooks = builder.on_finish
@@ -269,7 +269,7 @@ class _LoopMonitor:
             try:
                 self._stall(self.expected - INTERVAL, now, None)
             except Exception:  # pragma: no cover - never break the loop
-                _rec.logger.exception("Redline failed to record an event-loop stall")
+                _rec._capture_failure("Redline failed to record an event-loop stall")
         self.seq += 1
         self.sample = None
         if self.trackers:

@@ -25,12 +25,14 @@ import dataclasses
 import functools
 import inspect
 import linecache
+import logging
 import time
 from collections.abc import Callable, Iterator
 from contextvars import ContextVar
 from typing import Any
 
 from django.core.handlers.base import BaseHandler
+from django.db import Error as DatabaseError
 from django.db import connections
 from django.db.backends.signals import connection_created
 
@@ -39,6 +41,8 @@ from redline_core.cache_payload import value_bytes
 from redline_core.callsite import MAX_STACK
 from redline_core.model import Callsite, Frame
 from redline_core.recorder import SpanContext, current, record_query, record_span
+from redline_core.sql import comment_placeholders, effective_kinds
+from redline_core.vendors import get_vendor
 
 from ._drf import install_drf
 
@@ -119,28 +123,62 @@ class QueryRecorder:
             _detach_counter(context.get("cursor"))  # a reused cursor stops counting
             return execute(sql, params, many, context)
         start = _perf()
+        error = None
+        succeeded = False
         try:
-            return execute(sql, params, many, context)
+            result = execute(sql, params, many, context)
+        except DatabaseError as exc:
+            error = exc
+            builder = current()
+            if builder is not None and not builder.finished:
+                builder.sql_errors += 1
+            raise
+        except BaseException:
+            _detach_counter(context.get("cursor"))
+            raise
+        else:
+            succeeded = True
+            return result
         finally:
-            duration = _perf() - start
-            _record(sql, params, many, context, start, duration)
+            # Observer failures must preserve the application's result/exception.
+            # Avoid exception text here: driver messages may include private values.
+            if error is not None or succeeded:
+                try:
+                    _record(sql, params, many, context, start, _perf() - start, error=error)
+                except Exception as exc:
+                    _detach_counter(context.get("cursor"))
+                    logging.getLogger("redline").warning(
+                        "SQL observation failed (%s)", type(exc).__name__
+                    )
 
 
-def _record(sql: Any, params: Any, many: bool, context: dict, start: float, duration: float):
+def _record(
+    sql: Any,
+    params: Any,
+    many: bool,
+    context: dict,
+    start: float,
+    duration: float,
+    *,
+    error: BaseException | None = None,
+):
     connection = context.get("connection")
-    rows = None
+    rows = rowcount_raw = None
     cursor = context.get("cursor")
-    if cursor is not None:
+    if error is None and cursor is not None:
         try:
-            rowcount = cursor.rowcount
-            rows = rowcount if isinstance(rowcount, int) and rowcount >= 0 else None
+            rowcount_raw = cursor.rowcount
+            rows = rowcount_raw if type(rowcount_raw) is int and rowcount_raw >= 0 else None
         except Exception:
-            rows = None
-    if many and params is not None and not isinstance(params, (list, tuple)):
-        params = list(params)  # an iterator would already be consumed; keep what we can
+            rowcount_raw = None
+    # A generator may already be exhausted; consuming it for observation can change
+    # application behavior and perform unbounded work.
+    unavailable = many and params is not None and not isinstance(params, (list, tuple))
+    text_available = type(sql) is str
+    statement = sql if text_available else "UNKNOWN"
     span = record_query(
-        str(sql),
-        params,
+        statement,
+        None if unavailable else params,
         start=start,
         duration=duration,
         db_alias=getattr(connection, "alias", "default"),
@@ -150,11 +188,42 @@ def _record(sql: Any, params: Any, many: bool, context: dict, start: float, dura
     )
     if span is not None:
         attribute_to_view(span)
-        if rows is None and not many and cursor is not None and span.data.get("explainable"):
+        if unavailable or not text_available:
+            span.data["params_captured"] = False
+            span.data["explainable"] = False
+        if not text_available:
+            span.data["sql_text_available"] = False
+        if span.data.get("params_captured") is False and span.callsite is not None:
+            span.callsite = dataclasses.replace(span.callsite, code=None)
+        span.data["rowcount_raw"] = rowcount_raw if type(rowcount_raw) is int else None
+        span.data["statement_kinds"] = list(effective_kinds(statement))
+        # Django's public cursor API uses %s or %(name)s, regardless of the
+        # underlying backend's native bind syntax.
+        span.data["comment_placeholders"] = comment_placeholders(statement, "pyformat")
+        if error is not None:
+            builder = current()
+            original = error.__cause__ or error
+            details = get_vendor(span.data["vendor"]).classify_error(original)
+            details["message"] = (
+                builder.recorder.redactor.text(str(original))[:500]
+                if builder is not None
+                and builder.recorder.settings.capture_error_details
+                and span.data.get("params_captured")
+                else "[not captured]"
+            )
+            span.data["error"] = details
+            span.data["explainable"] = False
+        if (
+            error is None
+            and rows is None
+            and not many
+            and cursor is not None
+            and span.data.get("read_query")
+        ):
             _count_fetched_rows(cursor, span)
         else:
             _detach_counter(cursor)
-        note_sync_call(span, "sync ORM")  # sync ORM on the event loop (async views)
+        note_sync_call(span, "sync ORM")
     else:
         _detach_counter(cursor)
 
@@ -549,12 +618,12 @@ def _wrap_render(cls: type, attr: str) -> None:
 def _template_name(template: Any) -> str:
     name = getattr(template, "name", None)
     if name:
-        return str(name)
+        return str.__str__(str(name))
     origin = getattr(template, "origin", None)
     origin_name = getattr(origin, "template_name", None) or getattr(origin, "name", None)
     if origin_name:
-        return str(origin_name)
+        return str.__str__(str(origin_name))
     inner = getattr(template, "template", None)  # the Jinja2 backend wrapper
     if inner is not None and getattr(inner, "name", None):
-        return str(inner.name)
+        return str.__str__(str(inner.name))
     return "<string>"

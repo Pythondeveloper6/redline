@@ -2,17 +2,18 @@
 
 [← Index](index.md)
 
-Redline has four parts: **Profile**, **Analyze**, **Stress** and **Compare/CI**. Versions 0.1
-and 0.2 built the first three. Compare/CI has started: its first piece, the
-[refactor check](refactor-check.md), is built in 0.3.0a1. The rest of it is planned, **not
-built**. This page is the plan, not a promise: it is the intent as of 0.2.0a1, and it will
-change as the earlier parts meet real use.
+Redline has four parts: **Profile**, **Analyze**, **Stress** and **Compare/CI**. Versions
+0.1–0.3 implemented request analysis, load/history and comparison/test tooling. The 0.4
+development release adds the database, job and privacy workflows described in
+[Real-world workflows](real-world-workflows.md). The remaining roadmap is intent, not a
+promise; production readiness still depends on the [deployment validation gate](production.md).
 
 | Version | Theme | Status |
 |---|---|---|
 | **0.1** | Profile and Analyze: traces, N+1 with fix diffs, EXPLAIN, flamegraphs, UI, Django and FastAPI | **Built** |
 | **0.2** | Analyze more, **Stress**, History: Flask and Litestar, a load tester, new detectors, release history, access control | **Built** (alpha) |
-| 0.3 | **Compare / CI**: refactor checks, endpoint budgets, pytest and source analysis | Built in the development branch; integration and release validation in progress |
+| 0.3 | **Compare / CI**: refactor checks, endpoint budgets, pytest and source analysis | Released; continued in 0.4 |
+| **0.4** | Real-world SQL failures, jobs, privacy and bounded capture | Development; live deployment qualification pending |
 | 1.0 | Hardened production mode and the long tail | Planned |
 
 ## The thesis
@@ -53,7 +54,8 @@ Make performance a thing you can regress-test.
 - **`redline ci`** (planned) emits **JUnit** output and a **Markdown PR comment** (`+queries`, `+p95`,
   the culprit line), comparing a run against a stored baseline.
 - **Flamegraph diffs** between two requests or two releases are deferred to the next release.
-- **OTLP import and export** (planned), so traces can flow to and from other tools.
+- **OTLP recording-summary export** is implemented in 0.4 as an explicit preview/send
+  command. Full span/log export and OTLP import remain planned.
 - Baselines and diffs per endpoint in CI, building on the History comparison already in 0.2.
 - **Refactor check** (**shipped in 0.3.0a1**, see [Refactor check](refactor-check.md)): pick a
   set of read-only endpoints, record a baseline before a refactor, run it again after, and
@@ -74,8 +76,8 @@ The long tail.
 
 - **Hardened production mode** with a **Postgres store**, replacing today's single-node
   SQLite caveats.
-- **Celery and RQ trace stitching**, so a request and the background work it spawned appear
-  together.
+- **Distributed worker trace stitching** beyond the explicit Celery job recordings and
+  parent/request ID labels added in 0.4. RQ integration remains planned.
 - A **memory-per-request** extra (tracemalloc or memray).
 - In-process **fault injection**: latency or errors per endpoint or query.
 - **Index what-if** through HypoPG: test a suggested index without creating it.
@@ -102,3 +104,7 @@ Each version gets its own detailed plan before work starts, and each stays small
 outline above is from the project plan; details, ordering and scope inside each version may
 change. Issues and ideas are welcome on the
 [issue tracker](https://github.com/Pythondeveloper6/redline/issues).
+
+## 0.4 development release
+
+Database failures, SQL Server plan tooling, offline/online SQL checks, jobs and shared-environment controls are described in [Real-world workflows](real-world-workflows.md). Driver and worker support distinguish local fixtures from live deployment validation.
