@@ -619,7 +619,7 @@ class Report:
 
     # ------------------------------------------------------------------ data
     def to_dict(self) -> dict[str, Any]:
-        return {
+        data = {
             "format": FORMAT,
             "version": VERSION,
             "id": self.id,
@@ -630,6 +630,9 @@ class Report:
             "summary": self.summary,
             "requests": self.requests,
         }
+        if self.extra:
+            data["extra"] = self.extra
+        return data
 
     def to_json(self) -> str:
         return json.dumps(self.to_dict(), indent=2, ensure_ascii=False) + "\n"
@@ -653,6 +656,7 @@ class Report:
             requests=list(data.get("requests") or []),
             fail_on=tuple(summary.get("fail_on") or DEFAULT_FAIL_ON),
             status=str(data.get("status") or "done"),
+            extra=dict(data.get("extra") or {}),
         )
 
     def with_fail_on(self, fail_on: Sequence[str]) -> Report:
@@ -679,8 +683,8 @@ class Report:
         return out
 
     def exit_code(self) -> int:
-        """0 nothing matches ``fail_on``, 1 otherwise."""
-        return 1 if self.failures() else 0
+        """0 nothing matches ``fail_on`` and Ruff passed, 1 otherwise."""
+        return 1 if self.failures() or self.extra.get("ruff") or self.extra.get("ruff_error") else 0
 
     # ------------------------------------------------------------------ terminal
     def headline(self) -> str:
@@ -859,6 +863,25 @@ class Report:
                 "```",
                 "</details>",
             ]
+        if self.extra.get("ruff_error"):
+            lines += ["", f"> **Ruff:** {_md(self.extra['ruff_error'])}"]
+        elif self.extra.get("ruff"):
+            found = self.extra["ruff"]
+            lines += [
+                "",
+                f"### Ruff ({len(found)} finding{'s' if len(found) != 1 else ''})",
+                "",
+                "| Rule | Location | Message |",
+                "|---|---|---|",
+            ]
+            for item in found[:50]:
+                message = _md(item["message"])
+                lines.append(
+                    f"| `{_md(item['code'])}` | {_md(item['filename'])}:{item['row']}:"
+                    f"{item['column']} | {message} |"
+                )
+            if len(found) > 50:
+                lines.append(f"| … | | {len(found) - 50} more |")
         for w in s.get("warnings") or []:
             lines += ["", f"> **Warning:** {_md(w)}"]
         if not s.get("server_side"):
@@ -912,6 +935,34 @@ class Report:
             )
             ET.SubElement(tc, "system-out").text = out
         ts.set("time", f"{total:.6f}")
+        ruff = self.extra.get("ruff")
+        ruff_error = self.extra.get("ruff_error")
+        if ruff is not None or ruff_error:
+            items = ruff or []
+            rs = ET.SubElement(
+                root,
+                "testsuite",
+                name="ruff",
+                tests=str(max(1, len(items))),
+                failures=str(len(items) + (1 if ruff_error else 0)),
+                errors="0",
+                skipped="0",
+            )
+            if ruff_error:
+                tc = ET.SubElement(rs, "testcase", classname="redline.ruff", name="ruff", time="0")
+                ET.SubElement(tc, "failure", message=str(ruff_error), type="ruff")
+            for item in items:
+                tc = ET.SubElement(
+                    rs,
+                    "testcase",
+                    classname="redline.ruff",
+                    name=f"{item['code']} {item['filename']}:{item['row']}:{item['column']}",
+                    time="0",
+                )
+                ET.SubElement(tc, "failure", message=item["message"], type=item["code"])
+                ET.SubElement(tc, "system-out").text = item["filename"]
+            if not items and not ruff_error:
+                ET.SubElement(rs, "testcase", classname="redline.ruff", name="ruff", time="0")
         ET.indent(root)
         return (
             '<?xml version="1.0" encoding="UTF-8"?>\n'

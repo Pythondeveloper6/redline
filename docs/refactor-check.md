@@ -430,6 +430,7 @@ saved JSON report again, and can write the Markdown and JUnit files from it.
 | `--json OUT` | the full report: suite, baseline, run, summary and every request's performance, server and response results |
 | `--markdown OUT` | a PR comment: a PASS/FAIL line, a summary, a table, and a collapsible diff per changed request |
 | `--junit OUT` | JUnit XML, one test case per request; a request whose verdict matches `--fail-on` is a failure with the diff as its text |
+| `--ruff [PATH]` | include Ruff JSON (or run `ruff check --select F --output-format json`) as a table in Markdown and a `ruff` suite in JUnit; findings fail the command |
 
 | Exit code | Meaning |
 |---|---|

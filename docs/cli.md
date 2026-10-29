@@ -77,6 +77,7 @@ redline check show    REPORT.json       print a saved report again
 | `--junit OUT` | compare, run | Write JUnit XML, one test case per request |
 | `--fail-on LIST` | compare, run, show | Verdicts that make the exit code `1`: any of `slower`, `changed`, `broken`, `missing`, `noisy`, `faster`, or `none`. Default `slower,changed,broken,missing` |
 | `--slower-pct X`, `--slower-ms Y` | compare, run | Override `thresholds.slower_pct` and `thresholds.slower_ms` for this run |
+| `--ruff [PATH]` | compare, run, show | Include Ruff JSON from `PATH`; with no path run `ruff check --select F --output-format json`. Findings appear in the Markdown and JUnit outputs and make the exit code `1` |
 | `--no-color` | compare, run, show | No ANSI colours |
 
 `redline check init` takes `--from-traces` (required), `--store PATH`, `--route PATTERN`
@@ -90,7 +91,10 @@ a `${env:REDLINE_CHECK_AUTHORIZATION}` or `${env:REDLINE_CHECK_COOKIE}` placehol
 
 `redline check show` takes the report JSON and prints it again; `--markdown OUT` and
 `--junit OUT` write those files from it. It exits `0` unless `--fail-on` is given; with
-`--fail-on` it exits `1` when a request matches it, as `compare` does.
+`--fail-on` it exits `1` when a request matches it, as `compare` does. `--ruff` attaches a
+Ruff result to the report (or re-runs `ruff check --select F`); any finding, or a failure to
+read the result, makes `compare`/`run` exit `1`. Redline is not a linter: it only carries
+Ruff's JSON into the same report.
 
 ```bash
 redline check init --from-traces --route '/orders*' -o checks/orders.toml

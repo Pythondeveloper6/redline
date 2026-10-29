@@ -325,9 +325,15 @@ to every test; a test that records nothing fails. Direct services can use
 assertions that require complete evidence.
 
 `redline check-imports module:attribute` explicitly imports a development target in a
-subprocess and loads registered task modules. It executes module import code; run it only
-in the intended development environment. Lazy imports and task branches are not executed.
-Use Ruff and application tests directly for Python correctness; Redline is not a linter.
+subprocess, loads each registered task's module and then the `import`/`from` statements
+statically visible inside task functions, resolved against the same `sys.path`. It executes
+module and lazy-import code; run it only in the intended development environment. Runtime
+branches, dynamic imports and task execution are not covered. A missing lazy module is
+listed by module name and makes the command exit `1`.
+
+`redline check compare/run --ruff [PATH]` carries Ruff's JSON into the existing Markdown
+and JUnit report; with no `PATH` it runs `ruff check --select F --output-format json`.
+Redline is not a linter and does not fix findings.
 
 ```bash
 redline export --store /path/to/redline.db             # OTLP JSON preview only
