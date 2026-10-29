@@ -33,6 +33,7 @@ from werkzeug.datastructures import EnvironHeaders
 from werkzeug.wsgi import FileWrapper, get_path_info
 
 from redline_core import Recorder, ui
+from redline_core.diagnostics import capture_failure
 from redline_core.recorder import TraceBuilder
 from redline_core.sampling import profile_requested
 
@@ -184,8 +185,10 @@ class RedlineMiddleware:
         badge: Callable[[], bool] | None = None,
         debug: Callable[[], bool] | None = None,
         force_ok: Callable[[dict[str, Any]], bool] | None = None,
+        nested: bool = False,
     ) -> None:
         self.wsgi_app = wsgi_app
+        self.nested = nested
         self.recorder = recorder
         self.prefix = prefix
         self.badge = badge
@@ -208,6 +211,12 @@ class RedlineMiddleware:
         ):
             return self.wsgi_app(environ, start_response)
 
+        from redline_core.recorder import current
+
+        outer = current()
+        if self.nested and outer is not None and outer.active and not outer.finished:
+            outer.tag("nested.framework", "flask")
+            return self.wsgi_app(environ, start_response)
         settings = recorder.settings
         headers = dict(EnvironHeaders(environ).items())
         query = environ.get("QUERY_STRING", "")
@@ -273,7 +282,7 @@ class RedlineMiddleware:
                     error=error,
                 )
             except Exception:  # pragma: no cover - recording must never break a request
-                logger.exception("Redline failed to finish a trace")
+                capture_failure("Redline failed to finish a trace")
 
         def start(status: str, response_headers: list[tuple[str, str]], exc_info: Any = None):
             code = int(status.split(None, 1)[0])

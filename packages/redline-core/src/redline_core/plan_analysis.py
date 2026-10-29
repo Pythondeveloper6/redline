@@ -298,6 +298,8 @@ _SIMPLE_IDENT = re.compile(r"[a-z_][a-z0-9_]*")
 
 
 def _quote(name: str, vendor: str) -> str:
+    if vendor == "mssql":
+        return "[" + name.replace("]", "]]") + "]"
     if _SIMPLE_IDENT.fullmatch(name):
         return name
     if vendor == "mysql":
@@ -758,6 +760,10 @@ def _sqlite_check(node: PlanNode, detail: str, aliases: dict[str, str], col: _Co
 
 def analyze_plan(vendor: str, plan: Any, sql: str = "", params: Any = None) -> Analysis:
     """Dispatch on ``vendor`` (``postgresql`` / ``mysql`` / ``sqlite``)."""
+    if vendor == "mssql":
+        from .explain_mssql import analyze_mssql
+
+        return analyze_mssql(plan, sql, params)
     if vendor == "postgresql":
         return analyze_postgres(plan, sql, params)
     if vendor == "mysql":

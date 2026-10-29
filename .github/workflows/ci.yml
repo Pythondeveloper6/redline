@@ -15,15 +15,13 @@
 #             virtualenv and imports them, checking the bundled UI actually shipped.
 #
 # The documentation is deployed to GitHub Pages by its own workflow, docs.yml, on pushes to
-# main. There is deliberately no release or PyPI publish job here: releases are cut by the
-# maintainer.
+# main. Release builds the exact tested commit after successful main CI; publishing
+# additionally requires an exact-version repository variable and environment approval.
 name: CI
 
 on:
   push:
     branches: [main]
-  pull_request:
-  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -291,8 +289,42 @@ jobs:
       - name: Install from the wheels alone and smoke-test
         run: |
           uv venv "$RUNNER_TEMP/wheelcheck"
-          # The distributions resolve from dist/ only (none is on any index); their
-          # third-party dependencies come from PyPI as a user would get them.
-          VIRTUAL_ENV="$RUNNER_TEMP/wheelcheck" uv pip install --find-links dist \
-            --prerelease=if-necessary django-redline fastapi-redline flask-redline litestar-redline
+          # Direct wheel paths guarantee this build is installed, including prereleases.
+          # Third-party dependencies still resolve from PyPI as they do for users.
+          VIRTUAL_ENV="$RUNNER_TEMP/wheelcheck" uv pip install dist/*.whl
           "$RUNNER_TEMP/wheelcheck/bin/python" scripts/smoke_wheels.py
+
+  integration:
+    name: jobs and nested frameworks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.2
+        with:
+          python-version: "3.13"
+      - run: uv sync --all-packages --frozen
+      - run: uv pip install --python .venv/bin/python 'celery>=5.3,<6'
+      - run: uv run --no-sync python -m pytest packages/redline-core/tests/test_release04.py packages/redline-core/tests/test_celery.py
+
+  compose:
+    name: disposable database, worker and browser qualification
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - name: Full Compose suite (including SQL Server on native Linux amd64)
+        run: >-
+          docker compose -f examples/compose.yaml up --build
+          --abort-on-container-exit --exit-code-from tests tests
+      - name: Service logs
+        if: failure()
+        run: docker compose -f examples/compose.yaml logs --no-color --tail=100
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: compose-qualification
+          path: examples/testing/results/
+          if-no-files-found: warn
+      - name: Remove this job's disposable stack
+        if: always()
+        run: docker compose -f examples/compose.yaml down --volumes --remove-orphans

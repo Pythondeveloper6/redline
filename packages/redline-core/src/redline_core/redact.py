@@ -91,16 +91,18 @@ _COLUMN_BEFORE = re.compile(
 #: The tail ``func(`` / ``func(a, `` of the text before a placeholder passed to a call.
 _CALL_TAIL = re.compile(r"\b\w+\s*\((?:[^()]*,)?\s*$")
 _IN_LIST = re.compile(r"\bIN\s*\([^()]*,\s*$", re.IGNORECASE)
+_SQL_IDENTIFIER = r'(?:`[^`]+`|"[^"]+"|\[[^\]]+\]|\w+)'
+_SQL_TABLE = rf"{_SQL_IDENTIFIER}(?:\s*\.\s*{_SQL_IDENTIFIER})*"
 _INSERT = re.compile(
-    r"\bINSERT\s+INTO\s+(?P<table>[^\s(]+)\s*\((?P<cols>[^)]*)\)\s*VALUES\s*"
+    rf"\bINSERT\s+INTO\s+(?P<table>{_SQL_TABLE})\s*\((?P<cols>[^)]*)\)\s*VALUES\s*"
     r"(?P<rows>.*?)(?=\bON\s+(?:CONFLICT|DUPLICATE)\b|\bRETURNING\b|$)",
     re.IGNORECASE | re.DOTALL,
 )
 _TABLE_REF = re.compile(
-    r'\b(?:FROM|JOIN|UPDATE|INTO)\s+(?:ONLY\s+)?(?:[`"\[]?\w+[`"\]]?\s*\.\s*)?[`"\[]?(\w+)[`"\]]?'
-    r'(?:\s+(?:AS\s+)?[`"]?(\w+)[`"]?)?',
+    rf"\b(?:FROM|JOIN|UPDATE|INTO)\s+(?:ONLY\s+)?(?P<table>{_SQL_TABLE})",
     re.IGNORECASE,
 )
+_TABLE_ALIAS = re.compile(rf"\s+(?:AS\s+)?(?P<alias>{_SQL_IDENTIFIER})", re.IGNORECASE)
 _NOT_ALIAS = frozenset(
     "where set on inner left right full cross join values group order limit using natural "
     "outer union as select default having window returning for offset fetch except "
@@ -166,7 +168,12 @@ class Redactor:
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or Settings()
         self._headers = frozenset(h.lower() for h in self.settings.redact_headers)
-        self._keys = [re.compile(p) for p in self.settings.redact_keys]
+        from .privacy import profile_keys
+
+        self._keys = [
+            re.compile(p)
+            for p in (*self.settings.redact_keys, *profile_keys(self.settings.redact_profiles))
+        ]
         # Column and field names repeat endlessly (every query binds the same few), so the
         # regex scan is memoised per distinct name.
         self.is_secret_key = lru_cache(maxsize=2048)(self._is_secret_key)
@@ -178,7 +185,17 @@ class Redactor:
         return any(p.search(key) for p in self._keys)
 
     def _is_secret_table(self, table: str) -> bool:
-        return self.is_secret_key(_AUTH_APP_PREFIX.sub("", table))
+        from .privacy import profile_tables
+
+        basename = table.rsplit(".", 1)[-1]
+        return self.is_secret_key(_AUTH_APP_PREFIX.sub("", basename)) or any(
+            re.search(pattern, name)
+            for pattern in (
+                *self.settings.redact_tables,
+                *profile_tables(self.settings.redact_profiles),
+            )
+            for name in (table, basename)
+        )
 
     def text(self, text: str) -> str:
         """``text`` with secrets masked.
@@ -460,7 +477,7 @@ class Redactor:
         """JSON-safe ``params`` with values bound to secret-looking columns masked.
 
         Positional params are matched to placeholders in order; for ``executemany`` pass
-        the list of rows and each row is handled. Named params (dicts) use their key. A
+        each row separately. Named params (dicts) use both their key and the inferred column. A
         placeholder is secret when its column matches ``redact_keys``, or its table does
         (the qualifier, an alias of it, or – for an unqualified column – any table of the
         statement; the ``auth_`` prefix of Django's auth tables is ignored).
@@ -468,7 +485,19 @@ class Redactor:
         if params is None:
             return None
         if isinstance(params, Mapping):
-            return self.mapping(params)
+            masked = self.mapping(params)
+            tables, _ = _tables(sql)
+            if any(self._is_secret_table(table) for table in tables):
+                return {str(key): MASK for key in params}
+            secret = self._sql_mask(sql)
+            for match, hide in zip(_PLACEHOLDER.finditer(sql), secret, strict=False):
+                if not hide:
+                    continue
+                placeholder = match.group()
+                key = placeholder[2:-2] if placeholder.startswith("%(") else placeholder[1:]
+                if key in masked:
+                    masked[key] = MASK
+            return masked
         if not isinstance(params, Sequence) or isinstance(params, (str, bytes, bytearray)):
             return json_safe(params)
         secret = self._sql_mask(sql)
@@ -477,10 +506,38 @@ class Redactor:
             if i < len(secret) and secret[i]:
                 out.append(MASK)
             elif isinstance(value, Mapping):
-                out.append(self.mapping(value))
+                out.append(self.sql_params(sql, value))
             else:
                 out.append(json_safe(value))
         return out
+
+    def bounded_sql_params(self, sql: str, params: Any, *, max_bytes: int) -> tuple[Any, bool]:
+        """Redact parameters after bounding their original traversal and scalar conversion.
+
+        Only exact built-in containers and known database scalar types are inspected.
+        Truncation remains explicit, including normalization before the redaction walk.
+        """
+        from .capture_limits import bounded_value
+
+        if type(max_bytes) is not int or max_bytes < 4:
+            raise ValueError("max_bytes must be an integer >= 4")
+        fast = _fast_json_value(
+            params, max_bytes=max_bytes, max_items=200, max_depth=8, max_string_bytes=2000
+        )
+        if fast is _NO_FAST:
+            normal, input_cut = _bounded_sql_input(params, max_bytes=max_bytes)
+        else:
+            normal, input_cut = fast, False
+        redacted = self.sql_params(sql, normal)
+        fast_output = _fast_json_value(
+            redacted, max_bytes=max_bytes, max_items=200, max_depth=8, max_string_bytes=500
+        )
+        if fast_output is not _NO_FAST:
+            return fast_output, input_cut
+        safe, output_cut = bounded_value(
+            redacted, max_bytes=max_bytes, max_items=200, max_depth=8, max_string_bytes=500
+        )
+        return safe, input_cut or output_cut
 
     def _sql_mask_uncached(self, sql: str) -> tuple[bool, ...]:
         return tuple(
@@ -493,6 +550,152 @@ class Redactor:
     def _param_columns(sql: str) -> tuple[str | None, ...]:
         """Column each placeholder of ``sql`` is bound to (``None`` when unknown)."""
         return tuple(column for column, _ in _param_slots(sql))
+
+
+_NO_FAST: Any = object()
+
+
+def _fast_json_value(
+    value: Any,
+    *,
+    max_bytes: int,
+    max_items: int,
+    max_depth: int,
+    max_string_bytes: int,
+) -> Any:
+    """The value itself when it is already small, exact-builtin and JSON-safe.
+
+    This is the common path for ``{"id": 7}`` and avoids multiple bounded traversals.
+    Anything unusual returns ``_NO_FAST`` so the bounding/redaction path handles it.
+    """
+    remaining = [max_items]
+
+    def visit(item: Any, depth: int) -> bool:
+        kind = type(item)
+        if kind is str:
+            return len(item) <= max_string_bytes
+        if kind in (type(None), bool):
+            return True
+        if kind is int:
+            return item.bit_length() <= 64
+        if kind is float:
+            return item == item and item not in (float("inf"), float("-inf"))
+        if kind not in (dict, list, tuple) or depth >= max_depth:
+            return False
+        if remaining[0] < 1:
+            return False
+        for key, child in item.items() if kind is dict else enumerate(item):
+            if kind is dict and (type(key) is not str or len(key) > max_string_bytes):
+                return False
+            remaining[0] -= 1
+            if remaining[0] < 0 or not visit(child, depth + 1):
+                return False
+        return True
+
+    if not visit(value, 0):
+        return _NO_FAST
+    import json
+
+    try:
+        encoded = json.dumps(
+            value, ensure_ascii=True, separators=(",", ":"), allow_nan=False
+        ).encode("utf-8")
+    except (TypeError, ValueError, OverflowError):
+        return _NO_FAST
+    if len(encoded) > max_bytes:
+        return _NO_FAST
+
+    def detached(item: Any) -> Any:
+        kind = type(item)
+        if kind is dict:
+            return {key: detached(child) for key, child in item.items()}
+        if kind is list:
+            return [detached(child) for child in item]
+        return item
+
+    return detached(value)
+
+
+def _bounded_sql_input(value: Any, *, max_bytes: int) -> tuple[Any, bool]:
+    """Normalize a bounded prefix without calling user-defined conversion methods."""
+    import datetime
+    from decimal import Decimal
+    from uuid import UUID
+    from zoneinfo import ZoneInfo
+
+    from .capture_limits import bounded_value
+
+    remaining_bytes = max_bytes
+    remaining_items = 200
+    active: set[int] = set()
+    truncated = False
+
+    def visit(item, depth):
+        nonlocal remaining_bytes, remaining_items, truncated
+        kind = type(item)
+        if kind in (dict, list, tuple):
+            if depth >= 8 or id(item) in active or remaining_bytes < 2:
+                truncated = True
+                return None
+            active.add(id(item))
+            remaining_bytes -= 2
+            result = {} if kind is dict else []
+            try:
+                entries = item.items() if kind is dict else enumerate(item)
+                for key, child in entries:
+                    if remaining_items <= 0 or remaining_bytes < 5:
+                        truncated = True
+                        break
+                    remaining_items -= 1
+                    if kind is dict:
+                        # Omit oversized keys rather than changing their privacy meaning.
+                        if type(key) is not str or len(key) > min(2000, remaining_bytes):
+                            truncated = True
+                            continue
+                        cost = len(json.dumps(key, ensure_ascii=True)) + 2
+                        if cost + 4 > remaining_bytes:
+                            truncated = True
+                            break
+                        remaining_bytes -= cost
+                        result[key] = visit(child, depth + 1)
+                    else:
+                        remaining_bytes -= 1
+                        result.append(visit(child, depth + 1))
+                return result
+            except RuntimeError:
+                truncated = True
+                return result
+            finally:
+                active.remove(id(item))
+        if kind in (datetime.datetime, datetime.time):
+            # A custom tzinfo could run application code while formatting a timestamp.
+            if item.tzinfo is not None and type(item.tzinfo) not in (datetime.timezone, ZoneInfo):
+                truncated = True
+                item = None
+            elif kind is datetime.datetime:
+                item = datetime.datetime.isoformat(item, sep=" ")
+            else:
+                item = datetime.time.isoformat(item)
+        elif kind is datetime.date:
+            item = datetime.date.isoformat(item)
+        elif kind is Decimal:
+            # Decimal strings can contain arbitrarily many coefficient digits. Reject
+            # large allocations before formatting; do not materialize as_tuple().
+            if Decimal.__sizeof__(item) > max(256, remaining_bytes):
+                truncated = True
+                item = None
+            else:
+                item = Decimal.__str__(item)
+        elif kind is UUID:
+            item = UUID.__str__(item)
+        budget = max(4, remaining_bytes)
+        safe, cut = bounded_value(item, max_bytes=budget, max_string_bytes=500)
+        remaining_bytes -= len(json.dumps(safe, ensure_ascii=True, separators=(",", ":")))
+        truncated |= cut
+        return safe
+
+    result = visit(value, 0)
+    return result, truncated
 
 
 def _mask_path_values(path: str, values: list[str]) -> str:
@@ -534,19 +737,27 @@ def _column_at(sql: str, pos: int) -> tuple[str | None, str | None]:
     return None, None
 
 
+def _table_name(value: str) -> str:
+    """Keep schema/catalog components while removing identifier quoting and spacing."""
+    return ".".join(part.strip('"`[]') for part in re.findall(_SQL_IDENTIFIER, value))
+
+
 def _tables(sql: str) -> tuple[tuple[str, ...], dict[str, str]]:
     """Tables named after ``FROM``/``JOIN``/``UPDATE``/``INTO`` and their aliases."""
     tables: list[str] = []
     aliases: dict[str, str] = {}
     for m in _TABLE_REF.finditer(sql):
-        table = m.group(1)
+        table = _table_name(m.group("table"))
         if table.lower() in _NOT_ALIAS:
             continue
         if table not in tables:
             tables.append(table)
-        alias = m.group(2)
-        if alias and alias.lower() not in _NOT_ALIAS:
-            aliases[alias.lower()] = table
+        aliases[table.rsplit(".", 1)[-1].lower()] = table
+        alias_match = _TABLE_ALIAS.match(sql, m.end())
+        if alias_match:
+            alias = _table_name(alias_match.group("alias"))
+            if alias.lower() not in _NOT_ALIAS:
+                aliases[alias.lower()] = table
     return tuple(tables), aliases
 
 
@@ -565,7 +776,7 @@ def _param_slots(sql: str) -> tuple[tuple[str | None, tuple[str, ...]], ...]:
     insert = _INSERT.search(sql)
     if insert is None:
         return tuple(slot(m.start()) for m in _PLACEHOLDER.finditer(sql))
-    table = insert.group("table").split(".")[-1].strip('"`[]')
+    table = _table_name(insert.group("table"))
     cols = [c.strip().split(".")[-1].strip('"`[]') for c in insert.group("cols").split(",")]
     n = len(_PLACEHOLDER.findall(insert.group("rows")))
     head = [slot(m.start()) for m in _PLACEHOLDER.finditer(sql, 0, insert.start("rows"))]

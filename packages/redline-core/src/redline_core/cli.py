@@ -19,6 +19,12 @@ import sys
 from collections.abc import Callable, Sequence
 from typing import Any, TextIO
 
+from . import operations
+from .check_sql import command as _cmd_sql
+from .check_sql import configure_cli as _configure_sql
+from .schema_watch import command as _cmd_schema_watch
+from .schema_watch import configure_cli as _configure_schema_watch
+
 __all__ = ["COMMANDS", "main"]
 
 EXIT_OK, EXIT_FAIL, EXIT_USAGE, EXIT_INTERRUPTED = 0, 1, 2, 130
@@ -534,21 +540,56 @@ def _doctor_checks(resolved: Any) -> list[tuple[str, str, str]]:
     checks: list[tuple[str, str, str]] = []
 
     # storage
-    path = s.storage_path
+    from .storage.safety import (
+        UNRELIABLE_WAL_FILESYSTEMS,
+        filesystem_type,
+        prepare_path,
+        probe_wal,
+        probe_writable,
+    )
+
+    try:
+        path = prepare_path(s)
+    except SettingsError as exc:
+        checks.append(("fail", "storage", str(exc)))
+        path = None
     if path == ":memory:":
         checks.append(("ok", "storage", "in memory"))
-    else:
+    elif path is not None:
         target = os.path.abspath(path)
-        parent = os.path.dirname(target)
-        probe = parent
-        while probe and not os.path.exists(probe):
-            probe = os.path.dirname(probe) if os.path.dirname(probe) != probe else ""
-        if os.path.exists(target) and not os.access(target, os.W_OK):
-            checks.append(("fail", "storage", f"{target} is not writable"))
-        elif probe and os.access(probe, os.W_OK | os.X_OK):
-            checks.append(("ok", "storage", f"{target} is writable"))
-        else:
+        kind = filesystem_type(target)
+        try:
+            probe_writable(target)
+        except OSError:
             checks.append(("fail", "storage", f"cannot create or write {target}"))
+        else:
+            checks.append(("ok", "storage", f"{target} is writable"))
+        if kind in UNRELIABLE_WAL_FILESYSTEMS:
+            checks.append(
+                (
+                    "warn",
+                    "filesystem",
+                    f"{kind} may not support SQLite WAL reliably; use a Docker named "
+                    "volume or a local disk",
+                )
+            )
+        try:
+            wal = probe_wal(target)
+        except OSError:
+            checks.append(("fail", "storage WAL", f"cannot test WAL beside {target}"))
+        else:
+            if wal:
+                suffix = f" on {kind}" if kind else ""
+                checks.append(("ok", "storage WAL", f"journal_mode=wal works{suffix}"))
+            else:
+                checks.append(
+                    (
+                        "fail",
+                        "storage WAL",
+                        "journal_mode=wal was refused; move storage to a supported local "
+                        "filesystem",
+                    )
+                )
 
     # UI bundle
     if ui.is_built():
@@ -803,6 +844,13 @@ def _check_compare_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--slower-pct", type=float, metavar="X", help="override thresholds.slower_pct")
     p.add_argument("--slower-ms", type=float, metavar="Y", help="override thresholds.slower_ms")
     p.add_argument("--no-color", action="store_true", help="no ANSI colours")
+    p.add_argument(
+        "--ruff",
+        nargs="?",
+        const="",
+        metavar="PATH",
+        help="include Ruff JSON from PATH, or run `ruff check --select F` and include it",
+    )
 
 
 def _configure_check(p: argparse.ArgumentParser) -> None:
@@ -849,6 +897,13 @@ def _configure_check_show(p: argparse.ArgumentParser) -> None:
     p.add_argument("--markdown", metavar="OUT", help="also write the Markdown PR comment")
     p.add_argument("--junit", metavar="OUT", help="also write JUnit XML")
     p.add_argument("--no-color", action="store_true")
+    p.add_argument(
+        "--ruff",
+        nargs="?",
+        const="",
+        metavar="PATH",
+        help="include Ruff JSON from PATH, or run `ruff check --select F` and include it",
+    )
 
 
 def _cmd_check(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
@@ -1136,6 +1191,61 @@ def _load_baseline(args: argparse.Namespace, err: TextIO, store: _CheckStore) ->
         return None
 
 
+def _attach_ruff(args: argparse.Namespace, report: Any, err: TextIO) -> None:
+    """Add Ruff's JSON output without making Redline a linter or changing its exit model."""
+    import json
+    import shutil
+    import subprocess
+
+    spec = getattr(args, "ruff", None)
+    if spec is None:
+        return
+    try:
+        if spec:
+            with open(spec, encoding="utf-8") as fh:
+                found = json.load(fh)
+        else:
+            executable = shutil.which("ruff")
+            if executable is None:
+                raise FileNotFoundError("ruff is not installed or not on PATH")
+            result = subprocess.run(
+                [executable, "check", "--select", "F", "--output-format", "json"],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+            )
+            if result.returncode not in (0, 1):
+                raise ValueError(f"ruff exited {result.returncode}")
+            found = json.loads(result.stdout or "[]")
+        if not isinstance(found, list):
+            raise ValueError("Ruff JSON must be a list")
+        items = []
+        for item in found[:200]:
+            if not isinstance(item, dict):
+                continue
+            location = item.get("location") or {}
+            filename = str(item.get("filename") or "")
+            items.append(
+                {
+                    "code": str(item.get("code") or "?"),
+                    "filename": os.path.relpath(filename, os.getcwd()) if filename else "?",
+                    "row": int(location.get("row") or 0),
+                    "column": int(location.get("column") or 0),
+                    "message": str(item.get("message") or "")[:500],
+                }
+            )
+        items.sort(key=lambda i: (i["filename"], i["row"], i["column"], i["code"]))
+        report.extra["ruff"] = items
+        report.extra["ruff_total"] = len(found)
+    except Exception as exc:
+        message = type(exc).__name__
+        if isinstance(exc, FileNotFoundError) and exc.filename is None:
+            message = str(exc)
+        report.extra["ruff_error"] = message
+        err.write(f"redline check: Ruff result unavailable ({message})\n")
+
+
 def _write_report_outputs(args: argparse.Namespace, report: Any, out: TextIO) -> None:
     for attr, render in (
         ("json", report.to_json),
@@ -1184,6 +1294,7 @@ def _cmd_check_compare(args: argparse.Namespace, out: TextIO, err: TextIO) -> in
     if isinstance(result, int):
         return result
     report = result.with_fail_on(args.fail_on if args.fail_on is not None else DEFAULT_FAIL_ON)
+    _attach_ruff(args, report, err)
     out.write("\n" + report.to_terminal(color=_use_color(args, out)))
     _write_report_outputs(args, report, out)
     if report.status == "stopped":
@@ -1274,6 +1385,7 @@ def _cmd_check_show(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
         return EXIT_USAGE
     if args.fail_on is not None:
         report = report.with_fail_on(args.fail_on)
+    _attach_ruff(args, report, err)
     out.write(report.to_terminal(color=_use_color(args, out)))
     _write_report_outputs(args, report, out)
     return report.exit_code() if args.fail_on is not None else EXIT_OK
@@ -1346,6 +1458,31 @@ Handler = Callable[[argparse.Namespace, TextIO, TextIO], int]
 
 #: name -> (help, configure(parser), handler, subcommands {name: (help, configure, handler)})
 COMMANDS: dict[str, tuple[str, Callable[[argparse.ArgumentParser], None], Handler, dict]] = {
+    "export": (
+        "preview or explicitly send sanitized OTLP recording summaries",
+        operations.configure_export,
+        operations.export_command,
+        {},
+    ),
+    "audit-store": (
+        "count possible unmasked profile keys without displaying values",
+        operations.configure_audit,
+        operations.audit_command,
+        {},
+    ),
+    "check-imports": (
+        "explicitly import a development target in an isolated subprocess",
+        operations.configure_imports,
+        operations.imports_command,
+        {},
+    ),
+    "check-sql": ("lint SQL in Python without importing the app", _configure_sql, _cmd_sql, {}),
+    "schema-watch": (
+        "recompile SQL after schema drift and optionally raise a UI issue",
+        _configure_schema_watch,
+        _cmd_schema_watch,
+        {},
+    ),
     "analyze": ("analyze Python source without executing it", _configure_analyze, _cmd_analyze, {}),
     "load": (
         "run a load test (open model) against a running app",

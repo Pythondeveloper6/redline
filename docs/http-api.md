@@ -176,8 +176,8 @@ The paginated request list, newest first.
 |---|---|
 | `limit` | Page size, default 50, clamped to 1..500 |
 | `cursor` | The `next_cursor` of the previous page |
-| `q` | Case-insensitive substring of path, route or view |
-| `method` | An HTTP method (upper-cased for you) |
+| `q` | Case-insensitive substring of path, route, view or configured request/user/job ID tags |
+| `method` | An HTTP method or `TASK` (upper-cased for you) |
 | `status` | `1xx` to `5xx`, or an exact 3-digit code |
 | `min_ms` | Duration of at least this many milliseconds |
 | `min_queries` | At least this many SQL queries |
@@ -522,8 +522,10 @@ The workload index advisor and the unused-index list. Parameters: `window` (defa
 (`pg_trgm`, FTS5 or `FULLTEXT`; those have `confidence: "low"` and a `note`). `verified`
 says the existing indexes were read from the database catalog, `already_indexed` how many
 requirements an existing index already served, `explained` how many queries were checked
-with a plain `EXPLAIN`. `unused` is **PostgreSQL only** (`unused_supported` is `false`
-elsewhere); `unused_error` is `{code, message}` when it could not be read. Nothing is ever
+with a plain `EXPLAIN`. `unused` comes from PostgreSQL's `pg_stat_user_indexes` or SQL
+Server's `sys.dm_db_index_usage_stats` (`unused_supported` is `false` for SQLite and
+MySQL); `unused_error` is `{code, message}` when it could not be read. Counters reflect
+the period since the statistics were last reset (SQL Server resets on restart). Nothing is ever
 executed besides catalog `SELECT`s and plain `EXPLAIN`s. Answers `501 not_supported` if the
 store cannot provide the workload. See [Database](database.md#index-advisor).
 
@@ -795,7 +797,7 @@ setting and the feature and not `read_only`) and `access: {policy, login, read_o
 
 ## Things to know
 
-- **The API is not versioned.** It is `0.2.0a1`: the shape may change between alpha
+- **The API is not versioned.** The development release is `0.4.0a1`: the shape may change between alpha
   releases. The frontend and the core ship together, so they never disagree.
 - **Redacted values are redacted in the API too.** There is no way to ask for the
   original.
@@ -809,7 +811,7 @@ setting and the feature and not `read_only`) and `access: {policy, login, read_o
   routes keep working.
 
 
-## Analysis tools (v0.3 development)
+## Analysis tools
 
 All routes are relative to the Redline mount and use its normal authentication and
 read-only gate. See [Performance workflows](performance-workflows.md) for semantics.
@@ -841,3 +843,135 @@ suites accept `environment` labels. These fields survive save, retrieval and TOM
 Reports add per-request budget results and applied comparison rules, and a `budget_failed`
 summary count. Issue groups add `fingerprint`, `observed_total_ms`, `suppressed_routes` and
 `suppressed`. Trace detail adds `runtime` and overlap-aware `diagnostics`.
+
+
+## v0.4 SQL, job and privacy surfaces
+
+### SQL and redaction analysis
+
+Both routes require normal authentication, `analysis_from_ui` (or its debug-mode auto
+resolution), and permission for POST under `read_only`. They accept bounded JSON input;
+no DSN, arbitrary filesystem root or database execution request is accepted.
+
+| Method and route | Request | Result |
+|---|---|---|
+| `POST api/analysis/sql` | `{ "source": "Python source", "dialect": "mssql" }`; dialect is optional (`other`) | `{findings, skipped, statements, note}`. Each finding has stable ID, rule kind, file/line, detail, confidence and SQL fingerprint. Dynamic/unreadable input is explicit, not a successful schema check |
+| `POST api/analysis/redaction` | `{ "sample": {"password":"invented-value"}, "method":"POST", "route":"/private/" }` | `{sample, saved:false, note}` using current key/profile/route rules. It previews redaction, not whether capture is enabled, and does not persist a trace |
+
+Malformed/unsupported input is `400 invalid_analysis`, oversized input is
+`413 payload_too_large`, and a disabled tool is `403 analysis_disabled`. The existing
+read-only gate takes precedence and returns `403 read_only`. A redaction sample is still
+sent to this instance: use invented values, not actual secrets.
+
+### Failed statements and connection evidence
+
+A SQL span can add these fields to `data`:
+
+```json
+{
+  "params_captured": false,
+  "read_query": true,
+  "rowcount_raw": -1,
+  "statement_kinds": ["SELECT"],
+  "comment_placeholders": 0,
+  "error": {
+    "type": "ProgrammingError",
+    "sqlstate": "42S22",
+    "native": 207,
+    "category": "schema",
+    "is_disconnect": false,
+    "message": "[not captured]"
+  }
+}
+```
+
+Fields are additive and evidence-dependent. Success spans have no `error`. A failed
+statement is not explainable. `rowcount_raw=-1` means unavailable, not zero rows or proof
+of NOCOUNT. `connection` may include `age_s`, `statement_number`, pool settings and
+bounded per-process hourly observations; absent values are unknown. A pool invalidation
+can be a `pool_wait` span with `connection_error` instead of an invented SQL execution.
+
+New issue kinds are `sql_error`, `application_error`, `placeholder_in_comment`,
+`dml_rowcount_unknown`, `session_state_leak`, `fresh_connection_failure`,
+`connection_churn` and `connection_failure`. Existing issue groups/history use their stable
+IDs. A handled SQL error can belong to a status-200 recording. `tags.sql_errors` preserves
+observed error counts when span evidence is truncated; clients must keep the incomplete
+warning visible rather than interpreting absent spans as no errors.
+
+`POST api/explain` supports SQL Server only through an executor with the appropriate
+session-safe plan method. Optional `statistics` contains actual-plan logical-read summaries
+when returned. Estimated plans do not execute the application query; actual plans require
+the execution opt-in and are refused in read-only mode. SQL Server actual plans require a
+sync driver with multiple result sets. Unsupported modes/permissions/parsing return the
+structured EXPLAIN error rather than certifying success.
+
+### Jobs and correlation
+
+Jobs use existing trace endpoints, with `method = "TASK"` and tags such as `job.name`,
+`job.id`, `job.queue`, `job.attempt`, `job.outcome`, `parent_trace_id` and `request_id`:
+
+```text
+GET api/traces?method=TASK&limit=100
+GET api/traces?tag=job.id:example-task
+GET api/traces?tag=request_id:example-request
+GET api/jobs/summary?window=1d&limit=200
+```
+
+`job.outcome` distinguishes success, failure and retry observations. Stage spans use the
+existing `custom` kind with `job_stage` metadata; the first stage that raises is tagged as
+`job.first_failing_stage`. The summary endpoint aggregates retained task recordings (at
+most 500, newest first) into outcome, latency and first-failing-stage counts without
+reading span payloads. Row outcomes are bounded counters by reason digest, not captured
+rows/IDs. `commit_observed_before_failure` is evidence that
+an observed commit preceded a later failure, not proof that the whole job completed.
+`user_id` is an explicitly resolved identifier; request IDs are labels, not authorization.
+
+### Secondary stores and recording health
+
+Secondary files participate in trace/job list, get and profile lookup only. Their traces
+carry a `secondary_store` provenance tag. History/aggregates/live-tail/mutations remain
+primary-only. EXPLAIN and catalog inspection on a secondary recording return
+`403 secondary_store` because this UI cannot verify the worker's database binding.
+
+`GET api/analysis/health` adds configured capture options and secondary-store count in
+`capture`. Configuration is not proof that every worker or engine has been observed.
+Keep the retained-sample and drop warnings visible. See [Production](production.md) for
+separate-file deployment and validation requirements.
+
+
+### Capture budgets and incomplete evidence
+
+Effective configuration includes `max_sql_bytes`, `max_span_data_bytes`, `max_tag_bytes`
+and `max_trace_bytes`. These limit captured SQL, span data, tag values and the completed
+serialized trace checked before saving. They do not cap application payloads or total
+process memory. Budget truncation/drop indicators must remain visible in API clients;
+missing evidence is not a successful analysis result. Preserve reserved SQL/connection
+failure counters when displaying shortened recordings. See [Settings](settings.md#capture-byte-budgets)
+for defaults and [Production](production.md#sampling) for capacity validation.
+
+A shortened recording can carry additive markers such as:
+
+```json
+{
+  "truncated": {
+    "capture_limits": true,
+    "incomplete_evidence": true,
+    "reason": "trace_budget",
+    "budget_dropped_spans": 12
+  }
+}
+```
+
+Not every marker appears on every shortened recording. Existing `dropped_spans`/`max_spans`
+count-cap fields can coexist with capture-budget fields. Changed SQL evidence has
+`data.capture_incomplete = true`, cannot be explained, and withholds parameters.
+`logs_dropped` includes omitted log records. Complete-evidence pytest/check assertions
+must reject these recordings rather than passing on missing spans.
+
+A privacy-processing failure can return a fresh minimal recording with
+`path = "/[capture-unavailable]"` and `truncated.reason = "privacy_failure"`.
+Application request content, source, user labels, error messages and arbitrary tags are
+absent; observed failure counters can appear as `truncated.sql_errors` and
+`truncated.connection_errors` instead of tags. `capture_failure`/`invalid_capture`
+identify other safe fallback paths. A capture that cannot fit a valid minimal payload
+is refused rather than saved as complete evidence.

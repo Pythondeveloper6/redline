@@ -16,7 +16,8 @@ export default function ReplayModal({ trace, open, onClose }: { trace: Trace; op
   const [removed, setRemoved] = useState<Set<string>>(new Set())
   const [profile, setProfile] = useState(false)
   const [sendCookies, setSendCookies] = useState(false)
-  const canProfile = useFeatures().has('profile')
+  const features = useFeatures()
+  const canProfile = features.has('profile')
   const [busy, setBusy] = useState(false)
   const [out, setOut] = useState<Outcome | null>(null)
   const [err, setErr] = useState<string | null>(null)
@@ -28,6 +29,7 @@ export default function ReplayModal({ trace, open, onClose }: { trace: Trace; op
   const truncated = trace.request.body_truncated
   const send = async () => {
     if (missing.length) return
+    if (!features.has('replay') || (!['GET', 'HEAD'].includes(trace.method) && !features.has('replay_writes'))) { setErr('Replay is disabled by this instance’s policy.'); return }
     setBusy(true); setErr(null); setOut(null)
     const t0 = performance.now()
     try {

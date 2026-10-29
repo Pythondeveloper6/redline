@@ -77,7 +77,10 @@ def test_preset_only_sets_defaults(tmp_path):
 def test_presets_resolve(tmp_path, preset):
     r = resolve({"preset": preset, "token": TOKEN}, root=tmp_path)
     for key, value in PRESETS[preset].items():
-        assert getattr(r.settings, key) == value
+        if key == "features":
+            assert all(r.settings.feature(k) == v for k, v in value.items())
+        else:
+            assert getattr(r.settings, key) == value
 
 
 def test_preset_from_env_or_file(tmp_path):

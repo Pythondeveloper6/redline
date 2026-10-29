@@ -168,8 +168,10 @@ from a request with valid Redline credentials (a client `local` lets in, a token
 
 For an N+1, `SQLAlchemyFixSuggester` maps the repeated query to your models and writes a
 real unified diff with `selectinload(Parent.children)` or `joinedload(Child.parent)`. It
-works with Flask-SQLAlchemy's `db.session` and `db.Model`. See
-[N+1 detection](n-plus-one.md).
+works with Flask-SQLAlchemy's `db.session` and `db.Model`. Repeated `text()`/driver SQL
+without ORM relationships gets a lower-confidence batching hint instead of a diff: use one
+`IN` query (`bindparam(..., expanding=True)`) or join the child rows into the parent query.
+See [N+1 detection](n-plus-one.md).
 
 ## Server-Timing, the badge and live mode
 

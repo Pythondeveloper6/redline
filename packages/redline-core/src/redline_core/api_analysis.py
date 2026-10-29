@@ -13,6 +13,56 @@ from .storage.base import Filters
 def route(api, method, path, params, body):
     from .api import error
 
+    if path in {"api/analysis/sql", "api/analysis/redaction"} and method == "POST":
+        enabled = api.settings.analysis_from_ui
+        if not (enabled is True or (enabled == "auto" and api.debug_mode())):
+            return error(403, "analysis_disabled", "Enable analysis_from_ui to use analysis tools.")
+        try:
+            if isinstance(body, (bytes, str)) and len(body) > MAX_SOURCE_BYTES + 4096:
+                return error(413, "payload_too_large", "Analysis input is too large.")
+            data = json.loads(body) if isinstance(body, (bytes, str)) else body
+            if not isinstance(data, dict):
+                raise ValueError("Expected an object")
+            if path.endswith("/sql"):
+                if set(data) - {"source", "dialect"} or not isinstance(data.get("source"), str):
+                    raise ValueError("Provide Python source and an optional dialect")
+                if data.get("dialect", "other") not in {
+                    "other",
+                    "mssql",
+                    "postgresql",
+                    "mysql",
+                    "sqlite",
+                }:
+                    raise ValueError("Unsupported dialect")
+                from .check_sql import analyze_sql_source
+
+                return 200, analyze_sql_source(data["source"], dialect=data.get("dialect", "other"))
+            if set(data) - {"sample", "method", "route"} or not isinstance(
+                data.get("sample"), dict
+            ):
+                raise ValueError("Provide a sample JSON object, method and route")
+            from .model import Trace
+            from .privacy import sanitize_trace
+            from .redact import Redactor
+
+            trace = Trace(
+                "preview", "other", str(data.get("method", "POST")), str(data.get("route", "/"))
+            )
+            trace.request["body"] = json.dumps(Redactor(api.settings).mapping(data["sample"]))
+            sanitize_trace(trace, api.settings)
+            return 200, {
+                "sample": json.loads(trace.request["body"])
+                if trace.request["body"] != "[redacted]"
+                else "[redacted]",
+                "saved": False,
+                "note": (
+                    "Uses current key/profile/route rules. Capture switches and "
+                    "arbitrary free-text sensitivity are separate; this is not a "
+                    "compliance guarantee."
+                ),
+            }
+        except (ValueError, TypeError, RecursionError):
+            return error(400, "invalid_analysis", "Provide bounded, valid source or a JSON object.")
     if path == "api/analysis/demo" and method == "POST":
         enabled = api.settings.analysis_from_ui
         if not (enabled is True or (enabled == "auto" and api.debug_mode())):
@@ -73,8 +123,18 @@ def route(api, method, path, params, body):
                 raise ValueError("Choose a recorded SQL span")
             trace = api.store.get(str(data["trace_id"]), include_profile=False)
             span = trace.span(str(data["span_id"])) if trace else None
+            if trace and trace.tags.get("secondary_store"):
+                return error(
+                    403,
+                    "secondary_store",
+                    "Inspect this SQL through the worker’s own database binding.",
+                )
             if trace and trace.tags.get("synthetic_demo"):
                 return error(400, "synthetic_sample", "Synthetic samples have no real database.")
+            if span is not None and span.data.get("auto_engine"):
+                return error(
+                    501, "unregistered_engine", "Register this engine before database inspection."
+                )
             if span is None or span.kind != "sql":
                 return error(404, "span_not_found", "Choose an existing SQL span.")
             if api.explain_executor is None:
@@ -104,6 +164,14 @@ def route(api, method, path, params, body):
             warnings.append("Retained counts reflect sampling and keep rules, not total traffic.")
         return 200, {
             "meta": meta,
+            "capture": {
+                "sql_params": api.settings.capture_sql_params,
+                "request_body": api.settings.capture_request_body,
+                "response_body": api.settings.capture_response_body,
+                "locals": api.settings.capture_locals,
+                "engine_mode": api.settings.instrument_engines,
+                "secondary_stores": len(api.settings.extra_stores),
+            },
             "observed_traces": len(items),
             "profiled_traces": sum(bool(t.get("has_profile")) for t in items),
             "test_traces": sum(bool(t.get("tags", {}).get("test_name")) for t in items),

@@ -10,10 +10,10 @@ uv sync --all-packages
 
 cd examples/fastapi
 uv run --project ../.. python seed.py                      # creates shop.db (~2 s)
-uv run --project ../.. uvicorn shop.main:app --port 8000   # http://127.0.0.1:8000/
+uv run --project ../.. uvicorn shop.main:app --port 8011   # http://127.0.0.1:8011/
 ```
 
-Open **http://127.0.0.1:8000/_redline/** (localhost only: `access="local"` is set in `shop/main.py` and no auth dependency is configured; without an explicit `access`, Redline answers 404 outside debug mode),
+Open **http://127.0.0.1:8011/_redline/** (localhost only: `access="local"` is set in `shop/main.py` and no auth dependency is configured; without an explicit `access`, Redline answers 404 outside debug mode),
 then hit the endpoints:
 
 | Endpoint | What Redline shows |
@@ -31,7 +31,7 @@ then hit the endpoints:
 | `POST /checkout` | a body with `card_number`/`password` and an `Authorization` header, all redacted |
 
 ```bash
-curl -X POST localhost:8000/checkout -H 'content-type: application/json' \
+curl -X POST localhost:8011/checkout -H 'content-type: application/json' \
      -H 'Authorization: Bearer topsecret' \
      -d '{"email":"a@b.c","card_number":"4111111111111111","password":"hunter2"}'
 ```
@@ -58,24 +58,24 @@ volatile fields). Setting `SHOP_REFACTOR=1` simulates a refactor of the app, so 
 ```bash
 # terminal 1 – the app, from examples/fastapi: old code first
 cd examples/fastapi
-uv run --project ../.. uvicorn shop.main:app --port 8000
+uv run --project ../.. uvicorn shop.main:app --port 8011
 ```
 
 ```bash
 # terminal 2 – from the repository root: record a baseline against the old code
 uv run --package redline-core --extra load redline check record examples/fastapi/check.toml \
-    --base-url http://127.0.0.1:8000 --store examples/fastapi/.redline/redline.db
+    --base-url http://127.0.0.1:8011 --store examples/fastapi/.redline/redline.db
 ```
 
 ```bash
 # terminal 1: stop the app (Ctrl-C) and start the "refactored" code
-SHOP_REFACTOR=1 uv run --project ../.. uvicorn shop.main:app --port 8000
+SHOP_REFACTOR=1 uv run --project ../.. uvicorn shop.main:app --port 8011
 ```
 
 ```bash
 # terminal 2 – from the repository root: compare against the baseline
 uv run --package redline-core --extra load redline check compare examples/fastapi/check.toml \
-    --base-url http://127.0.0.1:8000 --store examples/fastapi/.redline/redline.db --markdown report.md --junit report.xml
+    --base-url http://127.0.0.1:8011 --store examples/fastapi/.redline/redline.db --markdown report.md --junit report.xml
 echo $?   # 1: the refactor made things slower, changed a response and broke an endpoint
 ```
 
@@ -96,5 +96,38 @@ uv run --package redline-core --extra load redline load examples/fastapi/scenari
 It ramps from 5 to 50 rps in steps of 5, 10 s each (about 100 s), and writes the run to the
 app's store. `--store` matters: the CLI defaults to `.redline/redline.db` relative to where
 you run it, which is the repository root here, not the app's store. Then open the Load page
-at **http://127.0.0.1:8000/_redline/#/load** (the CLI prints the link to this run) to see the
+at **http://127.0.0.1:8011/_redline/#/load** (the CLI prints the link to this run) to see the
 per-step latency, the knee, and the bottlenecks found under load.
+
+## Additional real-work workflows
+
+The [Flask playground](../flask/README.md#v04-real-work-playground) demonstrates the
+combined SQL-failure, dynamic-engine, privacy, job, SQL-checker, schema-snapshot and
+secondary-store workflows with disposable databases. Run the shared no-socket verification
+from the repository root:
+
+```bash
+.venv/bin/python scripts/check_demo_patterns.py
+.venv/bin/python scripts/check_real_world_workflows.py
+```
+
+The first command covers the existing patterns on all four adapters; the second exercises
+the Flask playground and a separate generic worker process. Neither command establishes
+MySQL/SQL Server or broker/prefork support. Use the playground's explicit disposable-driver
+probe and framework-native application tests for the actual deployment stack.
+
+## Shared Docker test environment
+
+The [shared Compose stack](../testing/README.md) builds this project and the other
+examples, supplies MySQL, SQL Server, PostgreSQL and Redis, and runs complete package,
+live-driver, Celery prefork and browser tests. It also provides token-protected demo UIs
+on loopback ports 8011–8014. Run from the repository root:
+
+```bash
+docker compose -f examples/compose.yaml up --build \
+  --abort-on-container-exit --exit-code-from tests tests
+```
+
+A green configuration check is insufficient: the command must exit zero and the current
+`examples/testing/results/summary.json` must say `qualified: true`. See the shared guide
+for native amd64 SQL Server requirements, interactive demo commands and owned-data cleanup.

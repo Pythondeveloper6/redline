@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import re
 import threading
-import time
 from collections import Counter
 
 import pytest
@@ -98,19 +97,28 @@ def test_stop_event_keeps_partial_results(http_server):
     _, url = http_server
     stop = threading.Event()
     sink = MemorySink()
-    threading.Timer(1.5, stop.set).start()
-    t0 = time.monotonic()
+    completed = []
+
+    def on_event(kind, data):
+        if kind == "step" and data.step == 1:
+            # The callback runs after the sink retained a completed step. Worker
+            # startup can take any amount of time without shortening this first step.
+            assert data.sent == 10 and not data.partial
+            completed.append(data)
+            stop.set()
+
     result = run(
         scenario(url),
         profile=Profile.steps_of(10, 100, 10, step_duration_s=1),
         sink=sink,
         stop_event=stop,
         workers=2,
+        on_event=on_event,
     )
-    assert time.monotonic() - t0 < 6
+    assert len(completed) == 1 and stop.is_set()
     assert result.status == "stopped" and sink.status == "stopped"
-    assert 1 <= len(result.steps) <= 3
     assert result.steps[0].sent == 10 and not result.steps[0].partial
+    assert result.steps[0] is completed[0]
     assert result.steps[-1].partial or len(result.steps) == 1
     assert result.summary["stopped_reason"] == "stop requested"
 

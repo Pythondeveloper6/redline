@@ -335,6 +335,12 @@ cannot be explained.
 
 `manage.py check` (and `runserver`) run these.
 
+For filesystem store paths, the storage check uses effective process permissions:
+creates/writes/removes its own temporary probe in the nearest existing parent, and
+opens an existing target for writing without truncating or modifying it. It does not
+initialize the database. Root may legitimately write through restrictive mode bits;
+read-only mounts and refused filesystem operations still produce `E002`.
+
 | ID | Level | Problem | Fix |
 |---|---|---|---|
 | `django_redline.E001` | Error | `REDLINE` is invalid: an unknown key (with a "did you mean"), a bad value, a bad `PERMISSION` | Fix the setting |

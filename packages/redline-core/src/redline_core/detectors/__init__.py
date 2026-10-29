@@ -22,10 +22,20 @@ REGISTRY: list[Detect] = []
 
 # Detector modules import ``redline_core.detect`` lazily (inside ``detect()``), because
 # ``redline_core.detect`` imports this package.
-from . import blocking, external, json_decode, patterns, results, serializers, transactions  # noqa: E402
+from . import (  # noqa: E402
+    blocking,
+    external,
+    json_decode,
+    patterns,
+    results,
+    serializers,
+    sql_failures,
+    transactions,
+)
 
 REGISTRY.extend(
     [
+        sql_failures.detect,
         results.detect,
         serializers.detect,
         external.detect,

@@ -1,0 +1,143 @@
+# Disposable test infrastructure only; no application databases or host Docker socket mounts.
+name: redline-tests
+
+x-runner: &runner
+  image: redline-local-tests:0.4
+  build:
+    context: ..
+    dockerfile: examples/testing/Dockerfile
+
+services:
+  postgres:
+    image: postgres:16-bookworm
+    environment:
+      POSTGRES_USER: redline
+      POSTGRES_PASSWORD: redline_test_only
+      POSTGRES_DB: redline_test_integration
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U redline -d redline_test_integration']
+      interval: 3s
+      timeout: 5s
+      retries: 40
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: redline_test_only
+      MYSQL_DATABASE: redline_test_integration
+      MYSQL_USER: redline
+      MYSQL_PASSWORD: redline_test_only
+    healthcheck:
+      test: [CMD-SHELL, 'MYSQL_PWD="$$MYSQL_PASSWORD" mysql -h 127.0.0.1 -u redline -D redline_test_integration -e "SELECT 1"']
+      interval: 3s
+      timeout: 5s
+      retries: 60
+      start_period: 20s
+    volumes:
+      - mysql-data:/var/lib/mysql
+
+  mssql:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    platform: linux/amd64
+    environment:
+      ACCEPT_EULA: Y
+      MSSQL_PID: Developer
+      MSSQL_SA_PASSWORD: Redline_local_Test9!
+      MSSQL_MEMORY_LIMIT_MB: 2048
+    healthcheck:
+      test: [CMD-SHELL, 'SQLCMDPASSWORD="$$MSSQL_SA_PASSWORD" /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -C -b -Q "SELECT 1" >/dev/null']
+      interval: 5s
+      timeout: 10s
+      retries: 60
+      start_period: 30s
+    volumes:
+      - mssql-data:/var/opt/mssql
+
+  redis:
+    image: redis:7.4-bookworm
+    command: [redis-server, --save, '', --appendonly, 'no']
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+
+  tests:
+    <<: *runner
+    init: true
+    depends_on:
+      postgres: {condition: service_healthy}
+      mysql: {condition: service_healthy}
+      mssql: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    environment:
+      REDLINE_TEST_COMPOSE: '1'
+      REDLINE_TEST_POSTGRES_DSN: postgresql://redline:redline_test_only@postgres:5432/redline_test_integration
+      REDLINE_TEST_POSTGRES_SQLALCHEMY_DSN: postgresql+psycopg://redline:redline_test_only@postgres:5432/redline_test_integration
+      REDLINE_TEST_POSTGRES_ASYNC_DSN: postgresql+asyncpg://redline:redline_test_only@postgres:5432/redline_test_integration
+      REDLINE_TEST_PG_DSN: postgresql://redline:redline_test_only@postgres:5432/redline_test_integration
+      REDLINE_TEST_PG: postgresql://redline:redline_test_only@postgres:5432/redline_test_integration
+      REDLINE_TEST_MYSQL_DSN: mysql+pymysql://redline:redline_test_only@mysql:3306/redline_test_integration
+      REDLINE_TEST_MYSQL_ASYNC_DSN: mysql+aiomysql://redline:redline_test_only@mysql:3306/redline_test_integration
+      REDLINE_TEST_MSSQL_DSN: mssql+pyodbc://sa:Redline_local_Test9!@mssql:1433/redline_test_integration?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=yes
+      REDLINE_TEST_MSSQL_ASYNC_DSN: mssql+aioodbc://sa:Redline_local_Test9!@mssql:1433/redline_test_integration?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=yes
+      REDLINE_TEST_REDIS_URL: redis://redis:6379/1
+      REDLINE_TEST_WORKER_STORE: /tmp/redline-worker/traces.db
+      REDLINE_TEST_RESULTS: /results
+    volumes:
+      - ./testing/results:/results
+
+  fastapi-demo:
+    <<: *runner
+    profiles: [demos]
+    init: true
+    command: [python, examples/testing/demo.py, fastapi]
+    environment:
+      REDLINE_ACCESS: token
+      REDLINE_TOKEN: redline-local-compose-demo-token
+      REDLINE_STORAGE_PATH: /tmp/redline-demo/traces.db
+    ports:
+      - "127.0.0.1:8011:8011"
+
+  flask-demo:
+    <<: *runner
+    profiles: [demos]
+    init: true
+    command: [python, examples/testing/demo.py, flask]
+    environment:
+      REDLINE_ACCESS: token
+      REDLINE_TOKEN: redline-local-compose-demo-token
+      REDLINE_STORAGE_PATH: /tmp/redline-demo/traces.db
+    ports:
+      - "127.0.0.1:8012:8012"
+
+  litestar-demo:
+    <<: *runner
+    profiles: [demos]
+    init: true
+    command: [python, examples/testing/demo.py, litestar]
+    environment:
+      REDLINE_ACCESS: token
+      REDLINE_TOKEN: redline-local-compose-demo-token
+      REDLINE_STORAGE_PATH: /tmp/redline-demo/traces.db
+    ports:
+      - "127.0.0.1:8013:8013"
+
+  django-demo:
+    <<: *runner
+    profiles: [demos]
+    init: true
+    command: [python, examples/testing/demo.py, django]
+    environment:
+      REDLINE_ACCESS: token
+      REDLINE_TOKEN: redline-local-compose-demo-token
+      REDLINE_STORAGE_PATH: /tmp/redline-demo/traces.db
+    ports:
+      - "127.0.0.1:8014:8014"
+
+volumes:
+  postgres-data:
+  mysql-data:
+  mssql-data:

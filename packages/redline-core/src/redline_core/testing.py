@@ -33,6 +33,9 @@ def assert_traces(
     max_queries: int | None = None,
     max_external_calls: int | None = None,
     no_n_plus_one: bool = False,
+    no_sql_errors: bool = False,
+    no_session_leaks: bool = False,
+    max_round_trips: int | None = None,
     forbidden_issues: tuple[str, ...] = (),
 ) -> None:
     if not traces:
@@ -42,6 +45,14 @@ def assert_traces(
     forbidden = set(forbidden_issues)
     if no_n_plus_one:
         forbidden.add("n_plus_one")
+    if no_sql_errors:
+        forbidden.add("sql_error")
+    if no_session_leaks:
+        forbidden.add("session_state_leak")
+    if max_round_trips is not None:
+        max_queries = (
+            min(max_queries, max_round_trips) if max_queries is not None else max_round_trips
+        )
     failures = []
     for trace in traces:
         label = f"{trace.method} {trace.route or trace.path}"
