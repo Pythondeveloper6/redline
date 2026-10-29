@@ -28,7 +28,7 @@ adapters and arbitrary shared-network-filesystem storage are not implemented sup
 
 | Check | Result |
 |---|---|
-| Core excluding three server-dependent files | 1,470 passed, 6 optional-service skips |
+| Core excluding three server-dependent files | 1,472 passed, 6 optional-service skips |
 | Three server-dependent files | 18 passed; 21 setup errors at socket bind (`PermissionError: Operation not permitted`), no assertion failures |
 | Django | 199 passed, 1 optional PostgreSQL skip |
 | FastAPI | 125 passed |
@@ -52,16 +52,18 @@ databases; driver-shaped fixtures and probe guard tests are not live qualificati
 The committed test-project setup is in `examples/compose.yaml` and `examples/testing/`.
 It runs the five complete suites, live PostgreSQL/MySQL/SQL Server and Redis/prefork
 checks, Chromium desktop/mobile flows, demos, docs and package smoke tests. See
-[the shared guide](examples/testing/README.md). Compose config, local harness guards
-and test collection pass; the live stack remains unrun because this session cannot
-access OrbStack's socket and elevated Docker execution is disabled. Do not treat the
-new test definitions as a successful live run.
+[the shared guide](examples/testing/README.md). The first full container run failed qualification: live plans and Redis/prefork passed,
+but test-runner configuration, DSN, metadata and repeat-run issues caused other failures.
+Corrections and local regressions are present; the entire container suite must be rerun.
+This session cannot access OrbStack's socket and elevated Docker execution is disabled.
+Do not treat test definitions or earlier partial successes as full qualification.
 
 ## Remaining release gates
 
-1. Run the full core suite where loopback sockets are permitted:
-   `cd packages/redline-core && uv run --no-sync pytest`.
-   Do not remove or weaken the 21 blocked tests to obtain a green result.
+1. Rebuild and rerun the entire Compose suite after the harness corrections. The
+   container run did execute the network tests; a stop test exposed a startup-timer
+   assumption, now replaced by completion-driven synchronization. Require zero failed,
+   errored or skipped tests in the new report. The authoring shell still blocks sockets.
 2. Run the disposable MySQL/SQL Server probes described in
    [the Flask demo](examples/flask/README.md), then validate the actual framework/driver,
    database version, worker lifecycle, storage volume and concurrency used in deployment.

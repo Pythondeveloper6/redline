@@ -73,8 +73,9 @@ services:
       mssql: {condition: service_healthy}
       redis: {condition: service_healthy}
     environment:
-      REDLINE_COMPOSE_TESTS: '1'
-      REDLINE_TEST_POSTGRES_DSN: postgresql+psycopg://redline:redline_test_only@postgres:5432/redline_test_integration
+      REDLINE_TEST_COMPOSE: '1'
+      REDLINE_TEST_POSTGRES_DSN: postgresql://redline:redline_test_only@postgres:5432/redline_test_integration
+      REDLINE_TEST_POSTGRES_SQLALCHEMY_DSN: postgresql+psycopg://redline:redline_test_only@postgres:5432/redline_test_integration
       REDLINE_TEST_POSTGRES_ASYNC_DSN: postgresql+asyncpg://redline:redline_test_only@postgres:5432/redline_test_integration
       REDLINE_TEST_PG_DSN: postgresql://redline:redline_test_only@postgres:5432/redline_test_integration
       REDLINE_TEST_PG: postgresql://redline:redline_test_only@postgres:5432/redline_test_integration

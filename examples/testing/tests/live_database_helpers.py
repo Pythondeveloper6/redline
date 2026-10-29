@@ -23,7 +23,7 @@ IDENTITY_SQL = {
 
 
 def require_compose():
-    if os.environ.get("REDLINE_COMPOSE_TESTS") != "1":
+    if os.environ.get("REDLINE_TEST_COMPOSE") != "1":
         raise RuntimeError("Disposable Compose integration consent is required")
 
 
@@ -33,6 +33,8 @@ def database_url(vendor, *, asynchronous=False):
     require_compose()
     suffix = "_ASYNC_DSN" if asynchronous else "_DSN"
     name = "REDLINE_TEST_" + vendor.upper() + suffix
+    if vendor == "postgres" and not asynchronous:
+        name = "REDLINE_TEST_POSTGRES_SQLALCHEMY_DSN"
     raw = os.environ.get(name)
     if not raw:
         raise RuntimeError("Required disposable test DSN is missing: " + name)

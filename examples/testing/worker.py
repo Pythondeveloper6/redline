@@ -1,7 +1,7 @@
 """Disposable Redis/prefork fixture; never import into an application deployment.
 
 Required environment (provided by the Compose test runner):
-REDLINE_COMPOSE_TESTS=1, REDLINE_TEST_REDIS_URL=redis://redis:6379/1,
+REDLINE_TEST_COMPOSE=1, REDLINE_TEST_REDIS_URL=redis://redis:6379/1,
 REDLINE_TEST_WORKER_STORE=/tmp/redline-worker/traces.db (absolute shared local path).
 The worker owns a separate ``*.application.db`` next to its recording store. Each child
 opens its recorder, SQLite connections and engine after fork, and closes them on shutdown.
@@ -21,8 +21,8 @@ from redline_core.contrib.celery import instrument_celery
 from redline_core.contrib.sqlalchemy import instrument_engine
 from redline_core.storage import SQLiteStore
 
-if os.environ.get("REDLINE_COMPOSE_TESTS") != "1":
-    raise RuntimeError("The disposable worker requires REDLINE_COMPOSE_TESTS=1")
+if os.environ.get("REDLINE_TEST_COMPOSE") != "1":
+    raise RuntimeError("The disposable worker requires REDLINE_TEST_COMPOSE=1")
 
 _store_path = Path(os.environ["REDLINE_TEST_WORKER_STORE"])
 if not _store_path.is_absolute():
