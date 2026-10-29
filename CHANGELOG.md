@@ -29,6 +29,9 @@ version is below `1.0` the public API may change between minor versions.
   on its first run and can persist a `schema_drift` issue without running migrations.
   Unused-index analysis covers SQL Server's usage DMV, and repeated raw `text()` SQL gets a
   batching hint when no ORM relationship matches.
+- `redline check-imports` follows statically visible imports inside task functions after
+  loading each task module, and `redline check compare/run --ruff` includes Ruff JSON in
+  Markdown and JUnit without becoming a linter.
 - Generic jobs/stages/row outcomes, optional Celery signals, retry outcomes and commit-before-
   failure evidence; Jobs, SQL checker and redaction-preview UI surfaces. Jobs record the
   first failing stage and `GET api/jobs/summary` aggregates outcome, latency and stage

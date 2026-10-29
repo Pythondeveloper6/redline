@@ -807,6 +807,13 @@ def _check_compare_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--slower-pct", type=float, metavar="X", help="override thresholds.slower_pct")
     p.add_argument("--slower-ms", type=float, metavar="Y", help="override thresholds.slower_ms")
     p.add_argument("--no-color", action="store_true", help="no ANSI colours")
+    p.add_argument(
+        "--ruff",
+        nargs="?",
+        const="",
+        metavar="PATH",
+        help="include Ruff JSON from PATH, or run `ruff check --select F` and include it",
+    )
 
 
 def _configure_check(p: argparse.ArgumentParser) -> None:
@@ -853,6 +860,13 @@ def _configure_check_show(p: argparse.ArgumentParser) -> None:
     p.add_argument("--markdown", metavar="OUT", help="also write the Markdown PR comment")
     p.add_argument("--junit", metavar="OUT", help="also write JUnit XML")
     p.add_argument("--no-color", action="store_true")
+    p.add_argument(
+        "--ruff",
+        nargs="?",
+        const="",
+        metavar="PATH",
+        help="include Ruff JSON from PATH, or run `ruff check --select F` and include it",
+    )
 
 
 def _cmd_check(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
@@ -1140,6 +1154,61 @@ def _load_baseline(args: argparse.Namespace, err: TextIO, store: _CheckStore) ->
         return None
 
 
+def _attach_ruff(args: argparse.Namespace, report: Any, err: TextIO) -> None:
+    """Add Ruff's JSON output without making Redline a linter or changing its exit model."""
+    import json
+    import shutil
+    import subprocess
+
+    spec = getattr(args, "ruff", None)
+    if spec is None:
+        return
+    try:
+        if spec:
+            with open(spec, encoding="utf-8") as fh:
+                found = json.load(fh)
+        else:
+            executable = shutil.which("ruff")
+            if executable is None:
+                raise FileNotFoundError("ruff is not installed or not on PATH")
+            result = subprocess.run(
+                [executable, "check", "--select", "F", "--output-format", "json"],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+            )
+            if result.returncode not in (0, 1):
+                raise ValueError(f"ruff exited {result.returncode}")
+            found = json.loads(result.stdout or "[]")
+        if not isinstance(found, list):
+            raise ValueError("Ruff JSON must be a list")
+        items = []
+        for item in found[:200]:
+            if not isinstance(item, dict):
+                continue
+            location = item.get("location") or {}
+            filename = str(item.get("filename") or "")
+            items.append(
+                {
+                    "code": str(item.get("code") or "?"),
+                    "filename": os.path.relpath(filename, os.getcwd()) if filename else "?",
+                    "row": int(location.get("row") or 0),
+                    "column": int(location.get("column") or 0),
+                    "message": str(item.get("message") or "")[:500],
+                }
+            )
+        items.sort(key=lambda i: (i["filename"], i["row"], i["column"], i["code"]))
+        report.extra["ruff"] = items
+        report.extra["ruff_total"] = len(found)
+    except Exception as exc:
+        message = type(exc).__name__
+        if isinstance(exc, FileNotFoundError) and exc.filename is None:
+            message = str(exc)
+        report.extra["ruff_error"] = message
+        err.write(f"redline check: Ruff result unavailable ({message})\n")
+
+
 def _write_report_outputs(args: argparse.Namespace, report: Any, out: TextIO) -> None:
     for attr, render in (
         ("json", report.to_json),
@@ -1188,6 +1257,7 @@ def _cmd_check_compare(args: argparse.Namespace, out: TextIO, err: TextIO) -> in
     if isinstance(result, int):
         return result
     report = result.with_fail_on(args.fail_on if args.fail_on is not None else DEFAULT_FAIL_ON)
+    _attach_ruff(args, report, err)
     out.write("\n" + report.to_terminal(color=_use_color(args, out)))
     _write_report_outputs(args, report, out)
     if report.status == "stopped":
@@ -1278,6 +1348,7 @@ def _cmd_check_show(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
         return EXIT_USAGE
     if args.fail_on is not None:
         report = report.with_fail_on(args.fail_on)
+    _attach_ruff(args, report, err)
     out.write(report.to_terminal(color=_use_color(args, out)))
     _write_report_outputs(args, report, out)
     return report.exit_code() if args.fail_on is not None else EXIT_OK

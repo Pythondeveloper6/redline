@@ -133,20 +133,78 @@ def imports_command(args, out, err):
     ):
         print("Use module[:attribute] and timeout 1..60", file=err)
         return 2
-    code = """import contextlib, importlib, json, os, sys
+    code = """import ast, contextlib, importlib, importlib.util, inspect, json, os, sys
 original = sys.stdout
 with (open(os.devnull, 'w') as sink, contextlib.redirect_stdout(sink),
       contextlib.redirect_stderr(sink)):
+    lazy_errors, lazy_modules, source_errors = [], [], []
+    def lazy_imports(tree):
+        parents = {}
+        for node in ast.walk(tree):
+            for child in ast.iter_child_nodes(node):
+                parents[child] = node
+        found = []
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.Import, ast.ImportFrom)):
+                continue
+            parent = parents.get(node)
+            inside_function = False
+            while parent is not None:
+                if isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                    inside_function = True
+                    break
+                parent = parents.get(parent)
+            if inside_function:
+                found.append(node)
+        return found
     try:
         module, _, attr = sys.argv[1].partition(':')
         value = importlib.import_module(module)
         if attr: value = getattr(value, attr)
         tasks = getattr(value, 'tasks', {})
-        for task in tasks.values(): importlib.import_module(task.__module__)
+        modules = []
+        for task in tasks.values():
+            name = getattr(task, '__module__', None)
+            if name and name not in modules: modules.append(name)
+        for name in modules:
+            try:
+                task_module = importlib.import_module(name)
+                source = inspect.getsource(task_module)
+                tree = ast.parse(source)
+            except BaseException as exc:
+                lazy_errors.append({'module': name, 'error_type': type(exc).__name__})
+                continue
+            package = getattr(task_module, '__package__', None) or name.rpartition('.')[0]
+            for node in lazy_imports(tree):
+                targets = []
+                if isinstance(node, ast.Import):
+                    targets = [alias.name for alias in node.names]
+                elif node.module != '__future__':
+                    target = node.module or ''
+                    if node.level:
+                        try:
+                            target = importlib.util.resolve_name('.' * node.level + target, package)
+                        except (ImportError, ValueError) as exc:
+                            lazy_errors.append({
+                                'module': target or '.', 'error_type': type(exc).__name__
+                            })
+                            continue
+                    if target: targets = [target]
+                for target in targets:
+                    if target in lazy_modules: continue
+                    lazy_modules.append(target)
+                    try:
+                        importlib.import_module(target)
+                    except BaseException as exc:
+                        lazy_errors.append({'module': target, 'error_type': type(exc).__name__})
         result = {'imported': True, 'registered_tasks': len(tasks),
-                  'limitation': 'Lazy imports and execution branches were not run.'}
+                  'lazy_modules': lazy_modules, 'lazy_errors': lazy_errors[:50],
+                  'source_errors': source_errors[:50],
+                  'limitation': 'Only statically visible imports inside task functions are run; '
+                                'runtime branches, dynamic imports and task execution are not.'}
     except BaseException as exc:
-        result = {'imported': False, 'error_type': type(exc).__name__}
+        result = {'imported': False, 'error_type': type(exc).__name__, 'lazy_modules': [],
+                  'lazy_errors': [], 'source_errors': []}
 print(json.dumps(result), file=original)
 """
     try:
@@ -158,7 +216,7 @@ print(json.dumps(result), file=original)
         )
         data = json.loads(result.stdout)
         print(json.dumps(data), file=out)
-        return 0 if data.get("imported") else 1
+        return 0 if data.get("imported") and not data.get("lazy_errors") else 1
     except (subprocess.TimeoutExpired, ValueError):
         print("Import check failed or timed out; application import output was withheld", file=err)
         return 1

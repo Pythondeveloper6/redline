@@ -1057,7 +1057,7 @@ expect_status = 200              # optional
 ### 19.4 Compare and verdicts
 
 `redline check compare SUITE [--baseline FILE | --baseline-id ID] [--base-url URL] [--store PATH]
-[--json OUT] [--markdown OUT] [--junit OUT] [--fail-on slower,changed,broken,missing] [--slower-pct X] [--slower-ms Y]`
+[--json OUT] [--markdown OUT] [--junit OUT] [--ruff [PATH]] [--fail-on slower,changed,broken,missing] [--slower-pct X] [--slower-ms Y]`
 runs the suite again and compares with the baseline. `redline check run SUITE` = record if no baseline file
 exists, else compare.
 
@@ -1087,11 +1087,13 @@ Per request:
 - **Summary:** counts per verdict; **overall speed change** = geometric mean of after/before median ratios over
   requests with `perf` and no failures, shown as a % (negative = faster), plus total query change; the biggest
   wins and regressions (top 5 each).
-- **Exit code:** 0 if nothing matches `--fail-on` (default `slower,changed,broken,missing`), 1 otherwise, 2 for usage/
-  suite errors, 3 if the app could not be reached at all.
+- **Exit code:** 0 if nothing matches `--fail-on` (default `slower,changed,broken,missing`) and Ruff passed, 1
+  otherwise, 2 for usage/suite errors, 3 if the app could not be reached at all.
 - **Outputs:** terminal table (colour when a TTY), `--json` (full report, schema below), `--markdown` (PR
-  comment: summary line, table, collapsible diffs), `--junit` (one testcase per request; failures for verdicts in
-  `--fail-on`).
+  comment: summary line, table, collapsible diffs, optional Ruff table), `--junit` (one testcase per request plus a
+  Ruff suite; failures for verdicts in `--fail-on` and for Ruff findings). `--ruff PATH` reads Ruff's JSON;
+  `--ruff` without a path runs `ruff check --select F --output-format json`. A finding or an unreadable result makes
+  the exit code 1; Redline does not implement lint rules.
 - Report JSON: `{format: "redline-check-report", version: 1, suite, baseline: {id|file, label, git, created_at},
   run: {id, git, created_at, base_url}, summary: {...}, requests: [{name, method, path, perf: {verdict, before,
   after, change_ms, change_pct, p_value, reason}, server: {before, after, queries_change, new_issues,
@@ -1126,7 +1128,7 @@ Per request:
 - **CLI.** `--store` defaults to the configured `storage_path` when that file exists; `--no-store` disables it.
   `--fail-on` also accepts `noisy`, `faster` and `none`. Ctrl-C/SIGTERM exits 130 (no baseline written; a compare
   prints the partial report). `--baseline-id` uses `redline_core.check.sink.load_baseline(store, id) ->
-  Baseline | dict | None`. `redline check show REPORT.json [--fail-on …] [--markdown OUT] [--junit OUT]`
+  Baseline | dict | None`. `redline check show REPORT.json [--fail-on …] [--markdown OUT] [--junit OUT] [--ruff [PATH]]`
   re-prints a report (exit 0, or the `--fail-on` exit code when given). TOML suites on Python 3.10 need `tomli`
   (else a clear error: use JSON).
 
