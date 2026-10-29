@@ -1360,7 +1360,11 @@ The bounded AST SQL checker never imports application modules. Offline findings 
 candidates; dynamic input, syntax failures and limits are visible. Explicit online
 compilation uses a development DSN, dedicated connection and cleanup; deferred name
 resolution, NULL parameter typing and runtime behavior prevent a schema guarantee.
-Schema snapshots contain bounded default-schema column metadata, not rows.
+SQL Server compilation asks the server for parameter types and, for a single read
+statement, result columns, declares those types under NOEXEC and never exports driver
+messages. A literal `row["col"]`/`row.col` read that the described SELECT does not return
+is a low-confidence candidate, not proof. Schema snapshots contain bounded
+default-schema column metadata, not rows.
 
 Job helpers produce TASK traces with nested stage spans, bounded reason-digest outcome
 counters and no arguments/results/row samples. Celery is optional and installed in the
