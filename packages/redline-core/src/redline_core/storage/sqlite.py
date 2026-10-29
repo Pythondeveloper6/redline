@@ -123,6 +123,17 @@ CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS lifecycle_hourly (
+    bucket INTEGER NOT NULL,
+    release TEXT NOT NULL,
+    db_alias TEXT NOT NULL,
+    vendor TEXT NOT NULL,
+    connects_hour INTEGER NOT NULL,
+    fresh_failures_hour INTEGER NOT NULL,
+    updated_at REAL NOT NULL,
+    PRIMARY KEY (bucket, release, db_alias, vendor)
+);
+CREATE INDEX IF NOT EXISTS lifecycle_bucket ON lifecycle_hourly (bucket DESC);
 """
 
 #: v2 (``CONTRACT.md`` §11). Trace-scoped tables are pruned with their traces; the history
@@ -322,6 +333,8 @@ class SQLiteStore(CheckStoreMixin):
         self._closed = False
         self._runs_cache: tuple[float, set[str]] | None = None
         self._check_cache: tuple[float, set[str]] | None = None
+        self._last_lifecycle: tuple | None = None
+        self._last_lifecycle_at = 0.0
         if path != ":memory:" and not path.startswith("file:"):
             # 0700 + a ".gitignore" of "*" when Redline creates the directory; the
             # database (and so its -wal/-shm files) is created 0600
@@ -455,6 +468,7 @@ class SQLiteStore(CheckStoreMixin):
         while True:
             item = q.get()
             batch: list[Trace] = []
+            lifecycle: list[tuple] = []
             markers: list[threading.Event] = []
             stop = False
             while True:
@@ -462,9 +476,11 @@ class SQLiteStore(CheckStoreMixin):
                     stop = True
                 elif isinstance(item, threading.Event):
                     markers.append(item)
+                elif isinstance(item, tuple) and item and item[0] == "lifecycle":
+                    lifecycle.append(item)
                 else:
                     batch.append(item)
-                if stop or len(batch) >= self.batch_size:
+                if stop or len(batch) + len(lifecycle) >= self.batch_size:
                     break
                 try:
                     item = q.get_nowait()
@@ -478,6 +494,11 @@ class SQLiteStore(CheckStoreMixin):
                     logger.error(
                         "Redline writer dropped %d trace(s) (%s)", len(batch), type(exc).__name__
                     )
+            for _kind, rows, now in lifecycle:
+                try:
+                    self._write_lifecycle(rows, now)
+                except Exception as exc:
+                    logger.error("Redline writer dropped lifecycle gauges (%s)", type(exc).__name__)
             for m in markers:
                 m.set()
             if stop:
@@ -954,6 +975,7 @@ class SQLiteStore(CheckStoreMixin):
                 for sql in (
                     "DELETE FROM rollups WHERE bucket + 3600 <= ?",
                     "DELETE FROM issue_rollups WHERE bucket + 3600 <= ?",
+                    "DELETE FROM lifecycle_hourly WHERE bucket + 3600 <= ?",
                     "DELETE FROM releases WHERE last_seen < ?",
                     "DELETE FROM issue_index WHERE last_seen < ?",
                     "DELETE FROM run_steps WHERE run_id IN (SELECT id FROM runs WHERE "
@@ -1112,6 +1134,89 @@ class SQLiteStore(CheckStoreMixin):
         return out
 
     # history (v0.2) ------------------------------------------------------------
+    def record_lifecycle(self, metrics, *, release=None):
+        """Persist per-process hourly connection gauges as max-per-hour rows.
+
+        The recorder calls this on trace completion; identical gauges within a minute are
+        skipped so a busy endpoint does not add a write per request. ``MAX`` keeps the
+        highest observed count, a lower bound when several processes share a release.
+        """
+        if not metrics or self._closed:
+            return
+        now = time.time()
+        bucket = int(now // 3600) * 3600
+        rows = []
+        for metric in list(metrics)[:16]:
+            alias = str(metric.get("alias", "default"))[:64]
+            vendor = str(metric.get("vendor", "other"))[:32]
+            connects = max(0, int(metric.get("connects_hour", 0)))
+            failures = max(0, int(metric.get("fresh_failures_hour", 0)))
+            if not connects and not failures:
+                continue
+            rows.append(
+                (bucket, str(release or "unknown")[:128], alias, vendor, connects, failures)
+            )
+        if not rows:
+            return
+        signature = (bucket, tuple(sorted(rows)))
+        if signature == self._last_lifecycle and now - self._last_lifecycle_at < 60:
+            return
+        self._last_lifecycle, self._last_lifecycle_at = signature, now
+        if self.background:
+            try:
+                self._ensure_writer().put_nowait(("lifecycle", rows, now))
+            except queue.Full:
+                self.dropped += 1
+            return
+        self._write_lifecycle(rows, now)
+
+    def _write_lifecycle(self, rows, now):
+        self._check_pid()
+        with self._lock:
+            c = self._conn
+            c.execute("BEGIN IMMEDIATE")
+            try:
+                c.executemany(
+                    """
+                    INSERT INTO lifecycle_hourly
+                        (bucket, release, db_alias, vendor, connects_hour,
+                         fresh_failures_hour, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(bucket, release, db_alias, vendor) DO UPDATE SET
+                        connects_hour = MAX(lifecycle_hourly.connects_hour,
+                                            excluded.connects_hour),
+                        fresh_failures_hour = MAX(lifecycle_hourly.fresh_failures_hour,
+                                                  excluded.fresh_failures_hour),
+                        updated_at = excluded.updated_at
+                    """,
+                    [(*row, now) for row in rows],
+                )
+                c.execute("COMMIT")
+            except BaseException:
+                c.execute("ROLLBACK")
+                raise
+
+    def lifecycle(self, window, limit=200):
+        """Hourly connection gauges inside ``window`` seconds, newest first."""
+        if window < 0:
+            raise ValueError("window must not be negative")
+        since = int((time.time() - window) // 3600) * 3600
+        limit = max(1, min(int(limit), 500))
+        self._check_pid()
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT bucket, release, db_alias, vendor, connects_hour,
+                       fresh_failures_hour, updated_at
+                FROM lifecycle_hourly
+                WHERE bucket >= ?
+                ORDER BY bucket DESC, db_alias, vendor
+                LIMIT ?
+                """,
+                (since, limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def history(
         self,
         route: str | None,
