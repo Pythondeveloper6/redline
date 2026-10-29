@@ -106,14 +106,16 @@ it does not purge an existing broker. Named volumes belong to this Compose proje
 
 ## Current evidence
 
-The first full container run started the real services and passed the three live plan
-cases and Redis/prefork case, but qualification failed. Test-runner configuration leaked
-an unknown environment flag into application settings, PostgreSQL fixtures received the
-wrong DSN scheme, repeated runs reused a wheel environment, and packaging validation
-rejected the build tool's newer metadata format. These are corrected in source; metadata
-is explicitly 2.4 for the existing validation toolchain. Git is now included for the
-baseline tests. Storage doctor and two machine-speed-dependent tests were corrected too.
+The latest full container run (`20261029T050217Z-eb50dbb6`) passed all 1,517 core tests,
+the FastAPI/Flask/Litestar suites, all 28 live/harness cases, both demo harnesses,
+documentation and every packaging/wheel check, with no skips in those suites. Django
+had one failure: a permission test assumed that chmod(0500) denies root writes.
 
-The full rerun is still required. The authoring session cannot access OrbStack's socket,
-so local regression checks do not replace a new container result. Use the full command
-above; require exit zero and a new current summary with `qualified: true`.
+That assumption is now replaced with a deterministic denied-operation test plus an
+actual-user permission test. Django and the CLI share a filesystem write probe, with
+regressions ensuring existing data is unchanged and temporary probes are cleaned up.
+The local Django suite passes; its optional live PostgreSQL case needs the container.
+
+The full stack must still be rebuilt/rerun before qualification. The authoring session
+cannot access OrbStack's socket, so local checks do not replace a fresh container result.
+Require exit zero and a new current summary with `qualified: true`.
