@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import socket
+import tempfile
 from pathlib import Path
 
 from ..conf import SettingsError
@@ -43,3 +44,26 @@ def prepare_path(settings):
             if not ignore.exists():
                 ignore.write_text("*\n")
     return path
+
+
+def probe_writable(path: str) -> None:
+    """Check effective storage access without modifying the configured database.
+
+    Only a private temporary file in the nearest existing parent is created/written
+    and removed. Raise OSError if an existing target cannot be opened for writing or
+    the directory cannot support file creation (needed for SQLite journal/WAL files).
+    Permission bits and access() alone do not establish this on special mounts/root.
+    """
+    target = os.path.abspath(path)
+    probe = os.path.dirname(target)
+    while probe and not os.path.exists(probe):
+        parent = os.path.dirname(probe)
+        probe = parent if parent != probe else ""
+    if not probe:
+        raise OSError("No existing parent directory")
+    if os.path.lexists(target):
+        fd = os.open(target, os.O_WRONLY)
+        os.close(fd)
+    with tempfile.TemporaryFile(dir=probe, prefix=".redline-storage-check-") as temporary:
+        temporary.write(b"x")
+        temporary.flush()

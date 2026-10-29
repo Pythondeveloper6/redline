@@ -15,7 +15,6 @@ id                        problem
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
 from django.conf import settings
@@ -25,6 +24,7 @@ from django.urls import NoReverseMatch, reverse
 
 from redline_core.access import Access
 from redline_core.conf import SettingsError
+from redline_core.storage.safety import probe_writable
 
 from .conf import get_core_settings, get_options
 
@@ -123,15 +123,9 @@ def _urls() -> list:
 def _storage(path: str) -> list:
     if path == ":memory:" or path.startswith("file:"):
         return []
-    directory = os.path.dirname(os.path.abspath(path)) or "."
-    probe = directory
-    while not os.path.exists(probe):
-        parent = os.path.dirname(probe)
-        if parent == probe:
-            break
-        probe = parent
-    target = path if os.path.exists(path) else probe
-    if not os.access(target, os.W_OK):
+    try:
+        probe_writable(path)
+    except OSError:
         return [
             Error(
                 f"Redline cannot write its storage at {path!r}.",

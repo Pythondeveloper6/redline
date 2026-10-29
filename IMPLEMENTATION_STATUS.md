@@ -30,7 +30,7 @@ adapters and arbitrary shared-network-filesystem storage are not implemented sup
 |---|---|
 | Core excluding three server-dependent files | 1,472 passed, 6 optional-service skips |
 | Three server-dependent files | 18 passed; 21 setup errors at socket bind (`PermissionError: Operation not permitted`), no assertion failures |
-| Django | 199 passed, 1 optional PostgreSQL skip |
+| Django | 202 passed, 1 optional PostgreSQL skip after storage-probe regressions |
 | FastAPI | 125 passed |
 | Flask | 132 passed |
 | Litestar | 114 passed |
@@ -54,7 +54,9 @@ It runs the five complete suites, live PostgreSQL/MySQL/SQL Server and Redis/pre
 checks, Chromium desktop/mobile flows, demos, docs and package smoke tests. See
 [the shared guide](examples/testing/README.md). The first full container run failed qualification: live plans and Redis/prefork passed,
 but test-runner configuration, DSN, metadata and repeat-run issues caused other failures.
-Corrections and local regressions are present; the entire container suite must be rerun.
+The second container run passed every check except one Django permission test under
+root. That test and the shared effective-write probe are corrected; local Django has
+202 passes and one optional PostgreSQL skip. Rebuild/rerun the full container suite.
 This session cannot access OrbStack's socket and elevated Docker execution is disabled.
 Do not treat test definitions or earlier partial successes as full qualification.
 
