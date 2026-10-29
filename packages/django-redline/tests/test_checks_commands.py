@@ -69,17 +69,56 @@ def test_urls_not_mounted():
     assert _ids() == ["django_redline.W004"]
 
 
-def test_storage_not_writable(tmp_path):
+def test_storage_not_writable(tmp_path, monkeypatch):
+    import tempfile
+
+    def denied(*args, **kwargs):
+        raise PermissionError("fixture filesystem denies creation")
+
+    # Root can write through chmod(0500); model an actual refused operation instead.
+    monkeypatch.setattr(tempfile, "TemporaryFile", denied)
+    with override_settings(
+        REDLINE={"STORAGE_PATH": str(tmp_path / "sub" / "r.db"), "SAMPLE_RATE": 0.5}
+    ):
+        assert _ids() == ["django_redline.E002"]
+
+
+def test_storage_checks_effective_access_under_current_user(tmp_path):
+    import tempfile
+
     locked = tmp_path / "locked"
     locked.mkdir()
     locked.chmod(0o500)
     try:
+        try:
+            with tempfile.TemporaryFile(dir=locked) as probe:
+                probe.write(b"x")
+                probe.flush()
+        except OSError:
+            expected = ["django_redline.E002"]
+        else:
+            expected = []
         with override_settings(
             REDLINE={"STORAGE_PATH": str(locked / "sub" / "r.db"), "SAMPLE_RATE": 0.5}
         ):
-            assert _ids() == ["django_redline.E002"]
+            assert _ids() == expected
     finally:
         locked.chmod(0o700)
+
+
+def test_storage_target_is_directory(tmp_path):
+    with override_settings(REDLINE={"STORAGE_PATH": str(tmp_path), "SAMPLE_RATE": 0.5}):
+        assert _ids() == ["django_redline.E002"]
+
+
+def test_storage_check_preserves_database_and_cleans_probe(tmp_path):
+    database = tmp_path / "recordings.db"
+    database.write_bytes(b"existing recording")
+    before = set(tmp_path.iterdir())
+    with override_settings(REDLINE={"STORAGE_PATH": str(database), "SAMPLE_RATE": 0.5}):
+        assert _ids() == []
+    assert database.read_bytes() == b"existing recording"
+    assert set(tmp_path.iterdir()) == before
 
 
 @pytest.mark.django_db
