@@ -27,7 +27,9 @@ version is below `1.0` the public API may change between minor versions.
   reference affected tables. `redline schema-watch` polls the comparison, writes a baseline
   on its first run and can persist a `schema_drift` issue without running migrations.
 - Generic jobs/stages/row outcomes, optional Celery signals, retry outcomes and commit-before-
-  failure evidence; Jobs, SQL checker and redaction-preview UI surfaces.
+  failure evidence; Jobs, SQL checker and redaction-preview UI surfaces. Jobs record the
+  first failing stage and `GET api/jobs/summary` aggregates outcome, latency and stage
+  counts for retained task recordings.
 - Shared-dev defaults, SQL value capture policies, privacy profiles and route rules,
   log filters, user/request correlation, read-only secondary trace browsing and nested
   Flask/FastAPI recording.

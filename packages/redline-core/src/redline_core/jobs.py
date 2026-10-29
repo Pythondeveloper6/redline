@@ -66,13 +66,28 @@ def job(name, *, recorder=None, task_id=None, queue=None, attempt=0, parent=None
                 tag("job.outcome", "succeeded")
 
 
+@contextmanager
 def stage(name):
-    """A child span naming the current processing stage."""
+    """A child span naming the current processing stage and its observed outcome.
+
+    The first stage that raises also tags the job with ``job.first_failing_stage`` so the
+    jobs summary can name it without reading every retained span tree.
+    """
     builder = current()
     label = _label(name, builder)
     if builder is not None:
         label = builder.recorder.redactor.text(label)
-    return span(label, kind="custom", job_stage=True)
+    with span(label, kind="custom", job_stage=True) as context:
+        try:
+            yield context
+        except BaseException:
+            context.data["stage_outcome"] = "failed"
+            if builder is not None and builder.active and not builder.finished:
+                if "job.first_failing_stage" not in builder.tags:
+                    tag("job.first_failing_stage", label)
+            raise
+        else:
+            context.data.setdefault("stage_outcome", "succeeded")
 
 
 def row_outcome(status, reason="unspecified", **ids):
