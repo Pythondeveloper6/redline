@@ -220,15 +220,17 @@ instrumentation cost, not SQL Server latency.
 |---|---|---|---|---|
 | off | 0.078 ms | 0.312 ms | baseline | baseline |
 | disabled | 0.078 ms | 0.311 ms | +0.000 ms | -0.1 us |
-| sample0 | 0.131 ms | 1.373 ms | +0.053 ms | +50.4 us |
-| full | 0.130 ms | 1.383 ms | +0.052 ms | +50.9 us |
-| profile | 0.320 ms | 2.661 ms | +0.242 ms | +105.3 us |
+| sample0 | 0.131 ms | 1.422 ms | +0.054 ms | +52.9 us |
+| full | 0.131 ms | 1.434 ms | +0.054 ms | +53.5 us |
+| profile | 0.324 ms | 2.764 ms | +0.246 ms | +110.4 us |
 
-`full` is within 0.052 ms of the report's 0.1 ms fixed-cost target. Its 50.9 us/query is
-0.9 us above the 50 us target in this run; treat that as measurement-level rather than a
-guarantee. `profile` is intentionally outside that budget (pyinstrument sampling).
-The same optimizations also reduced the Flask cell; they are exercised by the SQLAlchemy
-event path, not by the fake driver specifically.
+`full` is within 0.054 ms of the report's 0.1 ms fixed-cost target. Its 53.5 us/query is
+3.5 us above the 50 us target in this run; that is a measured miss, not a guarantee. The
+run that preceded the final defensive-copy fix measured 50.9 us, so treat this as a
+narrow band around the target rather than a hard bound. `profile` is intentionally
+outside that budget (pyinstrument sampling). The same optimizations also reduced the
+Flask cell; they are exercised by the SQLAlchemy event path, not by the fake driver
+specifically.
 
 The benchmark's `--framework` option selects cells, so this one can be rerun without
 running all four adapters.
