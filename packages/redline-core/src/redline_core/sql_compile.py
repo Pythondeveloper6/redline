@@ -218,31 +218,52 @@ def _missing_column_finding(file, statement, name):
     }
 
 
-def compile_paths(paths, dsn, *, snapshot=None):
-    """Explicit CLI-only DSN; credentials never appear in the report."""
+def compile_paths(paths, dsn, *, snapshot=None, selective=True):
+    """Explicit CLI-only DSN; credentials never appear in the report.
+
+    With a schema snapshot, only statements that reference an added, removed or changed
+    table (including trigger changes) are recompiled. A first run, or a routine-parameter
+    change, compiles everything because those dependencies are not statically resolved.
+    """
     from pathlib import Path
 
     from sqlalchemy import create_engine
 
     from .check_sql import extract
+    from .sql import tables
 
     engine = create_engine(dsn)
     reports = []
+    affected = set()
+    skip_all = False
+    selective_summary = {"compiled": 0, "skipped_unchanged": 0}
     try:
         if snapshot:
             import json
 
             destination = Path(snapshot)
             current_schema = schema_snapshot(engine)
-            previous = (
-                json.loads(destination.read_text()) if destination.exists() else {"tables": {}}
+            existed = destination.exists()
+            previous = json.loads(destination.read_text()) if existed else {"tables": {}}
+            drift = compare_schema(previous, current_schema)
+            affected = {table.lower() for table in drift["affected_tables"]}
+            routines_changed = bool(
+                drift["added_routines"] or drift["removed_routines"] or drift["changed_routines"]
+            )
+            skip_all = selective and existed and not affected and not routines_changed
+            selective_summary["changed_tables"] = drift["affected_tables"]
+            selective_summary["reason"] = (
+                "schema unchanged"
+                if skip_all
+                else ("routine metadata changed" if routines_changed else "schema changed")
             )
             reports.append(
                 {
                     "file": str(destination),
                     "line": 1,
                     "status": "compiled",
-                    "schema_drift": compare_schema(previous, current_schema),
+                    "schema_drift": drift,
+                    "selective": selective_summary,
                 }
             )
             destination.write_text(json.dumps(current_schema, indent=2) + "\n")
@@ -263,11 +284,16 @@ def compile_paths(paths, dsn, *, snapshot=None):
             statements, skipped = extract(raw.decode("utf-8"), str(path))
             reports.extend({**s, "status": "unresolved"} for s in skipped)
             for statement in statements:
+                references = {table.lower() for table in tables(statement["sql"])}
+                if skip_all or (affected and references and not references.intersection(affected)):
+                    selective_summary["skipped_unchanged"] += 1
+                    continue
                 compiled = compile_statement(
                     engine,
                     statement["sql"],
                     result_reads=statement.get("result_reads"),
                 )
+                selective_summary["compiled"] += 1
                 item = {"file": str(path), "line": statement["line"], **compiled}
                 missing = compiled.get("result_reads_missing") or []
                 if missing:
@@ -278,6 +304,86 @@ def compile_paths(paths, dsn, *, snapshot=None):
     finally:
         engine.dispose()
     return reports
+
+
+def _mssql_schema_metadata(conn, schema):
+    """Bounded trigger and routine-parameter metadata for a SQL Server schema."""
+    from sqlalchemy import text
+
+    triggers, routines, errors = {}, {}, []
+    try:
+        rows = (
+            conn.execute(
+                text(
+                    """
+                    SELECT o.name AS table_name, tr.name AS trigger_name,
+                           tr.is_disabled, tr.is_instead_of_trigger
+                    FROM sys.triggers AS tr
+                    JOIN sys.objects AS o ON o.object_id = tr.parent_id
+                    JOIN sys.schemas AS s ON s.schema_id = o.schema_id
+                    WHERE s.name = :schema AND o.type = 'U'
+                    ORDER BY o.name, tr.name
+                    """
+                ),
+                {"schema": schema},
+            )
+            .mappings()
+            .all()
+        )
+        for row in rows[:1000]:
+            record = dict(row)
+            table = record.get("table_name")
+            if not isinstance(table, str):
+                continue
+            triggers.setdefault(table, []).append(
+                {
+                    "name": record.get("trigger_name"),
+                    "disabled": bool(record.get("is_disabled")),
+                    "instead_of": bool(record.get("is_instead_of_trigger")),
+                }
+            )
+    except Exception:
+        errors.append("Trigger metadata was unavailable.")
+    try:
+        rows = (
+            conn.execute(
+                text(
+                    """
+                    SELECT o.name AS routine_name, o.type_desc,
+                           p.parameter_id, p.name AS parameter_name,
+                           TYPE_NAME(p.user_type_id) AS type_name,
+                           p.max_length, p.precision, p.scale, p.is_output
+                    FROM sys.parameters AS p
+                    JOIN sys.objects AS o ON o.object_id = p.object_id
+                    JOIN sys.schemas AS s ON s.schema_id = o.schema_id
+                    WHERE s.name = :schema
+                      AND o.type IN ('P', 'PC', 'FN', 'FS', 'FT', 'IF', 'TF')
+                    ORDER BY o.name, p.parameter_id
+                    """
+                ),
+                {"schema": schema},
+            )
+            .mappings()
+            .all()
+        )
+        for row in rows[:2000]:
+            record = dict(row)
+            routine = record.get("routine_name")
+            if not isinstance(routine, str):
+                continue
+            routines.setdefault(routine, []).append(
+                {
+                    "name": record.get("parameter_name"),
+                    "type": record.get("type_name"),
+                    "max_length": record.get("max_length"),
+                    "precision": record.get("precision"),
+                    "scale": record.get("scale"),
+                    "output": bool(record.get("is_output")),
+                }
+            )
+    except Exception:
+        errors.append("Routine parameter metadata was unavailable.")
+    return triggers, routines, errors
 
 
 def schema_snapshot(engine):
@@ -298,22 +404,56 @@ def schema_snapshot(engine):
             {"name": c["name"], "type": str(c["type"]), "nullable": c.get("nullable")}
             for c in columns
         ]
+    vendor = get_vendor(engine.dialect.name)
+    triggers, routines, errors = {}, {}, []
+    if vendor.name == "mssql":
+        with engine.connect() as conn:
+            triggers, routines, errors = _mssql_schema_metadata(conn, schema)
     return {
-        "vendor": get_vendor(engine.dialect.name).name,
+        "vendor": vendor.name,
         "schema": schema,
         "tables": result,
+        "triggers": triggers,
+        "routines": routines,
+        "metadata_errors": errors,
         "limitation": (
-            "Default schema column metadata only; no certification of stored "
-            "procedures, triggers or application behavior."
+            "Default schema column, trigger and routine-parameter metadata only; no "
+            "row data or certification of application behavior."
         ),
     }
 
 
 def compare_schema(before, after):
-    """Name/type/nullability drift; callers still compile every extracted statement."""
+    """Name/type/nullability, trigger and routine-parameter drift."""
     old, new = before.get("tables", {}), after.get("tables", {})
+    old_triggers, new_triggers = before.get("triggers", {}), after.get("triggers", {})
+    old_routines, new_routines = before.get("routines", {}), after.get("routines", {})
+    changed_triggers = sorted(
+        table
+        for table in old_triggers.keys() & new_triggers.keys()
+        if old_triggers[table] != new_triggers[table]
+    )
+    added_tables = sorted(set(new) - set(old))
+    removed_tables = sorted(set(old) - set(new))
+    changed_tables = sorted(k for k in old.keys() & new.keys() if old[k] != new[k])
+    trigger_tables = sorted(
+        (set(new_triggers) - set(old_triggers))
+        | (set(old_triggers) - set(new_triggers))
+        | set(changed_triggers)
+    )
     return {
-        "added_tables": sorted(set(new) - set(old)),
-        "removed_tables": sorted(set(old) - set(new)),
-        "changed_tables": sorted(k for k in old.keys() & new.keys() if old[k] != new[k]),
+        "added_tables": added_tables,
+        "removed_tables": removed_tables,
+        "changed_tables": changed_tables,
+        "changed_triggers": changed_triggers,
+        "added_routines": sorted(set(new_routines) - set(old_routines)),
+        "removed_routines": sorted(set(old_routines) - set(new_routines)),
+        "changed_routines": sorted(
+            name
+            for name in old_routines.keys() & new_routines.keys()
+            if old_routines[name] != new_routines[name]
+        ),
+        "affected_tables": sorted(
+            set(added_tables) | set(removed_tables) | set(changed_tables) | set(trigger_tables)
+        ),
     }
