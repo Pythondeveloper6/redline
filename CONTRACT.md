@@ -1330,8 +1330,8 @@ link to a verification suite. Browser interactions do not execute arbitrary shel
 
 Five packages remain in lockstep at 0.4.0a1; the storage schema remains additive v4.
 New issue kinds are sql_error, application_error, placeholder_in_comment,
-dml_rowcount_unknown, session_state_leak, fresh_connection_failure, connection_churn
-and connection_failure. Failed statements count as attempts and remain findings even
+dml_rowcount_unknown, session_state_leak, schema_drift, fresh_connection_failure,
+connection_churn and connection_failure. Failed statements count as attempts and remain findings even
 when application code catches them. Missing codes, connection ages and observations
 stay unknown. Negative rowcounts never establish NOCOUNT or a failed write.
 
@@ -1367,7 +1367,9 @@ is a low-confidence candidate, not proof. Schema snapshots contain bounded
 default-schema column, SQL Server trigger and routine-parameter metadata, not rows. When
 a previous snapshot exists, only statements referencing added, removed or changed tables
 (including trigger changes) are recompiled; an unchanged schema and routine-only changes
-have explicit skip/full-compile rules.
+have explicit skip/full-compile rules. `redline schema-watch` can poll that comparison and,
+with an explicit store path, persist one synthetic TASK trace carrying a `schema_drift`
+issue. The first run establishes a baseline; it never runs migrations or repairs DDL.
 
 Job helpers produce TASK traces with nested stage spans, bounded reason-digest outcome
 counters and no arguments/results/row samples. Celery is optional and installed in the

@@ -11,7 +11,7 @@ export interface Suggestion {
   summary: string; code: string | null; diff: string | null
   confidence: 'high' | 'medium' | 'low'; docs_url: string | null
 }
-export type IssueKind = 'application_error' | 'sql_error' | 'placeholder_in_comment' | 'dml_rowcount_unknown' | 'session_state_leak' | 'fresh_connection_failure' | 'connection_churn' | 'connection_failure' | 'n_plus_one' | 'duplicate_query' | 'slow_query' | 'too_many_queries'
+export type IssueKind = 'application_error' | 'sql_error' | 'placeholder_in_comment' | 'dml_rowcount_unknown' | 'session_state_leak' | 'schema_drift' | 'fresh_connection_failure' | 'connection_churn' | 'connection_failure' | 'n_plus_one' | 'duplicate_query' | 'slow_query' | 'too_many_queries'
   | 'blocking_in_async' | 'large_result' | 'unbounded_query' | 'inefficient_count'
   | 'slow_serializer' | 'long_transaction' | 'external_in_transaction'
   | 'slow_external' | 'duplicate_external' | 'retry_storm'
