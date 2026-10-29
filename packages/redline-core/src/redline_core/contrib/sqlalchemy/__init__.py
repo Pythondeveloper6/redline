@@ -8,11 +8,13 @@ The hooks cost one ``ContextVar.get()`` when no trace is active.
 from __future__ import annotations
 
 import asyncio
-import logging
+import os
 import sys
+import threading
 import time
 import weakref
 from collections.abc import Callable, Mapping, Sequence
+from functools import wraps
 from typing import Any
 
 from sqlalchemy import event
@@ -28,12 +30,10 @@ except ImportError:  # no greenlet: sync-only install (e.g. a Flask app), so no 
 
 from redline_core import record_query
 from redline_core.blocking import note_sync_call
-from redline_core.recorder import current, record_span
+from redline_core.recorder import _capture_failure, current, record_span
 from redline_core.transactions import begin_transaction, end_transaction
 
 from .suggest import SQLAlchemyFixSuggester
-
-logger = logging.getLogger("redline")
 
 __all__ = [
     "EngineLike",
@@ -50,12 +50,45 @@ EngineLike = Engine | AsyncEngine
 
 _perf = time.perf_counter
 _instrumented: weakref.WeakSet[Engine] = weakref.WeakSet()
+_automatic: weakref.WeakSet[Engine] = weakref.WeakSet()
+_registration_lock = threading.RLock()
+_legacy_aliases: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+_owners: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+_auto_aliases: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
 _ATTR = "_redline_start"
 _VENDORS = {"postgresql": "postgresql", "mysql": "mysql", "mariadb": "mysql", "sqlite": "sqlite"}
 
 
+def _observer_failed():
+    """Count capture failures without exposing exception messages or tracebacks."""
+    try:
+        builder = current()
+        if builder is not None and builder.active and not builder.finished:
+            with builder._lock:
+                builder.capture_errors += 1
+    except Exception:
+        pass
+    _capture_failure("Redline SQLAlchemy observer failed")
+
+
+def _observer(callback):
+    """An observer must never alter application database results or exceptions."""
+
+    @wraps(callback)
+    def safe(*args, **kwargs):
+        try:
+            return callback(*args, **kwargs)
+        except Exception:
+            _observer_failed()
+            return None
+
+    return safe
+
+
 def vendor_of(engine: EngineLike) -> str:
-    return _VENDORS.get(engine.dialect.name, "other")
+    from redline_core.vendors import get_vendor
+
+    return get_vendor(engine.dialect.name).name
 
 
 def _sync(engine: EngineLike) -> Engine:
@@ -158,31 +191,84 @@ class _CountingCursor:
         return rows
 
 
-def instrument_engine(engine: EngineLike, alias: str = "default") -> None:
-    """Record every statement executed on ``engine`` as a ``sql`` span (idempotent)."""
+def _auto_alias(engine):
+    with _registration_lock:
+        if engine not in _auto_aliases:
+            from redline_core.model import new_id
+
+            _auto_aliases[engine] = "auto_" + new_id()[:16]
+        return _auto_aliases[engine]
+
+
+def _binding(engine, builder=None):
+    builder = current() if builder is None else builder
+    if builder is None or not builder.active or builder.finished:
+        return None
+    owner = _owners.get(engine)
+    if owner is not None and builder.recorder in owner:
+        return owner[builder.recorder], False
+    if engine in _legacy_aliases:
+        return _legacy_aliases[engine], False
+    if builder.recorder.settings.instrument_engines == "all":
+        return _auto_alias(engine), True
+    return None
+
+
+def instrument_engine(engine: EngineLike, alias: str = "default", *, recorder=None, _auto=False):
+    """Install once, with optional recorder ownership for multi-application processes."""
+    with _registration_lock:
+        sync_engine = _sync(engine)
+        if not _auto:
+            if recorder is None:
+                _legacy_aliases[sync_engine] = alias
+            else:
+                _owners.setdefault(sync_engine, weakref.WeakKeyDictionary())[recorder] = alias
+        _install_engine(sync_engine, alias, _auto=_auto)
+
+
+def _install_engine(sync_engine, alias, *, _auto=False):
     from sqlalchemy.orm import Session
 
     if not event.contains(Session, "loaded_as_persistent", _note_loaded_instance):
         event.listen(Session, "loaded_as_persistent", _note_loaded_instance)
-    sync_engine = _sync(engine)
     if sync_engine in _instrumented:
+        if not _auto:
+            _automatic.discard(sync_engine)
         return
-    _instrumented.add(sync_engine)
+    if _auto:
+        _automatic.add(sync_engine)
     vendor = vendor_of(sync_engine)
     is_async = bool(getattr(sync_engine.dialect, "is_async", False))
 
+    @_observer
     def before(conn: Any, cursor: Any, statement: str, parameters: Any, context: Any, many: bool):
-        if context is not None and current() is not None:
+        builder = current()
+        binding = _binding(sync_engine, builder)
+        if binding is None:
+            return
+        try:
+            state = conn.info.setdefault("redline_lifecycle", {"born": None, "statements": 0})
+            state["statements"] += 1
+        except Exception:
+            pass
+        if context is not None and builder is not None:
             setattr(context, _ATTR, _perf())
+            context._redline_owner = builder.id
+            context._redline_alias, context._redline_auto = binding
 
+    @_observer
     def after(conn: Any, cursor: Any, statement: str, parameters: Any, context: Any, many: bool):
         start = getattr(context, _ATTR, None) if context is not None else None
         if start is None:
             return
         duration = _perf() - start
         builder = current()
-        if builder is None or statement.lstrip()[:6].upper() == "PRAGMA":
+        if builder is None or getattr(context, "_redline_owner", None) != builder.id:
             return
+        delattr(context, _ATTR)
+        if statement.lstrip()[:6].upper() == "PRAGMA":
+            return
+        query_alias = context._redline_alias
         try:
             rows = cursor.rowcount
         except Exception:
@@ -192,7 +278,7 @@ def instrument_engine(engine: EngineLike, alias: str = "default") -> None:
             parameters,
             start=start,
             duration=duration,
-            db_alias=alias,
+            db_alias=query_alias,
             vendor=vendor,
             rows=rows if isinstance(rows, int) and rows >= 0 else None,
             many=bool(many),
@@ -200,13 +286,59 @@ def instrument_engine(engine: EngineLike, alias: str = "default") -> None:
         )
         if span is not None:
             span.callsite = _callsite(builder.recorder)
-            if span.data["rows"] is None and span.data["explainable"] and context is not None:
+            span.data["auto_engine"] = bool(context._redline_auto)
+            span.data["rowcount_raw"] = rows if isinstance(rows, int) else None
+            _query_evidence(conn, span, statement)
+            if span.data["rows"] is None and span.data.get("read_query") and context is not None:
                 context.cursor = _CountingCursor(cursor, span.data)
             if not is_async:  # a sync driver called from a coroutine blocks the loop
                 note_sync_call(span, "SQLAlchemy (sync)")
 
+    @_observer
     def failed(exc_context: Any):
         context = exc_context.execution_context
+        start = getattr(context, _ATTR, None) if context is not None else None
+        builder = current()
+        if (
+            builder is not None
+            and start is not None
+            and getattr(context, "_redline_owner", None) == builder.id
+        ):
+            builder.sql_errors += 1
+            query_alias = context._redline_alias
+            span = record_query(
+                exc_context.statement or "",
+                exc_context.parameters,
+                start=start,
+                duration=_perf() - start,
+                db_alias=query_alias,
+                vendor=vendor,
+                capture_callsite=False,
+                many=bool(getattr(context, "executemany", False)),
+            )
+            if span is not None:
+                span.data["auto_engine"] = bool(context._redline_auto)
+                span.callsite = _callsite(builder.recorder)
+                from redline_core.vendors import get_vendor
+
+                details = get_vendor(vendor).classify_error(
+                    exc_context.original_exception, disconnect=bool(exc_context.is_disconnect)
+                )
+                policy = builder.recorder.settings.capture_sql_params
+                from redline_core.sql import is_explainable
+
+                allowed = builder.recorder.settings.capture_error_details and (
+                    policy is True
+                    or (policy == "reads_only" and is_explainable(exc_context.statement or ""))
+                )
+                details["message"] = (
+                    builder.recorder.redactor.text(str(exc_context.original_exception))[:500]
+                    if allowed
+                    else "[not captured]"
+                )
+                span.data["error"] = details
+                span.data["explainable"] = False
+                _query_evidence(exc_context.connection, span, exc_context.statement or "")
         if context is not None and hasattr(context, _ATTR):
             delattr(context, _ATTR)
 
@@ -215,6 +347,8 @@ def instrument_engine(engine: EngineLike, alias: str = "default") -> None:
     event.listen(sync_engine, "handle_error", failed)
     _instrument_transactions(sync_engine, alias)
     _instrument_pool(sync_engine, alias)
+    _instrument_lifecycle(sync_engine, alias)
+    _instrumented.add(sync_engine)
 
 
 # ── transactions and pool checkout ─────────────────────────────────────────────────────
@@ -228,7 +362,13 @@ def _instrument_transactions(sync_engine: Engine, alias: str) -> None:
     Savepoints (``begin_nested``) have their own events and are ignored.
     """
 
+    @_observer
     def on_begin(conn: Any) -> None:
+        binding = _binding(conn.engine)
+        if binding is None:
+            return
+        if vendor_of(conn.engine) == "postgresql":
+            conn.info["redline_session_before_tx"] = dict(conn.info.get("redline_session", {}))
         builder = current()
         if builder is None:
             return
@@ -237,10 +377,19 @@ def _instrument_transactions(sync_engine: Engine, alias: str) -> None:
             setattr(conn, _TX, state)
 
     def ender(outcome: Any) -> Callable[[Any], None]:
+        @_observer
         def on_end(conn: Any) -> None:
+            binding = _binding(conn.engine)
+            if binding is None:
+                return
+            if outcome == "rollback" and vendor_of(conn.engine) == "postgresql":
+                try:
+                    conn.info["redline_session"] = conn.info.pop("redline_session_before_tx", {})
+                except Exception:
+                    pass
             state = conn.__dict__.pop(_TX, None)
             if state is not None:
-                end_transaction(state, db_alias=alias, outcome=outcome)
+                end_transaction(state, db_alias=binding[0], outcome=outcome)
 
         return on_end
 
@@ -263,27 +412,38 @@ def _instrument_pool(sync_engine: Engine, alias: str) -> None:
     original = sync_engine.raw_connection
 
     def raw_connection(*args: Any, **kwargs: Any) -> Any:
-        if current() is None:
-            return original(*args, **kwargs)
-        start = _perf()
+        binding = start = None
+        try:
+            binding = _binding(sync_engine)
+            if binding is not None:
+                start = _perf()
+        except Exception:
+            _observer_failed()
+        # This is the application's database operation: propagate its original error
+        # and never call it twice when only timing or recording fails.
         dbapi_conn = original(*args, **kwargs)
-        duration = _perf() - start
-        if duration >= POOL_WAIT_MIN:
-            builder = current()
-            pool = sync_engine.pool
-            record_span(
-                "pool_wait",
-                f"pool checkout {alias}",
-                start,
-                duration,
-                {
-                    "db_alias": alias,
-                    "pool_size": _pool_stat(pool, "size"),
-                    "checked_out": _pool_stat(pool, "checkedout"),
-                },
-                capture_callsite=False,
-                callsite=_callsite(builder.recorder) if builder is not None else None,
-            )
+        if binding is None or start is None:
+            return dbapi_conn
+        try:
+            duration = _perf() - start
+            if duration >= POOL_WAIT_MIN:
+                builder = current()
+                pool = sync_engine.pool
+                record_span(
+                    "pool_wait",
+                    f"pool checkout {binding[0]}",
+                    start,
+                    duration,
+                    {
+                        "db_alias": binding[0],
+                        "pool_size": _pool_stat(pool, "size"),
+                        "checked_out": _pool_stat(pool, "checkedout"),
+                    },
+                    capture_callsite=False,
+                    callsite=_callsite(builder.recorder) if builder is not None else None,
+                )
+        except Exception:
+            _observer_failed()
         return dbapi_conn
 
     sync_engine.raw_connection = raw_connection  # type: ignore[method-assign]
@@ -335,6 +495,28 @@ def build_executor(
                 return asyncio.run(run_async(sql, params))
             return asyncio.run_coroutine_threadsafe(run_async(sql, params), loop).result(30)
 
+        async def estimated_async(sql, params):
+            async with engine.connect() as conn:
+                try:
+                    await conn.exec_driver_sql("SET SHOWPLAN_XML ON")
+                    result = await conn.exec_driver_sql(sql, _positional(params))
+                    return [tuple(r) for r in result.fetchall()]
+                finally:
+                    try:
+                        await conn.exec_driver_sql("SET SHOWPLAN_XML OFF")
+                    except BaseException:
+                        await conn.invalidate()
+                        raise
+                    finally:
+                        await conn.rollback()
+
+        def async_plan(sql, params):
+            loop = get_loop()
+            if loop is None or not loop.is_running():
+                return asyncio.run(estimated_async(sql, params))
+            return asyncio.run_coroutine_threadsafe(estimated_async(sql, params), loop).result(30)
+
+        async_executor.mssql_estimated_plan = async_plan
         return async_executor
 
     def executor(sql: str, params: Any) -> list[tuple[Any, ...]]:
@@ -347,6 +529,28 @@ def build_executor(
             finally:
                 conn.rollback()
 
+    def estimated(sql, params):
+        with engine.connect() as conn:
+            try:
+                conn.exec_driver_sql("SET SHOWPLAN_XML ON")
+                result = conn.exec_driver_sql(sql, _positional(params))
+                return [tuple(r) for r in result.fetchall()]
+            finally:
+                try:
+                    conn.exec_driver_sql("SET SHOWPLAN_XML OFF")
+                except BaseException:
+                    conn.invalidate()
+                    raise
+                finally:
+                    conn.rollback()
+
+    def actual(sql, params):
+        from redline_core.mssql_actual import collect
+
+        return collect(engine, sql, params)
+
+    executor.mssql_actual_plan = actual
+    executor.mssql_estimated_plan = estimated
     return executor
 
 
@@ -354,7 +558,153 @@ def build_executor(
 explain_executor_factory = build_executor
 
 
+@_observer
 def _note_loaded_instance(session, instance):
     from redline_core.orm import note_instance
 
     note_instance()
+
+
+def _query_evidence(conn, span, statement):
+    from redline_core.sql import comment_placeholders, effective_kinds
+
+    if span.data.get("params_captured") is False and span.callsite is not None:
+        from dataclasses import replace
+
+        span.callsite = replace(span.callsite, code=None)
+    span.data["statement_kinds"] = list(effective_kinds(statement))
+    span.data["comment_placeholders"] = comment_placeholders(statement, conn.dialect.paramstyle)
+    try:
+        info = conn.info
+        info["redline_vendor"] = span.data.get("vendor", "other")
+        info["redline_alias"] = span.data.get("db_alias", "default")
+        state = info.setdefault("redline_lifecycle", {"born": None, "statements": 0})
+        span.data["connection"] = {
+            "age_s": round(max(0.0, _perf() - state["born"]), 3)
+            if state["born"] is not None
+            else None,
+            "statement_number": state["statements"],
+            "pool_recycle": getattr(conn.engine.pool, "_recycle", None),
+            "pool_pre_ping": bool(getattr(conn.engine.pool, "_pre_ping", False)),
+        }
+        from redline_core.connection_health import evidence
+
+        span.data["connection"].update(
+            evidence(
+                conn.engine.pool,
+                span.data["connection"]["age_s"],
+                state["statements"],
+                span.data.get("error"),
+            )
+        )
+        if not span.data.get("error"):
+            from redline_core.session_state import observe
+
+            observe(info, statement, span)
+    except Exception:
+        _observer_failed()
+
+
+def _instrument_lifecycle(engine, alias):
+    @_observer
+    def connected(dbapi, record):
+        from redline_core.connection_health import connected as note_connected
+        from redline_core.connection_health import register
+
+        note_connected(engine.pool)
+        register(engine.pool, alias=alias, vendor=engine.dialect.name)
+        record.info["redline_lifecycle"] = {"born": _perf(), "statements": 0}
+
+    @_observer
+    def checked_in(dbapi, record):
+        from redline_core.session_state import checked_in
+
+        binding = _binding(engine)
+        if binding is not None:
+            checked_in(record.info, binding[0])
+
+    event.listen(engine.pool, "connect", connected)
+    event.listen(engine.pool, "checkin", checked_in)
+
+    @_observer
+    def invalidated(dbapi, record, exc):
+        binding = _binding(engine)
+        if binding is None:
+            return
+        record.info["redline_vendor"] = vendor_of(engine)
+        record.info["redline_alias"] = binding[0]
+        _pool_invalidated(dbapi, record, exc, registered=True)
+
+    event.listen(engine.pool, "invalidate", invalidated)
+
+
+_all_installed = False
+
+
+def _install_all_engines():
+    """Install one lazy class hook; only active recorders opting into all are observed."""
+    global _all_installed
+    if _all_installed:
+        return
+    from sqlalchemy.pool import Pool
+
+    event.listen(Pool, "connect", _global_connected)
+    event.listen(Pool, "invalidate", _pool_invalidated)
+    event.listen(Engine, "engine_connect", _discover_active_engine)
+    _all_installed = True
+
+
+@_observer
+def _discover_active_engine(conn):
+    builder = current()
+    if builder is not None and builder.recorder.settings.instrument_engines == "all":
+        engine = conn.engine
+        instrument_engine(engine, _auto_alias(engine), _auto=True)
+
+
+@_observer
+def _global_connected(dbapi, record):
+    record.info["redline_lifecycle"] = {"born": _perf(), "statements": 0}
+
+
+@_observer
+def _pool_invalidated(dbapi, record, exc, *, registered=False):
+    builder = current()
+    if builder is None or builder.finished or exc is None:
+        return
+    if not registered and builder.recorder.settings.instrument_engines != "all":
+        return
+    info = record.info
+    identity = (builder.id, id(exc))
+    if info.get("redline_invalidation") == identity:
+        return
+    info["redline_invalidation"] = identity
+    builder.connection_errors += 1
+    from redline_core.vendors import get_vendor
+
+    vendor = info.get("redline_vendor", "other")
+    if vendor == "other" and type(dbapi).__module__.startswith("pyodbc"):
+        vendor = "mssql"
+    error = get_vendor(vendor).classify_error(exc, disconnect=True)
+    record_span(
+        "pool_wait",
+        "Database connection invalidated",
+        _perf(),
+        0,
+        {"db_alias": info.get("redline_alias", "unregistered"), "connection_error": error},
+        capture_callsite=False,
+    )
+
+
+def instrument_all_engines():
+    with _registration_lock:
+        _install_all_engines()
+
+
+def _reset_registration_lock():
+    global _registration_lock
+    _registration_lock = threading.RLock()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_registration_lock)

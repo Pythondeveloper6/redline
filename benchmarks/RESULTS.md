@@ -203,3 +203,34 @@ Profile (pyinstrument, ~20 ms request): 1.6 KiB of speedscope JSON per profiled 
 | 200 | 442 |
 
 Memory per in-flight SQL span (tracemalloc, 2000 queries in one request): 1,543 bytes; the default `max_spans_per_trace = 2000` caps a request at about 2.9 MiB of spans.
+
+## v0.4 SQL Server-shaped overhead (2026-10-29)
+
+The `mssql` cell drives Flask -> Redline hooks -> a view that runs 20 SQLAlchemy Core
+queries through a **fake pyodbc-shaped DBAPI** (`benchmarks/fake_mssql_dbapi.py`). It has
+the same `cursor.execute`/`fetchall`/`nextset` call shape as pyodbc and reports
+`db.system=mssql`, but no network or SQL Server is involved. It measures Redline's
+instrumentation cost, not SQL Server latency.
+
+- Command: `uv run python benchmarks/overhead.py --framework mssql`
+- 1500 timed requests per cell after warm-up, 3 interleaved rounds pooled
+- Python 3.13.15 on Darwin arm64, Apple M2 Pro, SQLAlchemy 2.1.6
+
+| mode | 0 q median | 20 q median | overhead / request | overhead / query |
+|---|---|---|---|---|
+| off | 0.078 ms | 0.312 ms | baseline | baseline |
+| disabled | 0.078 ms | 0.311 ms | +0.000 ms | -0.1 us |
+| sample0 | 0.131 ms | 1.422 ms | +0.054 ms | +52.9 us |
+| full | 0.131 ms | 1.434 ms | +0.054 ms | +53.5 us |
+| profile | 0.324 ms | 2.764 ms | +0.246 ms | +110.4 us |
+
+`full` is within 0.054 ms of the report's 0.1 ms fixed-cost target. Its 53.5 us/query is
+3.5 us above the 50 us target in this run; that is a measured miss, not a guarantee. The
+run that preceded the final defensive-copy fix measured 50.9 us, so treat this as a
+narrow band around the target rather than a hard bound. `profile` is intentionally
+outside that budget (pyinstrument sampling). The same optimizations also reduced the
+Flask cell; they are exercised by the SQLAlchemy event path, not by the fake driver
+specifically.
+
+The benchmark's `--framework` option selects cells, so this one can be rerun without
+running all four adapters.

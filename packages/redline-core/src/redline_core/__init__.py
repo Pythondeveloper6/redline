@@ -20,10 +20,11 @@ code touches directly is :func:`span`::
 
 from __future__ import annotations
 
-__version__ = "0.3.0a1"
+__version__ = "0.4.0a1"
 
 from .conf import Settings, SettingsError
 from .detect import Detector, FixSuggester, GenericSuggester
+from .jobs import job, row_outcome, stage, tag
 from .model import Callsite, Frame, Issue, Span, Suggestion, Trace
 from .recorder import (
     Recorder,
@@ -59,8 +60,12 @@ __all__ = [
     "current",
     "finish_trace",
     "get_recorder",
+    "job",
     "record_query",
     "record_span",
+    "row_outcome",
     "span",
+    "stage",
     "start_trace",
+    "tag",
 ]

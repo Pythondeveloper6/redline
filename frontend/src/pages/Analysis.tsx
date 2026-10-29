@@ -1,3 +1,4 @@
+import { SqlChecker, RedactionPreview } from '../components/ReleaseTools'
 import { SOURCE_EXAMPLE } from '../lib/sourceExample'
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
@@ -19,8 +20,8 @@ export default function Analysis() {
   const [tab, setTab] = useState('source')
   return <div className="space-y-4">
     <h1 className="text-[15px] font-semibold m-0">Analysis tools</h1>
-    <nav className="flex flex-wrap gap-2" aria-label="Analysis tools">{[['source', 'Python source'], ['samples', 'Detector samples'], ['health', 'Recording health'], ['coverage', 'Suite coverage'], ['suppressions', 'Suppressions']].map(([key, label]) => <button key={key} className={`btn ${tab === key ? 'btn-accent' : ''}`} aria-pressed={tab === key} onClick={() => setTab(key)}>{label}</button>)}</nav>
-    {tab === 'source' && <Source />}{tab === 'samples' && <Samples />}{tab === 'health' && <Health />}{tab === 'coverage' && <SuiteCoverage />}{tab === 'suppressions' && <Suppressions />}
+    <nav className="flex flex-wrap gap-2" aria-label="Analysis tools">{[['source', 'Python source'], ['sql', 'SQL checker'], ['privacy', 'Redaction preview'], ['samples', 'Detector samples'], ['health', 'Recording health'], ['coverage', 'Suite coverage'], ['suppressions', 'Suppressions']].map(([key, label]) => <button key={key} className={`btn ${tab === key ? 'btn-accent' : ''}`} aria-pressed={tab === key} onClick={() => setTab(key)}>{label}</button>)}</nav>
+    {tab === 'sql' && <SqlChecker />}{tab === 'privacy' && <RedactionPreview />}{tab === 'source' && <Source />}{tab === 'samples' && <Samples />}{tab === 'health' && <Health />}{tab === 'coverage' && <SuiteCoverage />}{tab === 'suppressions' && <Suppressions />}
   </div>
 }
 
@@ -58,11 +59,12 @@ function Source() {
 }
 
 function Health() {
-  const d = useAsync(() => call<{ meta: { framework: string; settings: { profile_mode: string; profiler_available: boolean }; storage: { rows: number; dropped: number } }; observed_traces: number; profiled_traces: number; test_traces: number; test_requests?: { id: string; name: string; method: string; path: string }[]; warnings: string[]; note: string }>('GET', './api/analysis/health'), [])
+  const d = useAsync(() => call<{ meta: { framework: string; settings: { profile_mode: string; profiler_available: boolean }; storage: { rows: number; dropped: number } }; observed_traces: number; profiled_traces: number; test_traces: number; capture?: Record<string, unknown>; test_requests?: { id: string; name: string; method: string; path: string }[]; warnings: string[]; note: string }>('GET', './api/analysis/health'), [])
   if (d.error) return <ErrorBox error={d.error} onRetry={d.reload} />
   if (!d.data) return <Spinner />
   const h = d.data
   return <div className="space-y-3"><button className="btn" onClick={d.reload}>Refresh recording health</button>
+    {h.capture && <details className="card p-3"><summary>Configured recording coverage</summary><pre className="overflow-x-auto mt-2">{JSON.stringify(h.capture, null, 2)}</pre><p className="text-muted">Configured options are not proof that every engine or worker has been observed. Secondary stores contribute request/job browsing; aggregates use the primary store.</p></details>}
     <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-3">{[['Retained traces', h.meta.storage.rows], ['Observed sample', h.observed_traces], ['Profiled in sample', h.profiled_traces], ['Dropped writes', h.meta.storage.dropped]].map(([label, value]) => <div key={label} className="card p-4"><div className="text-muted">{label}</div><div className="text-xl num">{value}</div></div>)}</div>
     {h.warnings.map(w => <p key={w} className="text-warn">{w}</p>)}<p>{h.note}</p>
     <p>Framework: {h.meta.framework} · Profile mode: {h.meta.settings.profile_mode} · Profiler installed: {h.meta.settings.profiler_available ? 'yes' : 'no'} · Test traces in sample: {h.test_traces}</p>

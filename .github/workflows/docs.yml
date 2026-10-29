@@ -1,15 +1,14 @@
 # Build the MkDocs Material site with --strict and publish it to GitHub Pages
 # (https://pythondeveloper6.github.io/redline/).
 #
-# Pull requests only get the strict build, in ci.yml's `docs` job. This workflow runs on
-# pushes to main and on demand. In the repository settings, Pages must use "GitHub Actions"
+# This workflow runs only on pushes to main, including merged pull requests.
+# In repository settings, Pages must use "GitHub Actions"
 # as its source.
 name: Docs
 
 on:
   push:
     branches: [main]
-  workflow_dispatch:
 
 permissions:
   contents: read

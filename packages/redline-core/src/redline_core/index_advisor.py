@@ -213,6 +213,11 @@ def query_requirements(
     """
     if not sql or not sqlmod.is_explainable(sql):
         return []
+    if vendor == "mssql" and any(
+        len(parts := sqlmod._split_qualified(m.group("table"))) > 1 and parts[-2].lower() != "dbo"
+        for m in sqlmod._TABLE_REF.finditer(sql)
+    ):
+        return []
     try:
         preds = predmod.analyze_predicates(sql, params)
         fp = sqlmod.fingerprint(sql)
@@ -414,7 +419,21 @@ def load_catalog(vendor: str, executor: ExplainExecutor) -> Catalog:
     Raises whatever the executor raises; :func:`advise` treats that as "not verified".
     """
     cat = Catalog()
-    if vendor == "postgresql":
+    if vendor == "mssql":
+        rows = executor(
+            "SELECT TOP (5000) o.name, i.name, c.name, i.has_filter "
+            "FROM sys.tables o JOIN sys.schemas s ON s.schema_id=o.schema_id "
+            "JOIN sys.indexes i ON i.object_id=o.object_id "
+            "JOIN sys.index_columns ic ON ic.object_id=i.object_id AND ic.index_id=i.index_id "
+            "JOIN sys.columns c ON c.object_id=ic.object_id AND c.column_id=ic.column_id "
+            "WHERE s.name='dbo' AND i.is_disabled=0 AND i.is_hypothetical=0 "
+            "AND ic.is_included_column=0 AND ic.key_ordinal>0 "
+            "ORDER BY o.name,i.name,ic.key_ordinal",
+            None,
+        )
+        cat.tables.update(_text(r[0]).lower() for r in rows)
+        _add_grouped(cat, ((r[0], r[1], r[2], "btree", bool(r[3])) for r in rows))
+    elif vendor == "postgresql":
         scope = "schemaname = ANY (current_schemas(false))"
         for row in executor(f"SELECT tablename FROM pg_tables WHERE {scope}", None):
             cat.tables.add(_text(row[0]).lower())
@@ -509,14 +528,49 @@ _PG_UNUSED = (
 )
 
 
-def unused_indexes(executor: ExplainExecutor) -> list[dict[str, Any]]:
-    """PostgreSQL indexes never scanned since the statistics were reset.
+_MSSQL_UNUSED = (
+    "SELECT TOP (100) s.name, o.name, i.name, "
+    "COALESCE(us.user_seeks, 0) + COALESCE(us.user_scans, 0) "
+    "+ COALESCE(us.user_lookups, 0) AS scans, "
+    "COALESCE((SELECT SUM(ps.used_page_count) FROM sys.dm_db_partition_stats AS ps "
+    "WHERE ps.object_id = o.object_id AND ps.index_id = i.index_id), 0) * 8192 "
+    "FROM sys.indexes AS i "
+    "JOIN sys.tables AS o ON o.object_id = i.object_id "
+    "JOIN sys.schemas AS s ON s.schema_id = o.schema_id "
+    "LEFT JOIN sys.dm_db_index_usage_stats AS us "
+    "ON us.database_id = DB_ID() AND us.object_id = i.object_id AND us.index_id = i.index_id "
+    "WHERE s.name = 'dbo' AND i.index_id > 1 AND i.is_primary_key = 0 "
+    "AND i.is_unique_constraint = 0 AND i.is_unique = 0 AND i.is_hypothetical = 0 "
+    "AND i.is_disabled = 0 "
+    "AND COALESCE(us.user_seeks, 0) + COALESCE(us.user_scans, 0) "
+    "+ COALESCE(us.user_lookups, 0) = 0 "
+    "ORDER BY 5 DESC, s.name, o.name, i.name"
+)
 
-    Primary keys, unique indexes and indexes backing a constraint are excluded.
+
+def unused_indexes(executor: ExplainExecutor, vendor: str = "postgresql") -> list[dict[str, Any]]:
+    """Never-read indexes for PostgreSQL or SQL Server.
+
+    Primary keys, unique indexes and indexes backing a constraint are excluded. SQL Server
+    counters come from ``sys.dm_db_index_usage_stats`` and reset when the instance restarts.
     """
+    if vendor == "mssql":
+        query = _MSSQL_UNUSED
+    elif vendor == "postgresql":
+        query = _PG_UNUSED
+    else:
+        raise ValueError(f"Unused-index analysis is not available for {vendor!r}")
     out = []
-    for row in executor(_PG_UNUSED, None):
+    for row in executor(query, None):
         schema, table, index = _text(row[0]), _text(row[1]), _text(row[2])
+        if vendor == "mssql":
+            drop_sql = (
+                f"DROP INDEX {_quote(index, 'mssql')} ON "
+                f"{_quote(schema, 'mssql')}.{_quote(table, 'mssql')};"
+            )
+        else:
+            drop_sql = f"DROP INDEX {_quote(schema, 'postgresql')}."
+            drop_sql += f"{_quote(index, 'postgresql')};"
         out.append(
             {
                 "schema": schema,
@@ -524,8 +578,7 @@ def unused_indexes(executor: ExplainExecutor) -> list[dict[str, Any]]:
                 "index": index,
                 "scans": int(row[3] or 0),
                 "size_bytes": int(row[4] or 0),
-                "drop_sql": f"DROP INDEX {_quote(schema, 'postgresql')}."
-                f"{_quote(index, 'postgresql')};",
+                "drop_sql": drop_sql,
             }
         )
     return out
@@ -749,7 +802,7 @@ def advise(
     def executor_for(vendor: str) -> ExplainExecutor | None:
         if vendor not in executors:
             ex = None
-            if executor_factory is not None and vendor in _TEXT_KIND:
+            if executor_factory is not None and vendor in (*_TEXT_KIND, "mssql"):
                 try:
                     ex = executor_factory(db, vendor)
                 except Exception:
@@ -800,26 +853,30 @@ def advise(
 
     candidates = select_indexes(queries, limit=limit, verified=verified)
 
-    # unused indexes (PostgreSQL only)
+    # unused indexes (PostgreSQL and SQL Server)
     unused: list[dict[str, Any]] = []
     unused_supported = False
     unused_error: dict[str, str] | None = None
     main_vendor = max(vendors, key=lambda v: vendors[v]) if vendors else None
-    if main_vendor in (None, "postgresql"):
-        ex = executor_for("postgresql")
+    if main_vendor in (None, "postgresql", "mssql"):
+        target = main_vendor or "postgresql"
+        ex = executor_for(target)
         if ex is None:
-            if main_vendor == "postgresql":
+            if main_vendor is not None:
+                source = (
+                    "sys.dm_db_index_usage_stats" if target == "mssql" else "pg_stat_user_indexes"
+                )
                 unused_error = {
                     "code": "explain_unavailable",
-                    "message": f"No database connection for {db!r} (postgresql); unused "
-                    "indexes need pg_stat_user_indexes.",
+                    "message": f"No database connection for {db!r} ({target}); unused "
+                    f"indexes need {source}.",
                 }
         else:
             try:
-                unused = unused_indexes(ex)
+                unused = unused_indexes(ex, target)
                 unused_supported = True
             except Exception as exc:
-                if main_vendor == "postgresql":
+                if main_vendor is not None:
                     unused_error = {
                         "code": "explain_failed",
                         "message": f"{type(exc).__name__}: {exc}",

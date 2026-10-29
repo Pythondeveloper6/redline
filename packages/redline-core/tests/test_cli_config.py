@@ -157,3 +157,30 @@ def test_hash_password_from_stdin(monkeypatch):
     code, out, _ = run("hash-password", "--iterations", "1000")
     assert code == 0 and out.startswith("pbkdf2_sha256$1000$")
     assert verify_password("s3cret", out.strip())
+
+
+def test_doctor_checks_actual_storage_creation(project, monkeypatch):
+    import tempfile
+
+    (project / "redline.toml").write_text('storage_path = "recordings.db"\n')
+
+    def unavailable(*args, **kwargs):
+        raise PermissionError("filesystem refuses creation")
+
+    monkeypatch.setattr("os.access", lambda *args: True)
+    monkeypatch.setattr(tempfile, "TemporaryFile", unavailable)
+    code, out, _ = run("doctor")
+    assert code == 1 and "FAIL  storage" in out
+    assert not (project / "recordings.db").exists()
+
+
+def test_doctor_does_not_modify_existing_storage(project):
+    database = project / "recordings.db"
+    original = b"existing-database-contents"
+    database.write_bytes(original)
+    (project / "redline.toml").write_text('storage_path = "recordings.db"\n')
+    before = set(project.iterdir())
+    code, out, _ = run("doctor")
+    assert code == 0 and "OK    storage" in out
+    assert database.read_bytes() == original
+    assert set(project.iterdir()) == before

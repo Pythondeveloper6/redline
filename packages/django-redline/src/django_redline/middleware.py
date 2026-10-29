@@ -38,6 +38,7 @@ from django.urls import NoReverseMatch, reverse
 from redline_core import ui
 from redline_core.access import RequestInfo
 from redline_core.blocking import track_request
+from redline_core.diagnostics import capture_failure
 from redline_core.recorder import SpanContext, TraceBuilder
 from redline_core.sampling import profile_requested
 
@@ -167,7 +168,7 @@ class RedlineMiddleware:
             request._redline_view_token = begin_request()  # type: ignore[attr-defined]
             return builder
         except Exception:  # Redline must never break the application
-            logger.exception("Redline failed to start a trace")
+            capture_failure("Redline failed to start a trace")
             return None
 
     def _finish(
@@ -193,7 +194,7 @@ class RedlineMiddleware:
                 error = None  # Http404 & co.: handled by Django as a 4xx, not a failure
             if response is None:
                 builder.recorder.finish_trace(
-                    builder, status=500, route=route, view=view, error=exc
+                    builder, status=500, route=route, view=view, error=exc, request_object=request
                 )
                 return
             headers, body, size = _response_parts(response)
@@ -204,6 +205,7 @@ class RedlineMiddleware:
             trace = builder.recorder.finish_trace(
                 builder,
                 status=response.status_code,
+                request_object=request,
                 headers=headers,
                 body=body,
                 size=size,
@@ -219,7 +221,7 @@ class RedlineMiddleware:
             if snippet and trace.tags.get("sampled_by"):
                 _inject(response, snippet)
         except Exception:
-            logger.exception("Redline failed to finish a trace")
+            capture_failure("Redline failed to finish a trace")
 
 
 def _badge_snippet(builder: TraceBuilder, response: HttpResponseBase) -> str | None:

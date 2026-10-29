@@ -49,8 +49,9 @@ from . import sql as sqlmod
 from .callsite import CallsiteCapturer
 from .conf import Settings, resolve_release
 from .detect import Detector, FixSuggester
+from .diagnostics import capture_failure as _capture_failure
 from .model import Callsite, Frame, Framework, LogRecord, Span, SpanKind, Trace, new_id
-from .redact import MASK, Redactor, json_safe
+from .redact import MASK, Redactor
 from .sampling import Sampler
 
 if TYPE_CHECKING:
@@ -72,6 +73,7 @@ __all__ = [
 ]
 
 logger = logging.getLogger("redline")
+
 
 F = TypeVar("F", bound=Callable[..., Any])
 
@@ -102,7 +104,7 @@ class OverflowGroup:
 
     def __init__(self, sample: Span) -> None:
         self.sample = sample  # the first dropped span, for callsite and suggesters
-        self.explainable = bool(sample.data.get("explainable"))
+        self.explainable = bool(sample.data.get("read_query", sample.data.get("explainable")))
         self.count = 0
         self.total_ms = 0.0
         self.max_ms = 0.0
@@ -133,15 +135,20 @@ class TraceBuilder:
         "_parent_token",
         "_token",
         "active",
+        "capture_errors",
+        "capture_limited",
         "client",
+        "connection_errors",
         "dropped_spans",
         "finished",
         "framework",
         "id",
+        "job_outcomes",
         "logs",
         "logs_dropped",
         "max_spans",
         "method",
+        "nested_error",
         "on_finish",
         "orm_instances",
         "overflow",
@@ -154,9 +161,11 @@ class TraceBuilder:
         "req_body",
         "req_headers",
         "req_query",
+        "retained_bytes",
         "rolled",
         "route",
         "spans",
+        "sql_errors",
         "started_at",
         "t0",
         "tags",
@@ -189,11 +198,26 @@ class TraceBuilder:
         self.path_params: Mapping[str, Any] | None = None
         self.route = route
         self.view = view
+        self.nested_error = None
+        self.sql_errors = 0
+        self.connection_errors = 0
         self.req_headers = headers
         self.req_query = query
         self.req_body = body
         self.client = client
-        self.tags: dict[str, str] = {str(k): str(v) for k, v in (tags or {}).items()}
+        self.capture_errors = 0
+        self.capture_limited = False
+        self.retained_bytes = 0
+        self.job_outcomes = {}
+        self.tags: dict[str, str] = {}
+        if type(tags) is dict:
+            from itertools import islice
+
+            for key, value in islice(tags.items(), 100):
+                self.tag(key, value)
+            self.capture_limited |= len(tags) > 100
+        elif tags is not None:
+            self.capture_limited = True
         self.rolled = rolled
         self.active = active
         self.finished = False
@@ -236,7 +260,27 @@ class TraceBuilder:
             self.path_params = params
 
     def tag(self, key: str, value: Any) -> None:
-        self.tags[str(key)] = str(value)
+        from .capture_limits import bounded_value
+
+        if type(key) is not str or len(key) > 128:
+            self.capture_limited = True
+            return
+        if key not in self.tags and len(self.tags) >= 100:
+            self.capture_limited = True
+            return
+        safe, cut = bounded_value(
+            value,
+            max_bytes=self.recorder.settings.max_tag_bytes,
+            max_string_bytes=self.recorder.settings.max_tag_bytes,
+            max_items=20,
+        )
+        text = (
+            safe
+            if type(safe) is str
+            else json.dumps(safe, ensure_ascii=True, separators=(",", ":"))
+        )
+        self.tags[key] = text
+        self.capture_limited |= cut
 
     def elapsed_ms(self) -> float:
         return (_perf() - self.t0) * 1000.0
@@ -276,7 +320,9 @@ class TraceBuilder:
     @property
     def full(self) -> bool:
         """Whether the ``max_spans_per_trace`` cap has been reached."""
-        return bool(self.max_spans) and len(self.spans) >= self.max_spans
+        return (
+            bool(self.max_spans) and len(self.spans) >= self.max_spans
+        ) or self.retained_bytes >= self.recorder.settings.max_trace_bytes
 
     def add(self, span: Span) -> None:
         """Append a finished span (thread-safe).
@@ -285,13 +331,23 @@ class TraceBuilder:
         spans are folded into per-(fingerprint, callsite) :class:`OverflowGroup`
         counters so query totals and N+1 detection stay exact.
         """
+        estimate = (
+            len(json.dumps(span.data, ensure_ascii=True, separators=(",", ":")).encode())
+            + len(span.name.encode())
+            + 2048
+        )
         with self._lock:
+            within_bytes = self.retained_bytes + estimate <= self.recorder.settings.max_trace_bytes
             if span.kind == "sql":
                 self.query_count += 1
                 self.query_ms += span.duration_ms
-            if not self.max_spans or len(self.spans) < self.max_spans or span.kind in _ALWAYS_KEPT:
+            if within_bytes and (
+                not self.max_spans or len(self.spans) < self.max_spans or span.kind in _ALWAYS_KEPT
+            ):
                 self.spans.append(span)
+                self.retained_bytes += estimate
                 return
+            self.capture_limited |= not within_bytes
             self.dropped_spans += 1
             if span.kind != "sql":
                 return
@@ -299,9 +355,10 @@ class TraceBuilder:
             key = (str(span.data.get("fingerprint", "")), loc)
             group = self.overflow.get(key)
             if group is None:
-                if len(self.overflow) >= _MAX_OVERFLOW_GROUPS:
+                if len(self.overflow) >= _MAX_OVERFLOW_GROUPS or not within_bytes:
                     return
                 group = self.overflow[key] = OverflowGroup(span)
+                self.retained_bytes += estimate
             group.add(span.duration_ms, self.recorder.settings.slow_query_ms)
 
 
@@ -319,6 +376,7 @@ class Recorder:
     ) -> None:
         self.settings = settings or Settings()
         self.store = store
+        self.dropped_capture = 0
         self.sampler = Sampler(self.settings, rng) if rng else Sampler(self.settings)
         self.redactor = Redactor(self.settings)
         self.detector = Detector(self.settings, suggesters)
@@ -331,6 +389,10 @@ class Recorder:
             _install_log_capture()
         #: The trace most recently finished by :meth:`recording` (handy in tests).
         self.last_trace: Trace | None = None
+        if self.settings.enabled and self.settings.instrument_engines == "all":
+            from .contrib.sqlalchemy import instrument_all_engines
+
+            instrument_all_engines()
 
     # lifecycle -------------------------------------------------------------
     def should_record(self, path: str) -> bool:
@@ -378,6 +440,11 @@ class Recorder:
         if not active:
             return builder
         _apply_run_header(builder, headers)
+        from .privacy import correlate
+
+        correlation = Trace(builder.id, framework, method, path)
+        correlate(correlation, headers, None, self.settings)
+        builder.tags.update(correlation.tags)
         builder._token = _trace.set(builder)
         builder._parent_token = _parent.set(None)
         if self.sampler.wants_profile(profile_requested):
@@ -388,7 +455,7 @@ class Recorder:
                 prof.start()
                 builder.profiler = prof
             except Exception as exc:  # missing extra, or another profiler running
-                builder.tags["profile_error"] = f"{type(exc).__name__}: {exc}"[:200]
+                builder.tags["profile_error"] = type(exc).__name__
         return builder
 
     def finish_trace(
@@ -403,6 +470,72 @@ class Recorder:
         view: str | None = None,
         error: BaseException | Mapping[str, Any] | None = None,
         path_params: Mapping[str, Any] | None = None,
+        request_object: Any = None,
+    ) -> Trace:
+        """Finish observation without changing the application's result or exception."""
+        try:
+            return self._finish_trace(
+                builder,
+                status=status,
+                headers=headers,
+                body=body,
+                size=size,
+                route=route,
+                view=view,
+                error=error,
+                path_params=path_params,
+                request_object=request_object,
+            )
+        except Exception:
+            _capture_failure("Redline failed to finish observation")
+            builder.finished = True
+            _reset(builder)
+            if builder.profiler is not None:
+                try:
+                    builder.profiler.stop("[capture-unavailable]")
+                except Exception:
+                    pass
+            from .trace_safety import enforce_trace_limits, minimal_trace
+
+            seed = Trace(builder.id, builder.framework, builder.method, "")
+            seed.status = status if type(status) is int else 0
+            seed.started_at = builder.started_at
+            seed.query_count = builder.query_count
+            seed.query_ms = builder.query_ms
+            seed.tags = {
+                key: str(getattr(builder, key))
+                for key in ("sql_errors", "connection_errors")
+                if getattr(builder, key)
+            }
+            trace = minimal_trace(seed, "capture_failure")
+            self.dropped_capture += 1
+            if builder.active:
+                from .testing import active_capture
+
+                capture = active_capture()
+                if capture is not None:
+                    capture[1].append(trace)
+                safe = enforce_trace_limits(trace, self.settings)
+                if safe is not None and self.store is not None:
+                    try:
+                        self.store.save(safe)
+                    except Exception:
+                        _capture_failure("Redline failed to enqueue failure metadata")
+            return trace
+
+    def _finish_trace(
+        self,
+        builder: TraceBuilder,
+        *,
+        status: int,
+        headers: Any = None,
+        body: bytes | str | None = None,
+        size: int | None = None,
+        route: str | None = None,
+        view: str | None = None,
+        error: BaseException | Mapping[str, Any] | None = None,
+        path_params: Mapping[str, Any] | None = None,
+        request_object: Any = None,
     ) -> Trace:
         """Stop recording and return the finished trace (stored if sampling keeps it).
 
@@ -410,13 +543,20 @@ class Recorder:
         unhandled exception, if any. ``path_params`` are the route's parameters: values of
         secret-looking ones are masked in the stored path (:meth:`Redactor.path`).
         """
+        if request_object is not None:
+            from .privacy import resolve_user
+
+            resolve_user(builder, request_object)
         if builder.on_finish:
             for callback in builder.on_finish:
                 try:
                     callback(builder)
                 except Exception:  # a hook must never break the response
-                    logger.exception("Redline finish hook failed")
+                    _capture_failure("Redline finish hook failed")
             builder.on_finish = None
+        error = error or builder.nested_error
+        if builder.tags.get("nested.framework"):
+            route, view = builder.route, builder.view
         end = _perf()
         builder.finished = True
         _reset(builder)
@@ -426,7 +566,8 @@ class Recorder:
                 builder.path, builder.path_params, resolved=builder.route is not None
             )
         except Exception:  # pragma: no cover - defensive
-            logger.exception("Redline failed to redact the path")
+            # Returning application paths after a privacy failure is unsafe.
+            raise
         profile = None
         if builder.profiler is not None:
             title = f"{builder.method} {builder.route or builder.path}"
@@ -435,7 +576,7 @@ class Recorder:
             try:
                 profile = builder.profiler.stop(title)
             except Exception as exc:  # pragma: no cover - defensive
-                builder.tags["profile_error"] = f"{type(exc).__name__}: {exc}"[:200]
+                builder.tags["profile_error"] = type(exc).__name__
         duration = (end - builder.t0) * 1000.0
         trace = Trace(
             id=builder.id,
@@ -449,9 +590,28 @@ class Recorder:
             duration_ms=round(duration, 3),
             tags=dict(builder.tags),
             profile=profile,
-            error=_error_dict(error, self.redactor),
+            error=_error_dict(
+                error, self.redactor, capture_details=self.settings.capture_error_details
+            ),
             release=self.release,
         )
+        for key in ("sql_errors", "connection_errors"):
+            count = getattr(builder, key, 0)
+            if count:
+                trace.tags[key] = str(count)
+            else:
+                trace.tags.pop(key, None)
+        if isinstance(error, BaseException) and trace.error:
+            tb = error.__traceback__
+            while tb is not None:
+                file = self.capturer.classify(tb.tb_frame.f_code.co_filename)
+                if file is not None:
+                    trace.error["origin"] = {
+                        "file": file,
+                        "line": tb.tb_lineno,
+                        "function": tb.tb_frame.f_code.co_name,
+                    }
+                tb = tb.tb_next
         if not builder.active:
             return trace
         with builder._lock:
@@ -463,17 +623,34 @@ class Recorder:
             trace.query_count = builder.query_count
             trace.query_ms = round(builder.query_ms, 3)
             overflow = list(builder.overflow.values())
+            if builder.capture_limited or builder.capture_errors:
+                trace.truncated = {
+                    "capture_limits": builder.capture_limited,
+                    "capture_errors": builder.capture_errors,
+                    "incomplete_evidence": True,
+                }
             if builder.dropped_spans:
                 trace.truncated = {
+                    **(trace.truncated or {}),
                     "dropped_spans": builder.dropped_spans,
                     "max_spans": builder.max_spans,
                 }
+        if trace.status >= 400 and any(
+            s.kind == "transaction" and s.data.get("outcome") == "commit" for s in spans
+        ):
+            trace.tags["commit_observed_before_failure"] = "true"
         trace.spans = spans
+        from .privacy import correlate
+
+        correlate(trace, builder.req_headers, headers, self.settings)
         reason = self.sampler.keep(
             rolled=builder.rolled,
             status=trace.status,
             duration_ms=duration,
-            error=trace.error is not None,
+            error=trace.error is not None
+            or bool(trace.tags.get("sql_errors"))
+            or bool(trace.tags.get("connection_errors"))
+            or any(s.data.get("error") for s in spans if s.kind == "sql"),
             # an explicitly profiled request is kept even when the profiler caught no
             # sample (a very fast request), so the keep rule does not depend on timing
             profiled=builder.profiler is not None,
@@ -484,6 +661,7 @@ class Recorder:
         )
         from .testing import active_capture
 
+        self._persist_lifecycle()
         capture = active_capture()
         if capture is not None:
             reason = reason or "test"
@@ -498,27 +676,76 @@ class Recorder:
         if (
             isinstance(error, BaseException)
             and self.settings.capture_locals
+            and self.settings.capture_error_details
             and self.settings.feature("locals")
             and trace.error
         ):
             try:
                 trace.error["frames"] = self._error_frames(error)
             except Exception:  # never let analysis break the response
-                logger.exception("Redline failed to capture exception locals")
+                _capture_failure("Redline failed to capture exception locals")
+        from .trace_safety import enforce_trace_limits, minimal_trace
+
         try:
             trace.request = self._request_dict(builder)
             trace.response = self._response_dict(headers, body, size)
-            trace.issues = self.detector.detect(trace, overflow=overflow)
-        except Exception:  # never let analysis break the response
-            logger.exception("Redline failed to analyse trace %s", trace.id)
+            from .privacy import sanitize_trace
+
+            sanitize_trace(trace, self.settings)
+        except Exception:
+            _capture_failure("Redline privacy processing failed")
+            trace = minimal_trace(trace, "privacy_failure")
+        else:
+            try:
+                trace.issues = self.detector.detect(trace, overflow=overflow)
+            except Exception:
+                _capture_failure("Redline analysis failed")
+                trace.issues = []
+                trace.truncated = {
+                    **(trace.truncated or {}),
+                    "incomplete_evidence": True,
+                    "analysis_failed": True,
+                }
+            try:
+                from .privacy import scrub_issue_sources
+
+                scrub_issue_sources(trace, self.settings)
+            except Exception:
+                _capture_failure("Redline issue privacy processing failed")
+                trace = minimal_trace(trace, "privacy_failure")
+        safe = enforce_trace_limits(trace, self.settings)
+        if safe is None:
+            safe = minimal_trace(trace, "capture_failure")
+            self.dropped_capture += 1
+            if capture is not None:
+                capture[1].append(safe)
+            return safe
+        trace = safe
         if capture is not None:
             capture[1].append(trace)
         if self.store is not None:
             try:
                 self.store.save(trace)
             except Exception:
-                logger.exception("Redline failed to enqueue trace %s", trace.id)
+                self.dropped_capture += 1
+                _capture_failure("Redline failed to enqueue recording")
         return trace
+
+    def _persist_lifecycle(self) -> None:
+        """Flush bounded process gauges when the store supports persisted history."""
+        if self.store is None:
+            return
+        record = getattr(self.store, "record_lifecycle", None)
+        if not callable(record):
+            return
+        try:
+            from .connection_health import snapshot
+
+            metrics = snapshot()
+            if metrics:
+                record(metrics, release=self.settings.release)
+        except Exception:
+            _capture_failure("Redline failed to persist connection lifecycle metrics")
 
     @contextmanager
     def recording(self, **fields: Any) -> Iterator[TraceBuilder]:
@@ -718,6 +945,14 @@ def _capture(builder: TraceBuilder, record: logging.LogRecord) -> None:
         message = record.getMessage()
     except Exception:
         message = str(record.msg)
+    from fnmatch import fnmatchcase
+
+    if recorder.settings.capture_loggers and not any(
+        fnmatchcase(record.name, p) for p in recorder.settings.capture_loggers
+    ):
+        return
+    if any(fnmatchcase(record.name, p) for p in recorder.settings.ignore_loggers):
+        return
     message = recorder.redactor.text(message[:20_000])[:_MAX_LOG_CHARS]
     entry = LogRecord(
         t_ms=round(builder.elapsed_ms(), 3),
@@ -804,13 +1039,15 @@ def configure(
     """Install the process-wide default :class:`Recorder` and return it."""
     global _default
     with _default_lock:
-        _uninstall_log_capture()  # the new recorder re-installs it if it wants logs
         _default = Recorder(settings, store, suggesters)
     return _default
 
 
 def get_recorder() -> Recorder:
     """The default recorder (a storage-less one is created if none was configured)."""
+    active = _trace.get()
+    if active is not None and active.active and not active.finished:
+        return active.recorder
     global _default
     if _default is None:
         with _default_lock:
@@ -849,8 +1086,27 @@ def record_span(
     builder = _trace.get()
     if builder is None or builder.finished:
         return None
-    if data is None:
-        data = {}
+    from .capture_limits import bounded_value
+
+    data, cut = bounded_value(
+        data if data is not None else {},
+        max_bytes=builder.recorder.settings.max_span_data_bytes,
+        max_items=200,
+        max_string_bytes=builder.recorder.settings.max_sql_bytes,
+    )
+    if type(data) is not dict:
+        data, cut = {}, True
+    if type(name) is str and len(name) <= 120 and name.isascii():
+        name_cut = False
+    else:
+        name, name_cut = bounded_value(name, max_bytes=2048, max_string_bytes=1024)
+    if type(name) is not str:
+        name, name_cut = "[unavailable]", True
+    if cut or name_cut:
+        builder.capture_limited = True
+        data["capture_incomplete"] = True
+        if kind == "sql":
+            data.update(explainable=False, params_captured=False, params=None)
     if kind == "sql":
         raw = data.get("sql", "")
         data.setdefault("fingerprint", sqlmod.fingerprint(raw))
@@ -892,25 +1148,65 @@ def record_query(
     if builder is None or builder.finished:
         return None
     redactor = builder.recorder.redactor
-    if builder.full:  # the span will only be counted, so skip the redaction work
-        safe: Any = None
-    elif many and isinstance(params, (list, tuple)):
-        safe = [redactor.sql_params(sql, row) for row in list(params)[:_MAX_MANY_ROWS]]
+    settings = builder.recorder.settings
+    truncated_sql = type(sql) is not str
+    if type(sql) is not str:
+        sql = "UNKNOWN"
+    if len(sql) > settings.max_sql_bytes // 4:
+        prefix = sql[: settings.max_sql_bytes].encode("utf-8", errors="replace")
+        limited_sql = prefix[: settings.max_sql_bytes].decode("utf-8", errors="ignore")
+        truncated_sql |= limited_sql != sql
+        sql = limited_sql
+    policy = settings.capture_sql_params
+    masked = policy is False or (policy == "reads_only" and not sqlmod.is_explainable(sql))
+    if masked:
+        sql = sqlmod.fingerprint(sql)
+        params = None
+    incomplete_params = False
+    if builder.full or masked:
+        safe = None
+    elif many and type(params) in (list, tuple):
+        safe = []
+        for row in params[:_MAX_MANY_ROWS]:
+            shown, cut = redactor.bounded_sql_params(
+                sql, row, max_bytes=settings.max_span_data_bytes // 10
+            )
+            safe.append(shown)
+            incomplete_params |= cut
+        incomplete_params |= len(params) > _MAX_MANY_ROWS
     else:
-        safe = redactor.sql_params(sql, params)
+        safe, incomplete_params = redactor.bounded_sql_params(
+            sql, params, max_bytes=settings.max_span_data_bytes
+        )
+    if truncated_sql or incomplete_params:
+        builder.capture_limited = True
+    from .vendors import get_vendor
+
     fp = sqlmod.fingerprint(sql)
     data = {
         "sql": sql,
         "params": safe,
         "fingerprint": fp,
         "db_alias": db_alias,
-        "vendor": vendor if vendor in ("postgresql", "mysql", "sqlite") else "other",
+        "vendor": get_vendor(vendor).name,
         "rows": rows,
         "many": many,
-        "explainable": (not many) and sqlmod.is_explainable(sql),
+        "explainable": (not many)
+        and not masked
+        and not truncated_sql
+        and not incomplete_params
+        and sqlmod.is_explainable(sql),
+        "params_captured": not masked and not incomplete_params,
+        "sql_truncated": truncated_sql,
+        "capture_incomplete": truncated_sql or incomplete_params,
+        "read_query": sqlmod.is_explainable(sql),
         "has_limit": sqlmod.has_limit(sql),
     }
     callsite = builder.recorder.capturer.capture(skip=2) if capture_callsite else None
+    if masked and callsite is not None:
+        from dataclasses import replace
+
+        callsite = replace(callsite, code=None)
     return record_span(
         "sql",
         sqlmod.truncate_name(fp),
@@ -965,21 +1261,46 @@ class SpanContext:
             _parent.reset(self._token)
         except ValueError:  # exited in a different context than entered
             _parent.set(self._prev)
-        data = {k: json_safe(v) for k, v in self.data.items()}
-        if exc_type is not None:
-            data["error"] = getattr(exc_type, "__name__", str(exc_type))
-        builder.add(
-            Span(
-                id=self._id,
-                parent_id=self._prev,
-                kind=self.kind,
-                name=self.name or "span",
-                start_ms=round(max(0.0, (self._start - builder.t0) * 1000.0), 3),
-                duration_ms=round((end - self._start) * 1000.0, 3),
-                callsite=None,
-                data=data,
+        try:
+            from .capture_limits import bounded_value
+
+            data, cut = bounded_value(
+                self.data,
+                max_bytes=builder.recorder.settings.max_span_data_bytes,
+                max_items=200,
+                max_string_bytes=builder.recorder.settings.max_sql_bytes,
             )
-        )
+            if type(data) is not dict:
+                data, cut = {}, True
+            name, name_cut = bounded_value(
+                self.name if self.name is not None else "span",
+                max_bytes=2048,
+                max_string_bytes=1024,
+            )
+            if type(name) is not str:
+                name, name_cut = "[unavailable]", True
+            if cut or name_cut:
+                builder.capture_limited = True
+                data["capture_incomplete"] = True
+                if self.kind == "sql":
+                    data.update(explainable=False, params_captured=False, params=None)
+            if exc_type is not None:
+                data["error"] = exc_type.__name__
+            builder.add(
+                Span(
+                    id=self._id,
+                    parent_id=self._prev,
+                    kind=self.kind,
+                    name=name,
+                    start_ms=round(max(0.0, (self._start - builder.t0) * 1000.0), 3),
+                    duration_ms=round((end - self._start) * 1000.0, 3),
+                    callsite=None,
+                    data=data,
+                )
+            )
+        except Exception:
+            builder.capture_errors += 1
+            _capture_failure("Redline custom span capture failed")
 
     async def __aenter__(self) -> SpanContext:
         return self.__enter__()
@@ -1121,13 +1442,23 @@ def _apply_check_header(builder: TraceBuilder, value: Any) -> None:
 
 
 def _error_dict(
-    error: BaseException | Mapping[str, Any] | None, redactor: Redactor
+    error: BaseException | Mapping[str, Any] | None,
+    redactor: Redactor,
+    *,
+    capture_details: bool = True,
 ) -> dict[str, Any] | None:
     """The stored ``Trace.error``: the message and the formatted traceback (chained
     exceptions included) go through :meth:`Redactor.text` – URL passwords, secret query
     values, ``key=value`` secrets, JWTs and card numbers are masked."""
     if error is None:
         return None
+    if not capture_details:
+        name = error.get("type", "Error") if isinstance(error, Mapping) else type(error).__name__
+        return {
+            "type": name[:200] if isinstance(name, str) else "Error",
+            "message": "[not captured]",
+            "traceback": "",
+        }
     if isinstance(error, Mapping):
         return {
             str(k): redactor.text(v) if isinstance(v, str) and k != "type" else v

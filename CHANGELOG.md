@@ -8,7 +8,57 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). While the
 version is below `1.0` the public API may change between minor versions.
 
-## Unreleased: 0.3.0a1
+## Unreleased: 0.4.0a1
+
+### Added
+
+- SQL failure recordings and issue groups, raw rowcounts, comment-placeholder findings,
+  connection lifecycle evidence and observed session-state checks for SQL Server isolation,
+  `IDENTITY_INSERT`, value switches, session context and PostgreSQL/MySQL session state.
+  A SQL retry-storm finding groups repeated attempts after a transient failure, and
+  lifecycle gauges persist in hourly history even when sampling drops the trace.
+- SQL Server identity, estimated/opt-in actual XML plan collection, logical-read summaries
+  and bounded catalog inspection. Live driver validation remains required.
+- Offline `redline check-sql`, explicit online compilation and schema snapshots, bounded
+  store auditing, import checks and explicit sanitized OTLP export of SQL spans and issue
+  log records. SQL Server
+  online checks use server-described parameter types and result columns under NOEXEC, and
+  flag literal row reads the described SELECT no longer returns. Snapshots include SQL
+  Server triggers and routine parameters, and schema drift recompiles only statements that
+  reference affected tables. `redline schema-watch` polls the comparison, writes a baseline
+  on its first run and can persist a `schema_drift` issue without running migrations.
+  Unused-index analysis covers SQL Server's usage DMV, and repeated raw `text()` SQL gets a
+  batching hint when no ORM relationship matches.
+- `redline doctor` now runs a real WAL self-test beside the store and warns on Linux
+  network/virtual mounts; two independent OS processes are tested writing one SQLite file.
+  The SQLAlchemy query path avoids repeated bounding/classification work on ordinary rows.
+- The overhead benchmark has an `mssql` cell driven through a fake pyodbc-shaped DBAPI.
+- `redline check-imports` follows statically visible imports inside task functions after
+  loading each task module, and `redline check compare/run --ruff` includes Ruff JSON in
+  Markdown and JUnit without becoming a linter.
+- Generic jobs/stages/row outcomes, optional Celery signals, retry outcomes and commit-before-
+  failure evidence; Jobs, SQL checker and redaction-preview UI surfaces. Jobs record the
+  first failing stage and `GET api/jobs/summary` aggregates outcome, latency and stage
+  counts for retained task recordings.
+- Shared-dev defaults, SQL value capture policies, privacy profiles and route rules,
+  log filters, user/request correlation, read-only secondary trace browsing and nested
+  Flask/FastAPI recording.
+- pytest SQL-error/session-state assertions and `--redline-all`.
+
+### Changed
+
+- Failed SQL attempts remain visible even when application code catches the exception.
+- SQL observers preserve application results and original errors when capture fails;
+  recorder ownership isolates engines shared by several applications.
+- Bounded SQL/parameters, span data, tags and complete trace payloads; production capture
+  uses smaller budgets, value-free diagnostics and safe metadata on privacy failure.
+- Duplicate trace IDs across secondary stores are marked and cannot select unrelated evidence.
+- Routine CI and docs deploy only after pushes/merges to main; no PR-triggered runs.
+- All five distributions move together to 0.4.0a1. See Real-world workflows for support
+  boundaries and the local validation report before publishing.
+
+## 0.3.0a1
+
 
 The refactor check: prove a refactor is safe and measure what it gained. A 0.2 store is
 migrated in place to schema version 4 when 0.3 first opens it.

@@ -37,6 +37,8 @@ from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlsplit
 
+from redline_core.diagnostics import capture_failure
+
 from . import __version__, ui
 from .access import is_local_host, route_policy
 from .conf import FEATURES, Settings, editor_url_template, resolve_release
@@ -44,7 +46,7 @@ from .explain import ExplainError, ExplainExecutor, run_explain
 from .index_advisor import advise
 from .model import ISSUE_KINDS, Trace
 from .profiler import is_available as profiler_available
-from .storage.base import FilterError, Filters, Store, parse_period, parse_window
+from .storage.base import FilterError, Filters, Store, parse_period, parse_window, percentile
 from .storage.derive import fingerprint_key
 
 __all__ = [
@@ -217,7 +219,7 @@ class RedlineAPI:
         except (_NotSupported, NotImplementedError) as exc:
             return error(501, "not_supported", str(exc) or "This store does not support it.")
         except Exception as exc:  # the profiler UI must never take the app down
-            logger.exception("Redline API error on %s %s", method, path)
+            capture_failure("Redline API processing failed")
             return error(500, "internal_error", f"{type(exc).__name__}: {exc}")
 
     def _route(
@@ -243,6 +245,8 @@ class RedlineAPI:
             "api/history": self.history,
             "api/history/compare": self.history_compare,
             "api/releases": self.releases,
+            "api/lifecycle": self.lifecycle,
+            "api/jobs/summary": self.job_summary,
         }
         if path in get_routes:
             return get_routes[path](params) if method == "GET" else _not_allowed()
@@ -495,9 +499,25 @@ class RedlineAPI:
         trace = self.store.get(trace_id, include_profile=False)
         if trace is None:
             return error(404, "trace_not_found", f"No trace {trace_id!r}.")
+        if trace.tags.get("secondary_store"):
+            return error(
+                403,
+                "secondary_store",
+                (
+                    "Open EXPLAIN in the worker’s own Redline instance; this UI cannot "
+                    "verify its database binding."
+                ),
+            )
         span = trace.span(span_id)
         if span is None:
             return error(404, "span_not_found", f"No span {span_id!r} in trace {trace_id!r}.")
+        if span.data.get("auto_engine"):
+            return error(
+                501,
+                "unregistered_engine",
+                "Register this engine with the application before database inspection; "
+                "its recorded alias is observation-only.",
+            )
         if span.kind != "sql" or not span.data.get("explainable"):
             return error(
                 400, "not_explainable", "Only single read-only SELECT queries can be explained."
@@ -690,6 +710,84 @@ class RedlineAPI:
         except FilterError as exc:
             return error(400, "invalid_window", str(exc))
         return 200, {"items": [e.to_dict() for e in self._ext("external_stats")(window)]}
+
+    def lifecycle(self, params: Mapping[str, Any]) -> Response:
+        try:
+            window = parse_window(_str_param(params, "window"))
+            limit = _int_param(params, "limit", 200, lo=1, hi=500)
+        except FilterError as exc:
+            return error(400, "invalid_window", str(exc))
+        items = self._ext("lifecycle")(window, limit)
+        return 200, {"items": items, "window": window}
+
+    def job_summary(self, params: Mapping[str, Any]) -> Response:
+        """Outcome distribution and first failing stage for retained task recordings."""
+        try:
+            window = parse_window(_str_param(params, "window"))
+            limit = _int_param(params, "limit", 200, lo=1, hi=500)
+        except FilterError as exc:
+            return error(400, "invalid_window", str(exc))
+        page = self.store.list(
+            Filters(method="TASK", since=time.time() - window),
+            limit=limit,
+        )
+        jobs: dict[str, dict[str, Any]] = {}
+        totals: dict[str, int] = {}
+        stages: dict[str, int] = {}
+        unattributed = 0
+        for item in page.items:
+            tags = item.get("tags") or {}
+            name = str(tags.get("job.name") or item.get("path") or "(unknown)")
+            outcome = str(tags.get("job.outcome") or "unknown")
+            row = jobs.setdefault(
+                name,
+                {
+                    "name": name,
+                    "queue": str(tags.get("job.queue") or "unknown"),
+                    "total": 0,
+                    "outcomes": {},
+                    "first_failing_stages": {},
+                    "durations": [],
+                    "last_started_at": 0.0,
+                },
+            )
+            row["total"] += 1
+            row["outcomes"][outcome] = row["outcomes"].get(outcome, 0) + 1
+            row["durations"].append(float(item.get("duration_ms") or 0.0))
+            row["last_started_at"] = max(
+                row["last_started_at"], float(item.get("started_at") or 0.0)
+            )
+            totals[outcome] = totals.get(outcome, 0) + 1
+            if outcome == "failed":
+                stage = tags.get("job.first_failing_stage")
+                if stage:
+                    row["first_failing_stages"][stage] = (
+                        row["first_failing_stages"].get(stage, 0) + 1
+                    )
+                    stages[str(stage)] = stages.get(str(stage), 0) + 1
+                else:
+                    unattributed += 1
+        result = []
+        for row in jobs.values():
+            durations = sorted(row.pop("durations"))
+            row["p50_ms"] = round(percentile(durations, 50), 3)
+            row["p95_ms"] = round(percentile(durations, 95), 3)
+            result.append(row)
+        result.sort(key=lambda job: (-job["total"], job["name"]))
+        return 200, {
+            "window": window,
+            "sampled": len(page.items),
+            "total": page.total,
+            "truncated": page.total > len(page.items),
+            "outcomes": dict(sorted(totals.items())),
+            "first_failing_stages": dict(sorted(stages.items(), key=lambda kv: -kv[1])),
+            "unattributed_failures": unattributed,
+            "jobs": result,
+            "limitation": (
+                "Only retained task recordings inside the window; missing jobs do not "
+                "prove no jobs ran. Stage names are bounded labels, not arguments."
+            ),
+        }
 
     def history(self, params: Mapping[str, Any]) -> Response:
         try:

@@ -170,3 +170,30 @@ def test_len_of_core_result_gets_hint_only(tracer, engine):
     assert n == 250
     assert issue.suggestion.diff is None
     assert "func.count()" in issue.suggestion.summary
+
+
+def test_raw_text_n_plus_one_gets_a_batching_hint():
+    from redline_core.model import Callsite, Issue
+
+    from ..conftest import sql_span
+
+    callsite = Callsite(
+        file="shop/raw.py",
+        line=7,
+        function="list_books",
+        code='session.execute(text("SELECT * FROM books WHERE author_id = :id"), {"id": i})',
+        stack=(),
+    )
+    spans = [
+        sql_span("SELECT * FROM books WHERE author_id = ?", [i], callsite=callsite)
+        for i in range(5)
+    ]
+    issue = Issue(
+        id="n1", kind="n_plus_one", severity="warning", title="t", detail="d", callsite=callsite
+    )
+    suggestion = SQLAlchemyFixSuggester(Base, project_root=TESTS).suggest(issue, spans)
+    assert suggestion is not None
+    assert "Batch the repeated SELECT on books.author_id" in suggestion.summary
+    assert "raw SQL" in suggestion.summary
+    assert 'bindparam("ids", expanding=True)' in suggestion.code
+    assert suggestion.confidence == "medium" and suggestion.diff is None

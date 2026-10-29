@@ -204,6 +204,11 @@ class RedlineMiddleware:
             try:
                 recorder.finish_trace(
                     builder,
+                    request_object=__import__("starlette.requests", fromlist=["Request"]).Request(
+                        scope
+                    )
+                    if recorder.settings.user_resolver
+                    else None,
                     status=status,
                     headers=resp_headers,
                     body=body,

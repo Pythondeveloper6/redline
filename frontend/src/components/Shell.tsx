@@ -52,6 +52,7 @@ const PRIMARY = [
   { to: '/issues', label: 'Issues' }, { to: '/database', label: 'Database' },
 ]
 const MORE = [
+  { to: '/jobs', label: 'Jobs', hint: 'Worker and import recordings' },
   { to: '/cache', label: 'Cache', hint: 'Hit rates, stampedes' }, { to: '/external', label: 'External', hint: 'Outbound HTTP' },
   { to: '/history', label: 'History', hint: 'Trends and releases' }, { to: '/load', label: 'Load', hint: 'Load runs' },
   { to: '/checks', label: 'Checks', hint: 'Refactor safety checks' },

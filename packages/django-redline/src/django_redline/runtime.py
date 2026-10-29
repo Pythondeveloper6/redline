@@ -22,6 +22,7 @@ from redline_core.access import Access
 from redline_core.api import RedlineAPI
 from redline_core.conf import Settings, SettingsError
 from redline_core.config import ResolvedConfig
+from redline_core.diagnostics import capture_failure
 from redline_core.recorder import Recorder, configure
 from redline_core.storage import Store
 
@@ -54,7 +55,7 @@ class Runtime:
         try:
             self.store.close()
         except Exception:  # pragma: no cover - defensive
-            logger.exception("Redline failed to close its store")
+            capture_failure("Redline failed to close its store")
 
 
 _runtime: Runtime | None = None

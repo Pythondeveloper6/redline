@@ -23,14 +23,14 @@ load at it and see what breaks first.</p>
 ![The N+1 issue of the Django demo shop in Redline: 30 queries from one line, with a prefetch_related diff](assets/screenshots/django-n-plus-one-light.png){ .rl-shot .rl-only-light }
 ![The N+1 issue of the Django demo shop in Redline, dark theme](assets/screenshots/django-n-plus-one-dark.png){ .rl-shot .rl-only-dark }
 
-!!! warning "Alpha: `0.2.0a1`, install from GitHub"
+!!! warning "Alpha: 0.4 development release"
 
-    Redline is working and tested, but the API may still move and it is **not on PyPI
-    yet**: install it from the GitHub repository (see
-    [Getting started](getting-started.md#install)). See the
-    [FAQ](faq.md#how-finished-is-this) for an honest account of what is and is not done.
-    Use it in development and staging first, and read [Production](production.md) before
-    pointing it at real traffic.
+    This checkout contains the next release's features; PyPI can contain an earlier
+    version. See [Getting started](getting-started.md#install) for published and local
+    workspace installs. APIs and settings can change. Start with development/staging,
+    and use the deployment-specific [production validation gate](production.md) before
+    recording real traffic.
+
 
 ## Install in a minute
 
@@ -132,8 +132,9 @@ load at it and see what breaks first.</p>
 That is the whole setup. Traces go to their own SQLite file (`.redline/redline.db`), never to
 your application database.
 
-Both packages are named in each command because Redline is not on PyPI: the adapter pins
-`redline-core`, and pip cannot fetch it from anywhere unless you name it too.
+The source-install commands name adapter and core together to keep their exact-version
+pin aligned. Published prereleases can instead be installed with `pip install --pre`
+and the framework adapter name. For unreleased features, use the matching local workspace.
 [Details](getting-started.md#install).
 
 ## What you get

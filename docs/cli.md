@@ -77,6 +77,7 @@ redline check show    REPORT.json       print a saved report again
 | `--junit OUT` | compare, run | Write JUnit XML, one test case per request |
 | `--fail-on LIST` | compare, run, show | Verdicts that make the exit code `1`: any of `slower`, `changed`, `broken`, `missing`, `noisy`, `faster`, or `none`. Default `slower,changed,broken,missing` |
 | `--slower-pct X`, `--slower-ms Y` | compare, run | Override `thresholds.slower_pct` and `thresholds.slower_ms` for this run |
+| `--ruff [PATH]` | compare, run, show | Include Ruff JSON from `PATH`; with no path run `ruff check --select F --output-format json`. Findings appear in the Markdown and JUnit outputs and make the exit code `1` |
 | `--no-color` | compare, run, show | No ANSI colours |
 
 `redline check init` takes `--from-traces` (required), `--store PATH`, `--route PATTERN`
@@ -90,7 +91,10 @@ a `${env:REDLINE_CHECK_AUTHORIZATION}` or `${env:REDLINE_CHECK_COOKIE}` placehol
 
 `redline check show` takes the report JSON and prints it again; `--markdown OUT` and
 `--junit OUT` write those files from it. It exits `0` unless `--fail-on` is given; with
-`--fail-on` it exits `1` when a request matches it, as `compare` does.
+`--fail-on` it exits `1` when a request matches it, as `compare` does. `--ruff` attaches a
+Ruff result to the report (or re-runs `ruff check --select F`); any finding, or a failure to
+read the result, makes `compare`/`run` exit `1`. Redline is not a linter: it only carries
+Ruff's JSON into the same report.
 
 ```bash
 redline check init --from-traces --route '/orders*' -o checks/orders.toml
@@ -125,13 +129,20 @@ See [Configuration](configuration.md).
 
 ### `redline doctor`
 
+The storage check creates and removes its own temporary probe in the nearest existing
+parent directory. It does not write to or initialize the configured database. This
+checks actual filesystem behavior rather than permission bits alone, which can be
+misleading under root or on special/read-only mounts.
+
 Checks that the setup is sound. Each line is `OK`, `WARN` or `FAIL`; the command exits `1`
 if any check fails or the configuration does not load, and `0` otherwise (warnings do not
 fail it). It takes `--json` and `--project-root DIR` like `redline config`.
 
 | Check | Looks at |
 |---|---|
-| `storage` | the store path exists or can be created, and is writable |
+| `storage` | a temporary file can actually be created/written in the nearest existing parent; an existing store can be opened for writing without truncation |
+| `storage WAL` | a throwaway SQLite database beside the store really accepts `PRAGMA journal_mode=WAL`; failure is a hard error because a writable store refuses non-WAL |
+| `filesystem` | on Linux, the mount type from `/proc/self/mountinfo`; `nfs`, `cifs`, `9p`, `virtiofs`, `fuse` and similar mounts warn that WAL may not be reliable |
 | `ui bundle` | the prebuilt UI is present in `redline-core` |
 | `access` | `open` fails (warns when `REDLINE_ALLOW_OPEN=1` is set); `access` not set in the file or environment warns (FastAPI, Flask and Litestar answer `404` outside debug mode unless the app sets it in code); `trust_unix_socket` warns; `local` outside the `dev` preset warns, because behind a proxy nobody can reach Redline |
 | `token` | shorter than 24 characters (warn), an unreadable `token_file` (fail), a `token_file` readable by other users (warn) |

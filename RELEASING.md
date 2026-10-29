@@ -1,142 +1,174 @@
 # Releasing
 
-How a version of Redline gets from this repository to PyPI. Five distributions are
-released in lockstep from one tag: `redline-core`, `django-redline`, `fastapi-redline`,
-`flask-redline` and `litestar-redline`. They always share one version, and every adapter
-pins `redline-core==<that version>`.
+The five distributions share one version: `redline-core`, `django-redline`,
+`fastapi-redline`, `flask-redline` and `litestar-redline`. Each adapter pins the exact
+core version. `.github/workflows/release.yml` builds the commit that passed CI on
+`main`; publishing uses PyPI Trusted Publishing without an API token.
 
-Publishing uses **PyPI Trusted Publishing** from `.github/workflows/release.yml`. No API
-token exists anywhere, and none should be created.
+## Full-stack qualification before the final merge
 
----
+Keep all work on the single release branch and run the shared disposable test project:
 
-## Once, before the first release
+```bash
+docker compose -f examples/compose.yaml up --build \
+  --abort-on-container-exit --exit-code-from tests tests
+```
 
-1. **Check the names are still free.** Each of these should be a 404 on
-   <https://pypi.org/project/NAME/>: `redline-core`, `django-redline`, `fastapi-redline`,
-   `flask-redline`, `litestar-redline`. If one is taken, stop: renaming touches that
-   package's `pyproject.toml`, the pins in the adapters, and the README install lines.
+Require exit zero and a current `examples/testing/results/summary.json` with
+`qualified: true`. Keep its logs/JUnit/screenshots for review. Configuration parsing or
+collecting the tests does not qualify a release. This stack includes the previously
+socket-dependent tests, live PostgreSQL/MySQL/SQL Server, Redis/Celery prefork and browser
+flows. See [the full test-project guide](examples/testing/README.md), including native
+Linux amd64 SQL Server requirements. Complete deployment-specific checks in addition.
+After validation, use one final merge into `main` and one coordinated release of all five
+packages. Do not split features into separate releases to work around a failed test.
 
-2. **Register a pending publisher for each of the five projects**, on
-   <https://pypi.org/manage/account/publishing/> and again on
-   <https://test.pypi.org/manage/account/publishing/>. That is ten registrations. For
-   every one, Owner is `Pythondeveloper6`, Repository name is `redline`, Workflow name is
-   `release.yml`; only the project name and environment vary. Each project needs its own
-   environment name, because PyPI accepts a pending publisher configuration for one project
-   name only:
+## Trigger and authorization policy
 
-   | PyPI project name | pypi.org environment | test.pypi.org environment |
-   |---|---|---|
-   | `redline-core` | `pypi-redline-core` | `testpypi-redline-core` |
-   | `django-redline` | `pypi-django-redline` | `testpypi-django-redline` |
-   | `fastapi-redline` | `pypi-fastapi-redline` | `testpypi-fastapi-redline` |
-   | `flask-redline` | `pypi-flask-redline` | `testpypi-flask-redline` |
-   | `litestar-redline` | `pypi-litestar-redline` | `testpypi-litestar-redline` |
+CI and Docs run on pushes to `main` only. Release listens for completion of CI on
+`main`, and its build runs only when that CI run was a successful `push` from this
+repository. It checks out `workflow_run.head_sha`, even if `main` has advanced. There
+are no pull-request, tag-push or manual workflow triggers. A failed or cancelled CI
+run cannot build or publish a release. A Release run record may still appear with
+its jobs skipped after failed CI because GitHub emits completion events regardless
+of the conclusion.
 
-   A pending publisher turns into a normal one when the first upload creates the project.
-   It also reserves nothing until then, so register all ten before tagging.
+Every eligible run rebuilds and checks the UI, verifies lockstep versions, builds
+five wheels and five source distributions, runs strict metadata checks and smoke-tests
+the wheels. **The default ends with verified build artifacts. It does not publish.**
 
-   **PyPI allows at most three pending publishers per account at a time.** A pending
-   publisher stops counting once the first upload creates its project, so the very first
-   release goes out in two rounds within the same workflow run:
+Publication additionally requires repository Actions variable
+`REDLINE_RELEASE_VERSION` to equal the built package version exactly, without `v`
+(for example, `0.4.0a1`). An unset, empty or different value skips publication. The
+workflow also refuses a version with an existing GitHub release, existing version
+tag, or any existing PyPI distribution at that version. It uploads to TestPyPI,
+waits for the existing `pypi-*` environment approvals, uploads to PyPI and creates
+`vVERSION` plus a GitHub release at the exact CI-tested SHA. Prereleases are marked
+as such. The version variable is checked again when each publishing job is scheduled.
 
-   1. Register `redline-core`, `django-redline` and `fastapi-redline` on both test.pypi.org
-      and pypi.org.
-   2. Push the tag. Those three upload to TestPyPI; flask and litestar fail there, so the
-      PyPI stage does not start yet.
-   3. On test.pypi.org register `flask-redline` and `litestar-redline`, then **Re-run failed
-      jobs** on the run. TestPyPI completes and the PyPI stage waits for your approval;
-      approve it. Core, django and fastapi upload; flask and litestar fail.
-   4. On pypi.org register `flask-redline` and `litestar-redline`, then **Re-run failed
-      jobs** again. Both upload (already-uploaded files are skipped) and the GitHub release
-      is created.
+These controls use GitHub's documented
+[workflow completion event](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#workflow_run)
+and [PyPI OIDC publishing](https://docs.github.com/en/actions/how-tos/secure-your-work/security-harden-deployments/oidc-in-pypi).
 
-   Later releases need none of this: the publishers are then active, not pending.
+## Required repository and publisher settings
 
-3. **Create the GitHub environments** in the repository's **Settings → Environments**:
-   the five `pypi-<project>` environments (add yourself as a required reviewer, so every
-   real upload waits for you; GitHub's review dialog approves all five at once) and the five
-   `testpypi-<project>` environments (no reviewer needed).
+These remote settings must be reviewed by a maintainer; editing workflow files does
+not configure them:
 
-4. **Dry-run the build half.** Actions → Release → *Run workflow* on `main` runs the
-   version check, UI bundle check, build, `twine check` and wheel smoke test without
-   publishing anything.
+- Make `main` the default branch. GitHub requires the Release workflow to exist on
+  the default branch before its `workflow_run` trigger is eligible.
+- Protect `main`: require pull requests and restrict bypasses/direct pushes. A `push`
+  workflow cannot itself distinguish an approved merge from a direct push. Without
+  this branch rule, direct pushes to `main` also run CI and Docs.
+- Align required status checks with post-merge CI. There are no PR checks or merge-queue
+  checks in this policy; requiring those checks before merge would block it. Run the
+  documented local checks before approving a merge.
+- Keep `REDLINE_RELEASE_VERSION` absent except during an explicitly approved release.
+  Only maintainers authorized to publish should be able to change repository variables.
+- Configure Pages with **GitHub Actions** as its source and retain `github-pages`.
+  Docs deploys on each `main` push independently of release publication and CI completion.
+- Retain the environments below. Configure every `pypi-*` environment with required
+  reviewers, prevent self-review where supported, and allow deployments from `main`.
+  Previous tag-only deployment restrictions must be updated for this workflow. A
+  variable match alone is not a substitute for required reviewers.
+- On PyPI and TestPyPI, verify trusted publishers: owner `Pythondeveloper6`, repository
+  `redline`, workflow `release.yml`, and the exact environment from this table. Existing
+  projects use their publishing settings; pending publishers are for projects that do
+  not yet exist. No new token is needed.
 
-5. **Rehearse with a pre-release.** Release `0.2.0a1` (or a `.dev`/`rc`) first and watch
-   it land on both indexes before tagging anything final. A version can never be reused
-   on PyPI, only yanked.
+| Project | PyPI environment | TestPyPI environment |
+|---|---|---|
+| `redline-core` | `pypi-redline-core` | `testpypi-redline-core` |
+| `django-redline` | `pypi-django-redline` | `testpypi-django-redline` |
+| `fastapi-redline` | `pypi-fastapi-redline` | `testpypi-fastapi-redline` |
+| `flask-redline` | `pypi-flask-redline` | `testpypi-flask-redline` |
+| `litestar-redline` | `pypi-litestar-redline` | `testpypi-litestar-redline` |
 
-## Every release
+Trusted Publishing and environment approvals cannot be validated by local build
+checks. Confirm their current remote configuration before authorizing publication.
 
-1. **Versions, in lockstep.** Set the same version, in PEP 440 spelling (`0.2.0a1`,
-   `0.2.0b1`, `0.2.0rc1`, `0.2.0`), in all of:
-   - `version` in each `packages/*/pyproject.toml` (five files);
-   - the `redline-core==<version>` pins in the four adapters' `dependencies` and in their
-     `redline-core[profile]==<version>` extras;
-   - `__version__` in each `packages/*/src/<module>/__init__.py`.
+## Prepare and verify one release
 
-   Then run `uv lock` and check it all agrees:
+1. Set the same PEP 440 version in all five `packages/*/pyproject.toml` files, each
+   package's `__version__`, and all adapters' regular and optional core dependency pins.
+   Update the changelog with the version and release date, and document the features.
 
    ```bash
    uv lock
-   python3 scripts/check_versions.py --expect 0.2.0a1
+   python3 scripts/check_versions.py --expect 0.4.0a1
    ```
 
-2. **Changelog.** Rename the `Unreleased` heading in `CHANGELOG.md` to the version and the
-   date you tag, and open a new empty `Unreleased` section above it.
-
-3. **Rebuild the UI** if anything under `frontend/` changed, and commit the result. The
-   wheels ship the committed bundle and the release refuses a stale one:
+2. Rebuild the committed UI with `scripts/build_ui.sh` when frontend sources change.
+   Never hand-edit the generated bundle. Run the full documented test commands plus:
 
    ```bash
-   scripts/build_ui.sh
+   uv run ruff check .
+   uv run ruff format --check .
+   uv build --all-packages --out-dir /tmp/redline-release-dist
+   uvx twine check --strict /tmp/redline-release-dist/*
    ```
 
-4. **Check locally.**
+   Use an empty output directory for each build. Review `IMPLEMENTATION_STATUS.md`
+   for live database/worker validation limits before publishing.
+
+3. Merge the reviewed release to `main` after authorization. With the repository variable
+   unset, successful CI automatically exercises Release's build and verification steps
+   without uploading or creating a tag. Local merges alone start no remote workflows.
+   Inspect the successful run's tested SHA, package version and `dist` artifact.
+
+4. Obtain explicit authorization to publish that exact version and commit. Set repository
+   Actions variable `REDLINE_RELEASE_VERSION` to that version, for example `0.4.0a1`, only
+   after that approval. Setting the variable does not start a workflow.
+
+5. For the same tested commit, re-run its original **CI** run. Its successful completion
+   starts Release again. Alternatively, an explicitly approved subsequent merge to `main`
+   starts its own CI/Release chain; inspect that new SHA before approving publication.
+   No tag push or **Run workflow** action is needed or available. A version with an
+   existing tag/release/PyPI upload is skipped rather than published by a fresh run.
+
+6. Inspect TestPyPI, the exact tested SHA and all five artifacts, then approve the
+   `pypi-*` deployments in Actions. The workflow publishes the same build artifacts,
+   creates the tag at the tested SHA, and attaches the distributions to its GitHub release.
+
+7. Delete `REDLINE_RELEASE_VERSION` promptly after success or cancellation. This workflow
+   does not clear repository variables automatically and has no variable-write permission.
+   Clearing the variable prevents later publishing jobs from being scheduled, but cannot
+   revoke a job already admitted or an upload already running. To withdraw authorization,
+   also cancel the Release run and reject pending environment approvals; confirm no upload
+   already completed. Review other queued runs before authorizing any retry.
+
+8. Verify installation from PyPI in a fresh environment using the exact version. Add
+   `--prerelease=allow` for alpha, beta, release-candidate or development versions:
 
    ```bash
-   uv run ruff check . && uv run ruff format --check .
-   uv build --all-packages --out-dir dist
-   uvx twine check --strict dist/*
-   rm -rf dist
+   uv venv /tmp/redline-release-smoke
+   VIRTUAL_ENV=/tmp/redline-release-smoke uv pip install --prerelease=allow \
+     django-redline==0.4.0a1 fastapi-redline==0.4.0a1 \
+     flask-redline==0.4.0a1 litestar-redline==0.4.0a1
+   /tmp/redline-release-smoke/bin/python -c \
+     'import redline_core, django_redline; print(redline_core.__version__)'
    ```
 
-5. **Merge to `main`** through a pull request and let CI go green.
+## Recovery
 
-6. **Tag and push** the merge commit:
+- **Partial upload:** re-run only failed jobs of the original Release run while its
+  exact-version authorization is still approved. Successful authorization/build jobs and
+  their artifacts are retained; existing files are skipped. Do not rebuild different code
+  under the same version. Starting a fresh Release run finds existing PyPI files and skips
+  publication to prevent mixing builds. Expired artifacts require maintainer investigation
+  and usually a new version.
+- **GitHub release creation or attachment failure:** inspect the tag, release and artifacts
+  before retrying. The final job refuses a tag/release that appeared after authorization;
+  if GitHub created the release but attachment upload failed, recover its missing assets
+  separately with explicit authorization. Do not remove a published version's tag to
+  bypass the duplicate guard.
+- **Publisher or environment failure:** check the exact owner, repository, workflow and
+  environment identities above, main-branch deployment permissions and required reviewers.
+  Retry failed jobs from the original run after fixing the settings.
+- **Broken published version:** yank it on PyPI and release a fix with a new version.
+  Already published files cannot be replaced. Neither merging a fix nor pushing a tag
+  republishes anything without a matching opt-in and environment approvals.
 
-   ```bash
-   git tag -a v0.2.0a1 -m "Redline 0.2.0a1"
-   git push origin v0.2.0a1
-   ```
-
-   `release.yml` then: refuses a tag that disagrees with any package version, rebuilds the
-   UI and refuses a stale committed bundle, builds all five wheels and sdists, runs
-   `twine check --strict`, installs the wheels into a clean venv and smoke-tests them,
-   uploads to TestPyPI, **waits for your approval of the `pypi-*` deployments**, uploads to
-   PyPI with attestations, and creates the GitHub release with the distributions attached
-   (marked as a pre-release when the version contains `a`, `b`, `rc` or `dev`).
-
-7. **Approve the `pypi-*` deployments** when the workflow pauses (Actions → the run →
-   *Review deployments*), after glancing at the TestPyPI pages.
-
-8. **Verify the install from PyPI**, from a fresh directory. `--pre` is needed for an
-   alpha, beta or rc, since pip skips pre-releases otherwise:
-
-   ```bash
-   uv venv /tmp/redline-smoke && source /tmp/redline-smoke/bin/activate
-   uv pip install --pre django-redline==0.2.0a1 fastapi-redline==0.2.0a1 \
-       flask-redline==0.2.0a1 litestar-redline==0.2.0a1
-   python -c "import redline_core, django_redline; print(redline_core.__version__)"
-   ```
-
-## If something goes wrong
-
-- **The upload failed halfway.** Re-run the failed jobs (or the workflow). Both uploads
-  tolerate files that already landed: TestPyPI uses `skip-existing`, and PyPI rejects
-  duplicates of the same file without changing them.
-- **A trusted-publisher error (`invalid-publisher`).** The registration does not match
-  exactly: project name, owner, repository `redline`, workflow `release.yml` and the
-  environment name must all be as in the table above.
-- **A broken version reached PyPI.** Yank it (PyPI → Manage → Release → Options → Yank)
-  and release the fix under the next number. A version can't be deleted and re-uploaded.
+Release runs are serialized without cancelling active uploads. Workflow validation
+and local builds do not exercise GitHub's event delivery, remote variable evaluation,
+environment protection or PyPI OIDC exchange; those remain remote verification steps.

@@ -66,6 +66,7 @@ _TOKEN = re.compile(
     | (?P<string>(?:[EeNnBbXx])?'(?:[^'\\]|''|\\.)*')
     | (?P<dident>"(?:[^"]|"")*")
     | (?P<bident>`(?:[^`]|``)*`)
+    | (?P<sqident>\[(?:[^\]]|\]\])*\])
     | (?P<pyformat>%\([^)]*\)s|%s|%d)
     | (?P<qmark>\?)
     | (?P<numbered>\$\d+)
@@ -127,12 +128,13 @@ _FIRST_WORD = re.compile(r"[A-Za-z]+")
 #: ``FOR NO KEY UPDATE``, ``FOR SHARE``, ``FOR KEY SHARE`` (PostgreSQL) and
 #: ``LOCK IN SHARE MODE`` (MySQL).
 _UNSAFE = re.compile(
-    r"\b(?:INSERT|UPDATE|DELETE|MERGE|CREATE|DROP|ALTER|TRUNCATE|GRANT|REVOKE|CALL|COPY|INTO)\b"
+    r"\b(?:INSERT|UPDATE|DELETE|MERGE|CREATE|DROP|ALTER|TRUNCATE|GRANT|REVOKE|"
+    r"CALL|COPY|INTO|EXEC|EXECUTE)\b"
     r"|\bFOR\s+(?:NO\s+KEY\s+)?UPDATE\b|\bFOR\s+(?:KEY\s+)?SHARE\b"
     r"|\bLOCK\s+IN\s+SHARE\s+MODE\b",
     re.IGNORECASE,
 )
-_QUOTED_IDENT = re.compile(r'"(?:[^"]|"")*"|`(?:[^`]|``)*`')
+_QUOTED_IDENT = re.compile(r'"(?:[^"]|"")*"|`(?:[^`]|``)*`|\[(?:[^\]]|\]\])*\]')
 #: A second, *dialect-pessimistic* reading of the raw text. The fingerprint tokenizer
 #: treats ``\'`` as an escaped quote and ``$tag$…$tag$`` as a string, and strips every
 #: comment; a server may disagree (PostgreSQL's standard strings have no backslash
@@ -154,9 +156,8 @@ _READ_KINDS = ("SELECT", "WITH", "VALUES", "TABLE")
 
 def statement_kind(sql: str) -> str:
     """The upper-cased leading keyword (``SELECT``, ``INSERT``…) or ``""``."""
-    fp = fingerprint(sql).lstrip("( ")
-    match = _FIRST_WORD.match(fp)
-    return match.group().upper() if match else ""
+    kinds = effective_kinds(sql)
+    return next((k for k in kinds if k not in {"SET", "DECLARE"}), kinds[0] if kinds else "")
 
 
 @lru_cache(maxsize=4096)
@@ -394,3 +395,43 @@ def offset_value(sql: str, params: Any = None) -> int | None:
         if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
             return value
     return None
+
+
+@lru_cache(maxsize=4096)
+@lru_cache(maxsize=4096)
+def effective_kinds(sql: str) -> tuple[str, ...]:
+    """Leading kinds in semicolon-delimited batches; not a procedural SQL parser."""
+    clean = _TOKEN.sub(
+        lambda m: (
+            " "
+            if m.lastgroup
+            in {"lcomment", "bcomment", "string", "dollar", "dident", "bident", "sqident"}
+            else m.group()
+        ),
+        sql,
+    )
+    kinds = []
+    for part in clean.split(";"):
+        match = _FIRST_WORD.match(part.lstrip("( \r\n\t"))
+        if match:
+            kinds.append(match.group().upper())
+    return tuple(kinds)
+
+
+@lru_cache(maxsize=4096)
+def comment_placeholders(sql: str, paramstyle: str = "any") -> int:
+    """Count bind markers inside comments, excluding strings and identifiers."""
+    patterns = {
+        "qmark": r"\?",
+        "named": r"(?<![:\w]):[A-Za-z_]\w*",
+        "numeric": r"(?<![:\w]):\d+",
+        "numeric_dollar": r"\$\d+",
+        "format": r"(?<!%)%[sd]",
+        "pyformat": r"(?<!%)%(?:\([^)]*\))?[sd]",
+    }
+    pattern = patterns.get(paramstyle) or "|".join(patterns.values())
+    return sum(
+        len(re.findall(pattern, m.group()))
+        for m in _TOKEN.finditer(sql)
+        if m.lastgroup in {"lcomment", "bcomment"}
+    )
