@@ -6,6 +6,7 @@ from redline_core.check_sql import extract
 from redline_core.sql_compile import (
     _mssql_compile_batch,
     _translate_named_binds,
+    compare_schema,
     describe_mssql_parameters,
     describe_mssql_result,
     missing_result_columns,
@@ -103,6 +104,68 @@ def test_describe_result_skips_hidden_and_reports_unavailable():
 def test_missing_result_columns_is_case_insensitive():
     reads = [{"name": "ID"}, {"name": "absent"}, {"name": "absent"}]
     assert missing_result_columns(reads, [{"name": "id"}]) == ["absent"]
+
+
+def test_compare_schema_includes_trigger_and_routine_drift():
+    before = {
+        "tables": {"t": [{"name": "id", "type": "INTEGER", "nullable": True}]},
+        "triggers": {"t": [{"name": "tr1", "disabled": False, "instead_of": False}]},
+        "routines": {"p": [{"name": "@x", "type": "int"}]},
+    }
+    after = {
+        "tables": {"t": [{"name": "id", "type": "INTEGER", "nullable": True}]},
+        "triggers": {"t": [{"name": "tr1", "disabled": True, "instead_of": False}]},
+        "routines": {"p": [{"name": "@x", "type": "bigint"}]},
+    }
+    drift = compare_schema(before, after)
+    assert drift["changed_triggers"] == ["t"]
+    assert drift["changed_routines"] == ["p"]
+    assert drift["affected_tables"] == ["t"]
+
+
+def test_selective_compilation_skips_unrelated_statements(tmp_path):
+    import redline_core.sql_compile as sql_compile
+
+    database = tmp_path / "schema.db"
+    engine = create_engine(f"sqlite:///{database}")
+    try:
+        with engine.begin() as conn:
+            conn.exec_driver_sql("CREATE TABLE a (id INTEGER)")
+            conn.exec_driver_sql("CREATE TABLE b (id INTEGER)")
+    finally:
+        engine.dispose()
+    source = tmp_path / "queries.py"
+    source.write_text(
+        """
+from sqlalchemy import text
+
+
+def read_a(conn):
+    return conn.execute(text("SELECT id FROM a")).fetchall()
+
+
+def read_b(conn):
+    return conn.execute(text("SELECT id FROM b")).fetchall()
+"""
+    )
+    snapshot = tmp_path / "schema.json"
+    dsn = f"sqlite:///{database}"
+    first = sql_compile.compile_paths([str(source)], dsn, snapshot=str(snapshot))
+    assert first[0]["selective"]["compiled"] == 2
+    unchanged = sql_compile.compile_paths([str(source)], dsn, snapshot=str(snapshot))
+    assert unchanged[0]["selective"]["compiled"] == 0
+    assert unchanged[0]["selective"]["skipped_unchanged"] == 2
+
+    engine = create_engine(dsn)
+    try:
+        with engine.begin() as conn:
+            conn.exec_driver_sql("ALTER TABLE a ADD COLUMN name TEXT")
+    finally:
+        engine.dispose()
+    changed = sql_compile.compile_paths([str(source)], dsn, snapshot=str(snapshot))
+    assert changed[0]["selective"]["compiled"] == 1
+    assert changed[0]["selective"]["skipped_unchanged"] == 1
+    assert changed[0]["schema_drift"]["changed_tables"] == ["a"]
 
 
 def test_compile_paths_attaches_online_findings(tmp_path, monkeypatch):
