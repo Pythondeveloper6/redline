@@ -47,6 +47,10 @@ requires at least 100 observed creations with recycling configured;
 seconds of creation in an hour. These are correlations, not diagnoses. Initial connections
 or driver bootstrap statements made before observation can be unknown. Pool invalidation
 is a separate `connection_failure`; it does not invent an executed SQL statement.
+Per-process hourly gauges are also flushed to the store's `lifecycle_hourly` history as
+max-per-hour rows, including for traces that sampling drops. `GET api/lifecycle` returns
+them for dashboards. They are observed gauges, not a sum across processes, and carry no DSN
+or credentials.
 
 A raw rowcount of `-1` means unavailable. `dml_rowcount_unknown` on SQL Server can suggest
 reviewing NOCOUNT, OUTPUT/returning results, batches and driver behavior; it does not prove

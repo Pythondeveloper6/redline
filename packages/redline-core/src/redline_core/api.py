@@ -245,6 +245,7 @@ class RedlineAPI:
             "api/history": self.history,
             "api/history/compare": self.history_compare,
             "api/releases": self.releases,
+            "api/lifecycle": self.lifecycle,
         }
         if path in get_routes:
             return get_routes[path](params) if method == "GET" else _not_allowed()
@@ -708,6 +709,15 @@ class RedlineAPI:
         except FilterError as exc:
             return error(400, "invalid_window", str(exc))
         return 200, {"items": [e.to_dict() for e in self._ext("external_stats")(window)]}
+
+    def lifecycle(self, params: Mapping[str, Any]) -> Response:
+        try:
+            window = parse_window(_str_param(params, "window"))
+            limit = _int_param(params, "limit", 200, lo=1, hi=500)
+        except FilterError as exc:
+            return error(400, "invalid_window", str(exc))
+        items = self._ext("lifecycle")(window, limit)
+        return 200, {"items": items, "window": window}
 
     def history(self, params: Mapping[str, Any]) -> Response:
         try:

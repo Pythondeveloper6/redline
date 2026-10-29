@@ -661,6 +661,7 @@ class Recorder:
         )
         from .testing import active_capture
 
+        self._persist_lifecycle()
         capture = active_capture()
         if capture is not None:
             reason = reason or "test"
@@ -729,6 +730,22 @@ class Recorder:
                 self.dropped_capture += 1
                 _capture_failure("Redline failed to enqueue recording")
         return trace
+
+    def _persist_lifecycle(self) -> None:
+        """Flush bounded process gauges when the store supports persisted history."""
+        if self.store is None:
+            return
+        record = getattr(self.store, "record_lifecycle", None)
+        if not callable(record):
+            return
+        try:
+            from .connection_health import snapshot
+
+            metrics = snapshot()
+            if metrics:
+                record(metrics, release=self.settings.release)
+        except Exception:
+            _capture_failure("Redline failed to persist connection lifecycle metrics")
 
     @contextmanager
     def recording(self, **fields: Any) -> Iterator[TraceBuilder]:
