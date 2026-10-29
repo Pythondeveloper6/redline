@@ -106,22 +106,17 @@ it does not purge an existing broker. Named volumes belong to this Compose proje
 
 ## Current evidence
 
-The full container run (`20261029T050217Z-eb50dbb6`) passed all 1,517 core tests,
-the FastAPI/Flask/Litestar suites, all 28 live/harness cases, both demo harnesses,
-documentation and every packaging/wheel check, with no skips in those suites. Django
-had one failure: a permission test assumed that chmod(0500) denies root writes.
+Full run `20261029T052447Z-caaef5f7` exited zero with `qualified: true` on 2026-10-29:
+**2,120 Python tests passed, with zero failures, errors or skips**, including all real
+vendor, worker and browser cases. Both demo harnesses, strict docs, lint/format, package
+metadata, fresh wheel installation and smoke checks also passed. Frontend tests,
+TypeScript and the built UI are required by the successful image build.
 
-That assumption is now replaced with a deterministic denied-operation test plus an
-actual-user permission test. Django and the CLI share a filesystem write probe, with
-regressions ensuring existing data is unchanged and temporary probes are cleaned up.
-The local Django suite passes; its optional live PostgreSQL case needs the container.
+The summary records actual dependency versions. Its detailed logs/JUnit are in the
+matching run directory under ignored `results/`; screenshots are in `results/ui/`.
+The tested implementation is `8a7ea9f`; this evidence update changes documentation only.
+Earlier failed runs are superseded by the green full run.
 
-The subsequent run (`20261029T051235Z-a762f1ec`) passed Django and every other
-qualification step except Litestar's fast-request profiling assertion. A request shorter
-than the sampler interval can correctly have no profile. Litestar and FastAPI's real
-profiling tests now use the existing slow endpoint; a deterministic core regression
-covers valid zero-sample recordings without fabricating a profile.
-
-The full stack must still be rebuilt/rerun before qualification. The authoring session
-cannot access OrbStack's socket, so local checks do not replace a fresh container result.
-Require exit zero and a new current summary with `qualified: true`.
+Keep requiring a new green run after implementation changes. This validates the described
+Compose baseline, not every Python/framework/driver version or deployment filesystem.
+Main CI and deployment-specific canary checks remain separate release gates.

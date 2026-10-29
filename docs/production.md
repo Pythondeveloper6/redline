@@ -201,23 +201,25 @@ A forced kill can lose queued traces; state the acceptable loss window before ro
 
 ## Production release gate
 
-The implementation includes local unit, adapter and fixture checks. SQL Server driver,
-Celery broker/prefork, cross-container volume, sustained-load and real browser checks must
-be recorded separately. The local validation report is `IMPLEMENTATION_STATUS.md` in the
-repository. An environment restriction is a blocked test, not a passing product assertion.
+The complete Compose baseline passed on 2026-10-29 (run
+`20261029T052447Z-caaef5f7`): 2,120 Python tests, zero failures/errors/skips, plus frontend,
+demo, docs and packaging checks. The committed validation record is
+`IMPLEMENTATION_STATUS.md` in the repository. Main CI and the actual production topology
+still require their own evidence; an environment restriction is never a passing assertion.
 
-The current local evidence and remaining qualification have different scopes:
-
-| Area | Confirmed locally | Still required before deployment qualification |
+| Area | Confirmed baseline | Still required for the target deployment |
 |---|---|---|
-| Capture boundaries | Deterministic cycle/Unicode/custom-object/size-limit tests and safe minimal-fallback tests | Representative memory/latency at intended request concurrency and payload sizes |
-| Runtime privacy and storage loss | Local sentinel privacy checks and deterministic queue/writer-failure checks | Real disk-full/permissions, shared-volume and shutdown behavior in the target environment |
-| Framework SQL recording | Native Django SQLite and SQLAlchemy adapter tests, including caught failures and capture-off row counts | Selected MySQL and SQL Server backend/DBAPI versions, reconnects, failed statements and session behavior |
-| SQL Server tooling | Showplan/parser fixtures and fake-driver protocol/cleanup checks | Live isolated driver/server tests; Django SQL Server EXPLAIN remains unsupported |
-| Jobs | Direct job and eager Celery execution tests | Actual broker delivery, retries, prefork/restart and worker lifecycle |
+| Capture boundaries | Cycle/Unicode/custom-object/size-limit and safe-fallback tests | Representative memory/latency at intended concurrency and payload sizes |
+| Privacy and storage loss | Sentinels, effective-write probes, deterministic queue/writer failures and worker shutdown | Actual disk exhaustion, permissions, storage volume and sustained concurrency |
+| Framework SQL recording | Live Django backend and Flask/FastAPI SQLAlchemy sync/async cases on MySQL, SQL Server and PostgreSQL | Exact deployed backend/driver versions, reconnect behavior and deployment topology |
+| SQL Server tooling | Live estimated/actual plans, catalogs, compilation nonexecution and setting cleanup | Least-privilege production-like permissions; Django SQL Server EXPLAIN remains unsupported |
+| Jobs | Redis-delivered Celery prefork success/failure/retry, correlation and shutdown-drain checks | Actual broker/deployment, restart and expected worker concurrency |
+| Browser | Real Chromium Jobs/detail, SQL checker, privacy and mobile overflow checks | Full accessibility review and target-browser coverage |
 
-Local checks do not establish the unvalidated live behavior in the final column. Record
-framework, database/server, backend/driver and process versions with the results.
+The Compose baseline uses Python 3.13, Django 5.2 and the driver versions recorded in the
+run summary. It does not certify all supported versions; the broader matrix runs in main
+CI. SQL Server's supported container qualification requires native Linux amd64, even if
+an emulated local run succeeds. Record server/process versions with deployment results.
 
 A production recommendation requires evidence for each target deployment:
 
