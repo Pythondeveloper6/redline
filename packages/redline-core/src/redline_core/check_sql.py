@@ -9,7 +9,7 @@ import re
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
-from .analyze import MAX_SOURCE_BYTES
+from .analyze import MAX_FILES, MAX_PROJECT_BYTES, MAX_SOURCE_BYTES, validate_scan_limits
 from .sql import _TOKEN, comment_placeholders, effective_kinds, fingerprint
 
 RULES = {
@@ -384,7 +384,8 @@ def analyze_sql_source(source, *, file="<source>", dialect="other"):
     }
 
 
-def scan(paths, *, dialect="other"):
+def scan(paths, *, dialect="other", max_files=MAX_FILES, max_project_bytes=MAX_PROJECT_BYTES):
+    validate_scan_limits(max_files, max_project_bytes)
     result = {"findings": [], "skipped": [], "statements": 0, "files": 0}
     visited, byte_count, entries = set(), 0, 0
     excluded = {".git", ".venv", "venv", "node_modules", "__pycache__", ".tox", "dist", "build"}
@@ -416,7 +417,7 @@ def scan(paths, *, dialect="other"):
                 if resolved in visited:
                     continue
                 visited.add(resolved)
-                if len(visited) > 200 or byte_count >= 2_000_000:
+                if len(visited) > max_files or byte_count >= max_project_bytes:
                     result["skipped"].append(
                         {"file": str(root), "line": 1, "reason": "project limit exceeded"}
                     )
@@ -424,6 +425,11 @@ def scan(paths, *, dialect="other"):
                 with path.open("rb") as stream:
                     raw = stream.read(MAX_SOURCE_BYTES + 1)
                 byte_count += len(raw)
+                if byte_count > max_project_bytes:
+                    result["skipped"].append(
+                        {"file": str(root), "line": 1, "reason": "project limit exceeded"}
+                    )
+                    return result
                 source = raw.decode("utf-8")
                 report = analyze_sql_source(source, file=str(path), dialect=dialect)
                 result["findings"].extend(report["findings"])
@@ -457,10 +463,28 @@ def configure_cli(parser):
     )
     parser.add_argument("--baseline")
     parser.add_argument("--write-baseline")
+    parser.add_argument(
+        "--max-files", type=int, default=MAX_FILES, help="Python file budget (1–10000)"
+    )
+    parser.add_argument(
+        "--max-project-bytes",
+        type=int,
+        default=MAX_PROJECT_BYTES,
+        help="source byte budget (1–64000000)",
+    )
 
 
 def command(args, out, err):
-    report = scan(args.paths, dialect=args.dialect)
+    try:
+        report = scan(
+            args.paths,
+            dialect=args.dialect,
+            max_files=getattr(args, "max_files", MAX_FILES),
+            max_project_bytes=getattr(args, "max_project_bytes", MAX_PROJECT_BYTES),
+        )
+    except ValueError as exc:
+        print(f"redline check-sql: {exc}", file=err)
+        return 2
     if args.dsn:
         from .sql_compile import compile_paths
 

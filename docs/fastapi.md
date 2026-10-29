@@ -401,3 +401,31 @@ Or leave Redline out of the app under test, and install it only in your dev entr
 | Callsites are empty | `project_root` is not an ancestor of your code. Set it |
 | `RuntimeError: Redline is already installed` | `install()` was called twice (an auto-reloader importing twice?) |
 | N+1 shown with a hint but no diff | the statement could not be located in source. See [confidence](n-plus-one.md#confidence) |
+
+
+## Wiring an existing application
+
+Pass the engine your application's session factory actually uses, after the routers and
+models are imported and before serving requests. A different engine does not capture
+those sessions. For an external launcher, set `project_root` to the application's root
+so source attribution works. Keep the trace store outside source control.
+
+```python
+from app.main import app
+from app.db.session import get_engine
+from fastapi_redline import install, instrument_httpx
+
+redline = install(app, engine=get_engine(), settings={
+    "access": "local",
+    "project_root": "/absolute/path/to/project",
+})
+instrument_httpx()  # optional: install() alone does not capture outbound HTTP
+# If Redis is used, explicitly enable the redis-py integration too:
+# from redline_core.contrib.redis import instrument_redis
+# instrument_redis()
+```
+
+Use synthetic data and an isolated database for load tests. Missing external/cache spans
+means the integration may be absent, not necessarily that the app made no calls. SDKs
+without integrations and separate jobs require explicit instrumentation. Static source
+analysis complements request capture; its candidates are not measured N+1 defects.

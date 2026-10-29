@@ -41,6 +41,9 @@ idle process pays nothing.
    sample gives the stall its callsite (the innermost project frame), the blocking call
    (`time.sleep`, `requests.get`, `sync ORM`, ...) and, through the running task, the
    request it belongs to.
+A sample without a project frame keeps the culprit unknown. A sampled SQLAlchemy
+   frame is labeled `SQLAlchemy work`: compilation/materialization can block even with
+   an async driver, so the sample alone does not establish synchronous database I/O.
 3. **Sync driver hooks.** When a synchronous database driver is called on the loop thread
    itself (a sync ORM query inside an `async def` view), the SQL hook marks it as a
    `blocking` span with `reason = "sync_call"`, so you see "sync ORM" even for a query that
