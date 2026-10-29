@@ -9,7 +9,7 @@ FROM python:3.13-slim-bookworm AS tests
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 UV_LINK_MODE=copy \
     UV_PROJECT_ENVIRONMENT=/workspace/.venv PATH=/workspace/.venv/bin:$PATH
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates curl gnupg build-essential pkg-config default-libmysqlclient-dev unixodbc-dev \
+      ca-certificates curl gnupg git build-essential pkg-config default-libmysqlclient-dev unixodbc-dev \
     && curl -fsSL https://packages.microsoft.com/config/debian/12/packages-microsoft-prod.deb \
       -o /tmp/packages-microsoft-prod.deb \
     && dpkg -i /tmp/packages-microsoft-prod.deb \

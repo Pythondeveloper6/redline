@@ -8,7 +8,7 @@ import pytest
 from live_database_helpers import VENDORS, isolated_engine
 
 pytestmark = pytest.mark.skipif(
-    os.environ.get("REDLINE_COMPOSE_TESTS") != "1",
+    os.environ.get("REDLINE_TEST_COMPOSE") != "1",
     reason="Requires explicit disposable Compose integration environment",
 )
 

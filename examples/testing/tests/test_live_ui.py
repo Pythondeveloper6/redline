@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 pytestmark = pytest.mark.skipif(
-    os.environ.get("REDLINE_COMPOSE_TESTS") != "1", reason="disposable Compose opt-in required"
+    os.environ.get("REDLINE_TEST_COMPOSE") != "1", reason="disposable Compose opt-in required"
 )
 ROOT = Path(__file__).resolve().parents[3]
 

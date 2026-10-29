@@ -38,7 +38,7 @@ The command builds the current checkout, waits for service health, creates the f
 
 **Success requires exit code 0 and the current `summary.json` showing `qualified: true`.**
 Missing services, drivers, browsers, JUnit reports, skipped tests, or failed assertions do
-not pass qualification. Without the explicit `REDLINE_COMPOSE_TESTS=1` flag, live tests
+not pass qualification. Without the explicit `REDLINE_TEST_COMPOSE=1` flag, live tests
 skip and the full runner refuses to run. Compose supplies the flag and test-only DSNs.
 
 Reports survive container exit in ignored `examples/testing/results/`. The top-level
@@ -106,8 +106,14 @@ it does not purge an existing broker. Named volumes belong to this Compose proje
 
 ## Current evidence
 
-Configuration parsing, Ruff, collection and harness failure/refusal checks were verified
-locally. The live Compose stack has **not yet been executed in the restricted authoring
-session**: OrbStack's socket is denied and elevated Docker access is disabled. An empty
-results directory or a successful `docker compose config` is not a passing live run.
-Use the full command above and inspect the generated summary before release.
+The first full container run started the real services and passed the three live plan
+cases and Redis/prefork case, but qualification failed. Test-runner configuration leaked
+an unknown environment flag into application settings, PostgreSQL fixtures received the
+wrong DSN scheme, repeated runs reused a wheel environment, and packaging validation
+rejected the build tool's newer metadata format. These are corrected in source; metadata
+is explicitly 2.4 for the existing validation toolchain. Git is now included for the
+baseline tests. Storage doctor and two machine-speed-dependent tests were corrected too.
+
+The full rerun is still required. The authoring session cannot access OrbStack's socket,
+so local regression checks do not replace a new container result. Use the full command
+above; require exit zero and a new current summary with `qualified: true`.

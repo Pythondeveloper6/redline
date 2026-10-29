@@ -125,13 +125,18 @@ See [Configuration](configuration.md).
 
 ### `redline doctor`
 
+The storage check creates and removes its own temporary probe in the nearest existing
+parent directory. It does not write to or initialize the configured database. This
+checks actual filesystem behavior rather than permission bits alone, which can be
+misleading under root or on special/read-only mounts.
+
 Checks that the setup is sound. Each line is `OK`, `WARN` or `FAIL`; the command exits `1`
 if any check fails or the configuration does not load, and `0` otherwise (warnings do not
 fail it). It takes `--json` and `--project-root DIR` like `redline config`.
 
 | Check | Looks at |
 |---|---|
-| `storage` | the store path exists or can be created, and is writable |
+| `storage` | a temporary file can actually be created/written in the nearest existing parent; an existing store can be opened for writing without truncation |
 | `ui bundle` | the prebuilt UI is present in `redline-core` |
 | `access` | `open` fails (warns when `REDLINE_ALLOW_OPEN=1` is set); `access` not set in the file or environment warns (FastAPI, Flask and Litestar answer `404` outside debug mode unless the app sets it in code); `trust_unix_socket` warns; `local` outside the `dev` preset warns, because behind a proxy nobody can reach Redline |
 | `token` | shorter than 24 characters (warn), an unreadable `token_file` (fail), a `token_file` readable by other users (warn) |

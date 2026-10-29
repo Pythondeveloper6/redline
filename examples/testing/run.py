@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 import xml.etree.ElementTree as ET
@@ -28,7 +29,7 @@ def prepare_sql_server():
     from sqlalchemy import create_engine
     from sqlalchemy.engine import make_url
 
-    if os.environ.get("REDLINE_COMPOSE_TESTS") != "1":
+    if os.environ.get("REDLINE_TEST_COMPOSE") != "1":
         raise RuntimeError("Disposable Compose opt-in is required")
     url = make_url(os.environ["REDLINE_TEST_MSSQL_DSN"])
     if url.host != "mssql" or url.database != "redline_test_integration":
@@ -56,8 +57,8 @@ def report_counts(file):
 
 
 def main():
-    if os.environ.get("REDLINE_COMPOSE_TESTS") != "1":
-        print("Refusing integration runner without REDLINE_COMPOSE_TESTS=1", flush=True)
+    if os.environ.get("REDLINE_TEST_COMPOSE") != "1":
+        print("Refusing integration runner without REDLINE_TEST_COMPOSE=1", flush=True)
         return 2
     root_results = Path(os.environ.get("REDLINE_TEST_RESULTS", "/results"))
     root_results.mkdir(parents=True, exist_ok=True)
@@ -99,6 +100,9 @@ def execute(results, report, save_report):
         "aioodbc",
         "mysqlclient",
         "mssql-django",
+        "hatchling",
+        "twine",
+        "packaging",
     ):
         report["versions"][package] = importlib.metadata.version(package)
 
@@ -171,25 +175,30 @@ def execute(results, report, save_report):
     ):
         artifacts = sorted(str(p) for p in dist.glob("*") if p.suffix in (".whl", ".gz"))
         run("metadata", ["twine", "check", *artifacts])
-        wheelenv = "/tmp/redline-wheelcheck"
-        if not run("wheel-venv", ["uv", "venv", "--python", sys.executable, wheelenv]):
-            wheelpython = wheelenv + "/bin/python"
-            if not run(
-                "wheel-install",
-                [
-                    "uv",
-                    "pip",
-                    "install",
-                    "--python",
-                    wheelpython,
-                    *sorted(str(p) for p in dist.glob("*.whl")),
-                ],
-            ):
-                run("wheel-smoke", [wheelpython, "scripts/smoke_wheels.py"])
+        with tempfile.TemporaryDirectory(prefix="redline-wheelcheck-") as wheel_root:
+            wheelenv = str(Path(wheel_root) / "venv")
+            if not run("wheel-venv", ["uv", "venv", "--python", sys.executable, wheelenv]):
+                wheelpython = wheelenv + "/bin/python"
+                if not run(
+                    "wheel-install",
+                    [
+                        "uv",
+                        "pip",
+                        "install",
+                        "--python",
+                        wheelpython,
+                        *sorted(str(p) for p in dist.glob("*.whl")),
+                    ],
+                ):
+                    run("wheel-smoke", [wheelpython, "scripts/smoke_wheels.py"])
     report["qualified"] = bool(report["steps"]) and all(
         s["exit_code"] == 0 for s in report["steps"]
     )
     save_report()
+    failed = [step["name"] for step in report["steps"] if step["exit_code"]]
+    if failed:
+        print("Failed checks: " + ", ".join(failed), flush=True)
+        print("Logs and JUnit: " + str(results), flush=True)
     print(
         "All requested checks passed" if report["qualified"] else "Checks failed; inspect /results",
         flush=True,

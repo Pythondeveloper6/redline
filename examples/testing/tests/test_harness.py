@@ -21,7 +21,7 @@ def harness():
 
 
 def test_requires_disposable_consent(harness, monkeypatch, tmp_path):
-    monkeypatch.delenv("REDLINE_COMPOSE_TESTS", raising=False)
+    monkeypatch.delenv("REDLINE_TEST_COMPOSE", raising=False)
     monkeypatch.setenv("REDLINE_TEST_RESULTS", str(tmp_path / "results"))
     assert harness.main() == 2
     assert not (tmp_path / "results").exists()
@@ -37,7 +37,7 @@ def test_requires_disposable_consent(harness, monkeypatch, tmp_path):
 def test_provisioning_refuses_external_or_non_disposable_database(harness, monkeypatch, dsn):
     import sqlalchemy
 
-    monkeypatch.setenv("REDLINE_COMPOSE_TESTS", "1")
+    monkeypatch.setenv("REDLINE_TEST_COMPOSE", "1")
     monkeypatch.setenv("REDLINE_TEST_MSSQL_DSN", dsn)
 
     def unexpected_connect(*args, **kwargs):
@@ -49,7 +49,7 @@ def test_provisioning_refuses_external_or_non_disposable_database(harness, monke
 
 
 def test_missing_dependency_replaces_previous_green_summary(harness, monkeypatch, tmp_path):
-    monkeypatch.setenv("REDLINE_COMPOSE_TESTS", "1")
+    monkeypatch.setenv("REDLINE_TEST_COMPOSE", "1")
     monkeypatch.setenv("REDLINE_TEST_RESULTS", str(tmp_path))
     (tmp_path / "summary.json").write_text('{"qualified": true}')
 
@@ -68,7 +68,7 @@ def test_missing_dependency_replaces_previous_green_summary(harness, monkeypatch
     "problem", [None, "skipped", "errors", "missing_report", "process_failure"]
 )
 def test_green_requires_all_processes_and_complete_junit(harness, monkeypatch, tmp_path, problem):
-    monkeypatch.setenv("REDLINE_COMPOSE_TESTS", "1")
+    monkeypatch.setenv("REDLINE_TEST_COMPOSE", "1")
     monkeypatch.setenv("REDLINE_TEST_RESULTS", str(tmp_path))
     monkeypatch.setattr(harness.importlib.metadata, "version", lambda name: "fixture")
     monkeypatch.setattr(harness, "prepare_sql_server", lambda: None)
@@ -97,3 +97,34 @@ def test_green_requires_all_processes_and_complete_junit(harness, monkeypatch, t
         "docs",
         "wheel-smoke",
     }
+
+
+def test_compose_control_flag_is_not_application_configuration(monkeypatch):
+    from redline_core.config import parse_env
+
+    monkeypatch.setenv("REDLINE_TEST_COMPOSE", "1")
+    values, names = parse_env({"REDLINE_TEST_COMPOSE": "1"})
+    assert values == names == {}
+
+
+def test_sequential_runs_use_distinct_wheel_environments(harness, monkeypatch, tmp_path):
+    monkeypatch.setenv("REDLINE_TEST_COMPOSE", "1")
+    monkeypatch.setenv("REDLINE_TEST_RESULTS", str(tmp_path))
+    monkeypatch.setattr(harness.importlib.metadata, "version", lambda name: "fixture")
+    monkeypatch.setattr(harness, "prepare_sql_server", lambda: None)
+    environments = []
+
+    def completed(command, **kwargs):
+        if command[:2] == ["uv", "venv"]:
+            environments.append(command[-1])
+            Path(command[-1]).mkdir()
+            (Path(command[-1]) / "pyvenv.cfg").write_text("fixture")
+        junit = next((a.split("=", 1)[1] for a in command if a.startswith("--junitxml=")), None)
+        if junit:
+            Path(junit).write_text('<testsuites><testsuite tests="1" /></testsuites>')
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(harness.subprocess, "run", completed)
+    assert harness.main() == harness.main() == 0
+    assert len(environments) == 2 and environments[0] != environments[1]
+    assert all(not Path(path).exists() for path in environments)
