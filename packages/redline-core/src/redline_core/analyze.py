@@ -9,6 +9,19 @@ from pathlib import Path
 MAX_SOURCE_BYTES = 200_000
 MAX_FILES = 200
 MAX_PROJECT_BYTES = 2_000_000
+MAX_SCAN_FILES = 10_000
+MAX_SCAN_BYTES = 64_000_000
+
+
+def validate_scan_limits(max_files, max_project_bytes):
+    for name, value, ceiling in (
+        ("max_files", max_files, MAX_SCAN_FILES),
+        ("max_project_bytes", max_project_bytes, MAX_SCAN_BYTES),
+    ):
+        if type(value) is not int or not 1 <= value <= ceiling:
+            raise ValueError(f"{name} must be an integer between 1 and {ceiling}")
+
+
 EXCLUDED = {".git", ".venv", "venv", "node_modules", "__pycache__", "migrations", "site", "static"}
 
 
@@ -140,13 +153,57 @@ def analyze_source(source: str, file: str = "input.py") -> dict:
             if (
                 isinstance(node.func.value, ast.Name)
                 and (scope(node), node.func.value.id) in sessions
-                and node.func.attr in {"query", "execute", "scalars"}
+                and node.func.attr in {"query", "execute", "scalars", "scalar", "get"}
             ):
                 return True
             return node.func.attr in query_methods and (
                 _name(node.func.value).endswith(".objects") or queryset(node.func.value)
             )
         return False
+
+    # Summaries only follow unshadowed module-level helpers, with bounded depth.
+    functions = {
+        n.name: n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+
+    shadowed_helpers = set(bindings)
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                names = (
+                    functions if alias.name == "*" else [alias.asname or alias.name.split(".")[0]]
+                )
+                shadowed_helpers.update((scope(node), name) for name in names)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if scope(node) is not tree:
+                shadowed_helpers.add((scope(node), node.name))
+
+    def local_helper(call):
+        if not isinstance(call.func, ast.Name) or call.func.id not in functions:
+            return None
+        owner = scope(call)
+        if isinstance(owner, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            args = [*owner.args.posonlyargs, *owner.args.args, *owner.args.kwonlyargs]
+            if any(a.arg == call.func.id for a in args):
+                return None
+        if (owner, call.func.id) in shadowed_helpers or (tree, call.func.id) in shadowed_helpers:
+            return None
+        return functions[call.func.id]
+
+    calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)]
+    query_helpers = {
+        scope(n)
+        for n in calls
+        if isinstance(n.func, ast.Attribute)
+        and isinstance(n.func.value, ast.Name)
+        and (scope(n), n.func.value.id) in sessions
+        and n.func.attr in {"query", "execute", "scalars", "scalar", "get"}
+    }
+    for _ in range(8):
+        expanded = query_helpers | {scope(n) for n in calls if local_helper(n) in query_helpers}
+        if expanded == query_helpers:
+            break
+        query_helpers = expanded
 
     findings = []
     seen = set()
@@ -191,12 +248,22 @@ def analyze_source(source: str, file: str = "input.py") -> dict:
                     ast.DictComp,
                 ),
             ):
+                # A loop's first iterable is evaluated once, before its body.
+                # Later comprehension iterables repeat for preceding generators.
+                iterable = None
+                if isinstance(parent, (ast.For, ast.AsyncFor)):
+                    iterable = parent.iter
+                elif isinstance(
+                    parent, (ast.ListComp, ast.GeneratorExp, ast.SetComp, ast.DictComp)
+                ):
+                    iterable = parent.generators[0].iter
+                if iterable is node or iterable in outer:
+                    continue
                 loops.append(parent)
         if isinstance(node, ast.Call):
             name = resolved(node.func)
-            if (
-                loops
-                and isinstance(node.func, ast.Attribute)
+            query_call = (
+                isinstance(node.func, ast.Attribute)
                 and (
                     _name(node.func.value).endswith(".objects")
                     or queryset(node.func.value)
@@ -206,20 +273,26 @@ def analyze_source(source: str, file: str = "input.py") -> dict:
                 in {
                     *query_methods,
                     "get",
+                    "scalar",
                     "count",
                     "exists",
                     "aggregate",
                     "first",
                     "execute",
                     "query",
-                    "scalars",
                 }
-            ):
+            )
+            helper_call = local_helper(node) in query_helpers
+            if loops and (query_call or helper_call):
                 emit(
                     "query_in_loop",
                     node,
-                    "A queryset operation appears inside a loop.",
-                    "Review query evaluation and batching with prefetch_related/select_related.",
+                    "A query-capable helper is called inside a loop."
+                    if helper_call
+                    else "A queryset operation appears inside a loop.",
+                    "Batch reads with IN queries or eager loading (SQLAlchemy: "
+                    "selectinload/joinedload; Django: prefetch_related/select_related). "
+                    "Check identity-map hits, conditional queries and intentional batching.",
                 )
             if (
                 name == "sum"
@@ -385,7 +458,10 @@ def analyze_source(source: str, file: str = "input.py") -> dict:
     return {"findings": sorted(findings, key=lambda f: (f["line"], f["kind"])), "errors": []}
 
 
-def analyze_project(root: str | Path) -> dict:
+def analyze_project(
+    root: str | Path, *, max_files: int = MAX_FILES, max_project_bytes: int = MAX_PROJECT_BYTES
+) -> dict:
+    validate_scan_limits(max_files, max_project_bytes)
     root = Path(root).resolve()
     if not root.is_dir():
         raise ValueError("project root must be an existing directory")
@@ -409,7 +485,7 @@ def analyze_project(root: str | Path) -> dict:
             path = Path(directory, name)
             if path.suffix != ".py" or path.is_symlink():
                 continue
-            if result["files_analyzed"] >= MAX_FILES or total >= MAX_PROJECT_BYTES:
+            if result["files_analyzed"] >= max_files or total >= max_project_bytes:
                 result["limited"] = True
                 return result
             try:
@@ -422,7 +498,7 @@ def analyze_project(root: str | Path) -> dict:
                     result["skipped"] += 1
                     continue
                 total += len(source.encode("utf-8"))
-                if total > MAX_PROJECT_BYTES:
+                if total > max_project_bytes:
                     result["limited"] = True
                     return result
                 report = analyze_source(source, str(path.relative_to(root)))

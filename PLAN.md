@@ -175,3 +175,14 @@ No stage is complete until its backend, UI, tests and documentation are integrat
 Validation details and feature-to-UI mapping are in IMPLEMENTATION_STATUS.md. No current CI success, merge, tag or publication is claimed. Browser
 visual/accessibility review is pending because UI automation timed out; 21 existing server
 setup tests cannot bind sockets in the current environment.
+
+
+## 0.4.0a2 field-evaluation follow-up
+
+| Work | Verification |
+|---|---|
+| Correct loop evaluation order and recognize SQLAlchemy get/scalar | Source regression cases and real-project rescan |
+| Summarize local query helpers; improve SQLAlchemy advice | Helper/shadowing regressions and known missed project paths |
+| Configurable bounded CLI project budgets | File/byte/boundary/symlink regressions and complete app scan |
+| Conservative sampled-blocker attribution | Stack-name unit tests and existing blocking tests |
+| Document actual onboarding and coverage | One real-project report, wheel smoke tests and package suites |

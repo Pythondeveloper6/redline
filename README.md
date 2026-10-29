@@ -31,7 +31,7 @@ load test that shows which query broke.
   <img alt="Redline showing an N+1 on order items in the Django demo shop: 30 queries from one line, with a prefetch_related diff" src="docs/assets/screenshots/django-n-plus-one-light.png">
 </picture>
 
-> **Development release: `0.4.0a1` (alpha).** This branch includes the next release's
+> **Development release: `0.4.0a2` (alpha).** This branch includes the next release's
 > features; published packages can be an earlier version. Start with development or
 > staging. Production use requires validation of your actual framework, database driver,
 > traffic and process model: see the [deployment gate](docs/production.md).

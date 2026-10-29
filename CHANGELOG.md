@@ -8,7 +8,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). While the
 version is below `1.0` the public API may change between minor versions.
 
-## Unreleased: 0.4.0a1
+## Unreleased: 0.4.0a2
+
+### Fixed
+
+- Source analysis respects loop evaluation order: a query producing the outer iterable
+  no longer becomes a query-per-row warning. Queries in bodies and nested iterables remain candidates.
+- SQLAlchemy `Session.get` and `scalar` are recognized without flagging ordinary dictionary lookups.
+- Query-loop guidance includes SQLAlchemy batching and loader options and warns about
+  identity-map hits, conditional queries and intentional batching.
+- Event-loop samples without a project frame no longer name an outer runner as the culprit.
+  Sampled SQLAlchemy work no longer implies a synchronous driver; confirmed driver spans
+  keep their specific advice.
+
+### Added
+
+- Same-module query helper summaries, following up to eight helper edges, expose repeated
+  calls hidden behind local helpers. These remain syntax candidates requiring runtime review.
+- Explicit `--max-files` and `--max-project-bytes` budgets for `analyze` and `check-sql`,
+  capped at 10,000 files and 64 MB. UI/default budgets stay at 200 files and 2 MB.
+- A real FastAPI project evaluation, baseline rating and release validation report in
+  `reports/rqeeb-fastapi-field-test.md`.
+
+## 0.4.0a1 development baseline
 
 ### Added
 

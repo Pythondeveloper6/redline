@@ -1414,3 +1414,20 @@ previews must identify unavailable backend actions rather than simulate a succes
 
 Routine CI and docs workflows run on pushes to main only. Local merges do not push,
 trigger remote checks or authorize package publication.
+
+
+## Field-evaluation corrections (0.4.0a2)
+
+- SQLAlchemy source candidates include typed-session `get` and `scalar`. First loop
+  iterables execute once; loop bodies, conditions and subsequent comprehension
+  iterables may repeat. Same-module module-level query helpers propagate through at
+  most eight call edges, excluding locally shadowed function names. Findings stay
+  medium-confidence syntax candidates, not guaranteed database round trips.
+- `analyze_project` and SQL `scan` accept keyword budgets `max_files` (1–10,000) and
+  `max_project_bytes` (1–64,000,000), integers only. CLI flags use hyphenated names.
+  Defaults remain 200 files/2 MB; UI limits, per-file and entry caps remain unchanged.
+  Incomplete scans remain exit 2. Offline unresolved SQL is not certified as valid.
+- A lag sample without a project frame has no inferred culprit. A sampled SQLAlchemy
+  frame is `SQLAlchemy work`; only explicit synchronous-driver hooks justify
+  `SQLAlchemy (sync)` advice. No storage/schema migration is required.
+- All five package versions and exact core pins move together to 0.4.0a2.

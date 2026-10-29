@@ -1,7 +1,10 @@
 # v0.4 release validation
 
 All implementation, tests, examples, UI and documentation are together on local
-`release/v0.4`. All five distributions currently use `0.4.0a1`.
+`release/v0.4.0a2-field-test`. All five distributions currently use `0.4.0a2`.
+The field-evaluation corrections and current validation limits are recorded in
+[the real-project report](reports/rqeeb-fastapi-field-test.md). The historical Compose
+qualification below predates these changes and does not qualify this revision.
 There is one planned final merge to `main` and one coordinated release. Nothing has
 been pushed, tagged or published. `HANDOFF.md` remains unchanged and uncommitted.
 
@@ -83,7 +86,7 @@ by this complete green result.
    protection must enforce PR merges if direct main pushes must be prohibited.
 3. Publishing requires owner authorization, the exact package version in
    `REDLINE_RELEASE_VERSION` and the configured environment approvals. All five packages
-   are currently `0.4.0a1`; this is an alpha release. See [RELEASING.md](RELEASING.md).
+   are currently `0.4.0a2`; this is an alpha release. See [RELEASING.md](RELEASING.md).
 4. Roll out record-and-inspect mode as a canary in the actual production topology.
    Validate deployment-specific filesystem, credentials, framework/driver versions,
    request concurrency, load/overhead and accessibility requirements. A passing Compose

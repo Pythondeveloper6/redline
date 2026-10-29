@@ -511,14 +511,16 @@ def call_name(frame: FrameType, capturer: CallsiteCapturer) -> str | None:
     project = next(
         (i for i, fr in enumerate(chain) if capturer.classify(fr.f_code.co_filename)), None
     )
-    inner = chain[:project] if project is not None else chain
+    if project is None:
+        return None  # A runner frame alone is not evidence of the project's call.
+    inner = chain[:project]
     modules = [(fr.f_globals.get("__name__") or "", fr.f_code.co_name) for fr in inner]
     for module, _ in modules:
         if module.startswith("django.db"):
             return "sync ORM"
     for module, _ in modules:
         if module.startswith("sqlalchemy."):
-            return "SQLAlchemy (sync)"
+            return "SQLAlchemy work"
     if modules:
         module, function = modules[-1]  # the API the project frame called
         top = module.split(".", 1)[0]
