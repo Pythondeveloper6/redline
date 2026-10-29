@@ -14,7 +14,7 @@ export interface Suggestion {
 export type IssueKind = 'application_error' | 'sql_error' | 'placeholder_in_comment' | 'dml_rowcount_unknown' | 'session_state_leak' | 'schema_drift' | 'fresh_connection_failure' | 'connection_churn' | 'connection_failure' | 'n_plus_one' | 'duplicate_query' | 'slow_query' | 'too_many_queries'
   | 'blocking_in_async' | 'large_result' | 'unbounded_query' | 'inefficient_count'
   | 'slow_serializer' | 'long_transaction' | 'external_in_transaction'
-  | 'slow_external' | 'duplicate_external' | 'retry_storm'
+  | 'slow_external' | 'duplicate_external' | 'retry_storm' | 'sql_retry_storm'
   | 'repeated_writes' | 'deep_offset' | 'database_round_trips' | 'connection_pool_wait' | 'large_response' | 'repeated_scan' | 'large_cache_entry' | 'many_orm_instances' | 'json_decode_hotspot' | 'slow_cache_decode'
 export type Severity = 'info' | 'warning' | 'critical'
 export interface Issue {

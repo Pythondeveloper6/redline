@@ -1330,8 +1330,8 @@ link to a verification suite. Browser interactions do not execute arbitrary shel
 
 Five packages remain in lockstep at 0.4.0a1; the storage schema remains additive v4.
 New issue kinds are sql_error, application_error, placeholder_in_comment,
-dml_rowcount_unknown, session_state_leak, schema_drift, fresh_connection_failure,
-connection_churn and connection_failure. Failed statements count as attempts and remain findings even
+dml_rowcount_unknown, session_state_leak, schema_drift, sql_retry_storm,
+fresh_connection_failure, connection_churn and connection_failure. Failed statements count as attempts and remain findings even
 when application code catches them. Missing codes, connection ages and observations
 stay unknown. Negative rowcounts never establish NOCOUNT or a failed write.
 
@@ -1359,7 +1359,9 @@ Built-in redaction profiles and route modes are applied before persistence, incl
 logs and exception locals. Shared-dev disables bodies, locals, SQL values and active UI
 actions. Redaction is pattern-based, not certification. User resolvers are synchronous,
 explicit callables returning only an identifier; callback failures cannot break responses.
-Request IDs are labels, never authorization credentials.
+Request IDs are labels, never authorization credentials. A SQL retry storm groups the same
+statement and callsite after at least `sql_retry_storm_threshold` attempts following a
+transient/disconnect/deadlock/timeout failure; it never retries or resets a connection.
 
 The bounded AST SQL checker never imports application modules. Offline findings are
 candidates; dynamic input, syntax failures and limits are visible. Explicit online
