@@ -2,19 +2,117 @@
 
 from __future__ import annotations
 
-from .sql import effective_kinds
+import hashlib
+import re
+
+from .sql import effective_kinds, fingerprint
 from .vendors import get_vendor
 
 
-def compile_statement(engine, sql):
+def _mssql_literal(sql):
+    return "N'" + sql.replace("'", "''") + "'"
+
+
+def _translate_named_binds(sql):
+    from .sql import _TOKEN
+
+    return _TOKEN.sub(
+        lambda match: "@" + match.group()[1:] if match.lastgroup == "named" else match.group(),
+        sql,
+    )
+
+
+def describe_mssql_parameters(conn, sql):
+    """Infer parameter types without executing the statement.
+
+    Returns ``(parameters, limitation)``. Driver or permission failures degrade to an
+    untyped compile; they never turn into a passing schema guarantee.
+    """
+    try:
+        rows = (
+            conn.exec_driver_sql(
+                "EXEC sys.sp_describe_undeclared_parameters @tsql = " + _mssql_literal(sql)
+            )
+            .mappings()
+            .all()
+        )
+    except Exception:
+        return [], "Parameter-type metadata was unavailable; compilation used declared names."
+    parameters = []
+    for row in rows[:64]:
+        record = dict(row)
+        name = record.get("name") or record.get("parameter_name")
+        type_name = record.get("suggested_system_type_name")
+        if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z_]\w{0,127}", name):
+            continue
+        if not isinstance(type_name, str) or not re.fullmatch(
+            r"[A-Za-z][A-Za-z0-9_ ]*(?:\([0-9, ]+\))?", type_name.strip()
+        ):
+            type_name = None
+        parameters.append({"name": name, "type": type_name})
+    return parameters, None
+
+
+def describe_mssql_result(conn, sql, kinds):
+    """Describe a single statement's result columns without executing it."""
+    if len(kinds) != 1 or kinds[0] not in {"SELECT", "WITH", "VALUES"}:
+        return [], None
+    try:
+        rows = (
+            conn.exec_driver_sql(
+                "EXEC sys.sp_describe_first_result_set @tsql = " + _mssql_literal(sql)
+            )
+            .mappings()
+            .all()
+        )
+    except Exception:
+        return [], "Result-set metadata was unavailable for this statement."
+    if rows and any(dict(row).get("error_number") is not None for row in rows):
+        return [], "SQL Server could not describe this statement's result set."
+    columns = []
+    hidden = ("is_hidden", "is_hidden_column")
+    for row in rows[:512]:
+        record = dict(row)
+        if any(record.get(key) for key in hidden):
+            continue
+        name = record.get("name")
+        if isinstance(name, str):
+            columns.append({"name": name, "type": str(record.get("system_type_name") or "")})
+    return columns, None
+
+
+def _mssql_compile_batch(sql, parameters):
+    declares, seen = [], set()
+    for parameter in parameters:
+        name, type_name = parameter.get("name"), parameter.get("type")
+        if not name or not type_name or name.lower() in seen:
+            continue
+        if re.search(rf"\bDECLARE\s+@{re.escape(name)}\b", sql, re.I):
+            continue
+        seen.add(name.lower())
+        declares.append(f"DECLARE @{name} {type_name};")
+    return "\n".join([*declares, _translate_named_binds(sql)])
+
+
+def missing_result_columns(reads, columns):
+    """Literal row reads absent from a described result set, sorted and deduplicated."""
+    known = {str(column.get("name", "")).lower() for column in columns}
+    return sorted(
+        {
+            str(read.get("name"))
+            for read in reads or ()
+            if str(read.get("name", "")).lower() not in known
+        }
+    )
+
+
+def compile_statement(engine, sql, *, result_reads=None):
     """Compile a supported single statement without running its DML.
 
     No functions or application modules are imported. Server compilation can involve
     extensions and planner functions, so use an isolated development database/login.
     Dynamic/procedural batches and session-control statements are refused.
     """
-    import re
-
     from sqlalchemy import text
 
     from .sql import _STRICT_INERT
@@ -35,6 +133,8 @@ def compile_statement(engine, sql):
     values = dict.fromkeys(statement.compile().params, None)
     with engine.connect() as conn:
         cleanup = None
+        limitations = []
+        extras = {}
         try:
             if vendor.name == "sqlite":
                 conn.execute(text("EXPLAIN " + sql), values).fetchall()
@@ -55,9 +155,20 @@ def compile_statement(engine, sql):
                 conn.execute(text("PREPARE redline_check FROM :statement"), {"statement": prepared})
                 cleanup = "DEALLOCATE PREPARE redline_check"
             elif vendor.name == "mssql":
+                parameters, limitation = describe_mssql_parameters(conn, sql)
+                if limitation:
+                    limitations.append(limitation)
+                columns, limitation = describe_mssql_result(conn, sql, kinds)
+                if limitation:
+                    limitations.append(limitation)
+                extras["parameters"] = parameters
+                extras["result_columns"] = columns
+                missing = missing_result_columns(result_reads, columns) if columns else []
+                if missing:
+                    extras["result_reads_missing"] = missing
                 cleanup = "SET NOEXEC OFF"
                 conn.exec_driver_sql("SET NOEXEC ON")
-                conn.execute(statement, values)
+                conn.exec_driver_sql(_mssql_compile_batch(sql, parameters))
             else:
                 return {
                     "status": "unresolved",
@@ -70,11 +181,13 @@ def compile_statement(engine, sql):
                     "parameter types, triggers and temporary objects may remain "
                     "unchecked."
                 ),
+                "limitations": limitations,
+                **extras,
             }
         except Exception as exc:
             error = vendor.classify_error(getattr(exc, "orig", exc))
             # Do not export driver messages: they may echo parameters, schema literals or DSNs.
-            return {"status": "error", "error": error}
+            return {"status": "error", "error": error, "limitations": limitations, **extras}
         finally:
             try:
                 if cleanup:
@@ -84,6 +197,25 @@ def compile_statement(engine, sql):
                 raise
             finally:
                 conn.rollback()
+
+
+def _missing_column_finding(file, statement, name):
+    identity = (
+        f"{file}:{statement['line']}:result-column-not-returned:"
+        f"{fingerprint(statement['sql'])}:{name.lower()}"
+    )
+    return {
+        "id": hashlib.sha256(identity.encode()).hexdigest()[:20],
+        "kind": "result-column-not-returned",
+        "file": file,
+        "line": statement["line"],
+        "detail": (
+            f"Row code reads column {name!r}, which the compiled SELECT does not return. "
+            "This is a best-effort literal-read check."
+        ),
+        "confidence": "low",
+        "fingerprint": fingerprint(statement["sql"]),
+    }
 
 
 def compile_paths(paths, dsn, *, snapshot=None):
@@ -131,13 +263,18 @@ def compile_paths(paths, dsn, *, snapshot=None):
             statements, skipped = extract(raw.decode("utf-8"), str(path))
             reports.extend({**s, "status": "unresolved"} for s in skipped)
             for statement in statements:
-                reports.append(
-                    {
-                        "file": str(path),
-                        "line": statement["line"],
-                        **compile_statement(engine, statement["sql"]),
-                    }
+                compiled = compile_statement(
+                    engine,
+                    statement["sql"],
+                    result_reads=statement.get("result_reads"),
                 )
+                item = {"file": str(path), "line": statement["line"], **compiled}
+                missing = compiled.get("result_reads_missing") or []
+                if missing:
+                    item["findings"] = [
+                        _missing_column_finding(str(path), statement, name) for name in missing
+                    ]
+                reports.append(item)
     finally:
         engine.dispose()
     return reports
