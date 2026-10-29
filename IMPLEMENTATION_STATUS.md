@@ -24,63 +24,56 @@ These are bounded implementations, not a promise of compatibility with every Pyt
 codebase. Full distributed trace stitching, a general OTLP span/log exporter, RQ/Dramatiq
 adapters and arbitrary shared-network-filesystem storage are not implemented support.
 
-## Local results (2026-10-29)
+## Successful full-stack qualification (2026-10-29)
+
+Run `20261029T052447Z-caaef5f7` completed with container exit code 0 and
+`qualified: true`. The implementation at `8a7ea9f` passed every requested Compose step.
+The machine-readable report and logs are under ignored `examples/testing/results/`.
+This record changes documentation only; it does not change the tested implementation.
 
 | Check | Result |
 |---|---|
-| Core excluding three server-dependent files | 1,472 passed, 6 optional-service skips |
-| Three server-dependent files | 18 passed; 21 setup errors at socket bind (`PermissionError: Operation not permitted`), no assertion failures |
-| Django | 202 passed, 1 optional PostgreSQL skip after storage-probe regressions |
+| Core, including network and live optional-service cases | 1,518 passed |
+| Django | 203 passed |
 | FastAPI | 125 passed |
 | Flask | 132 passed |
 | Litestar | 114 passed |
-| Optional Celery 5.6.3 | Eager success/failure/retry test passed using cached dependencies; no broker/prefork claim |
-| Frontend helpers | 35 passed; TypeScript and production build passed |
-| Demos | All four pattern workflows and the real-world workflow harness passed in-process |
-| Documentation | Strict MkDocs build passed |
-| Workflow definitions | Actionlint passed for CI, docs and release workflows |
-| Code hygiene | Ruff check/format, whitespace and lockstep version checks passed; offline lock check passed |
-| Packages | Five wheels and source distributions built; wheel imports/assets/type markers checked in a fresh environment using existing third-party dependencies |
-| Browser | Chrome desktop checks of safe-fallback request/SQL/payload views and synthetic Jobs list/detail; full mobile/accessibility/live-server review remains outstanding |
+| Live integrations and harness guards | 28 passed |
+| Python total | **2,120 passed; zero failures, errors or skips** |
+| Frontend | Unit tests, TypeScript and actual UI build required by the successful image build |
+| Browser | Real Chromium Jobs/detail, SQL checker, privacy preview and mobile overflow/screenshot tests passed |
+| Real databases | PostgreSQL, MySQL and SQL Server sync/async capture, handled failures, privacy and rollback cases passed |
+| Plans and compilation | All three vendor cases passed; SQL Server actual-plan/catalog and cleanup checks passed |
+| Worker | Actual Redis delivery, Celery prefork success/failure/retry, correlation and shutdown-drain case passed |
+| Demos | Both all-framework pattern and real-world workflow harnesses passed |
+| Documentation and hygiene | Strict MkDocs, Ruff check/format and lockstep versions passed |
+| Packages | Five wheels/source distributions, metadata validation, isolated wheel installation and wheel smoke passed |
 
-The core skips cover optional Celery, Redis and PostgreSQL services. Celery was checked
-separately in eager mode. Real SQL Server/MySQL probes were not executed against external
-databases; driver-shaped fixtures and probe guard tests are not live qualification.
+Recorded dependency versions: Django 5.2.18, SQLAlchemy 2.1.6, Celery 5.6.3,
+PyMySQL 1.2.3, pyodbc 5.3.0, aioodbc 0.5.0, mysqlclient 2.3.0, mssql-django 1.8.0,
+Hatchling 1.33.0, Twine 6.2.0 and packaging 26.3. The Compose baseline uses Python 3.13,
+PostgreSQL 16, MySQL 8.4, SQL Server 2022 Developer and Redis 7.4.
 
-## Reproducible full-stack tests
+Earlier failed runs exposed and led to fixes for test-environment configuration leakage,
+DSN formats, repeat-run virtual environments, metadata compatibility, effective storage
+permissions and sampling/timer assumptions. Those earlier partial runs are superseded
+by this complete green result.
 
-The committed test-project setup is in `examples/compose.yaml` and `examples/testing/`.
-It runs the five complete suites, live PostgreSQL/MySQL/SQL Server and Redis/prefork
-checks, Chromium desktop/mobile flows, demos, docs and package smoke tests. See
-[the shared guide](examples/testing/README.md). The first full container run failed qualification: live plans and Redis/prefork passed,
-but test-runner configuration, DSN, metadata and repeat-run issues caused other failures.
-The second container run passed every check except one Django permission test under
-root. That test and the shared effective-write probe are corrected; local Django has
-202 passes and one optional PostgreSQL skip. A subsequent container run passed Django
-and every check except a fast-request profiling assertion in Litestar. Profiling tests
-now use a sufficiently long existing route, with explicit zero-sample core coverage.
-Rebuild/rerun the full container suite.
-This session cannot access OrbStack's socket and elevated Docker execution is disabled.
-Do not treat test definitions or earlier partial successes as full qualification.
+## Remaining release steps
 
-## Remaining release gates
+1. Review the combined release branch and authorize the single final merge into `main`.
+   Nothing is pushed or merged by this validation record.
+2. Require main CI to pass, including native Linux amd64 Compose qualification and the
+   broader supported Python/framework matrix. CI/docs run on main pushes only; branch
+   protection must enforce PR merges if direct main pushes must be prohibited.
+3. Publishing requires owner authorization, the exact package version in
+   `REDLINE_RELEASE_VERSION` and the configured environment approvals. All five packages
+   are currently `0.4.0a1`; this is an alpha release. See [RELEASING.md](RELEASING.md).
+4. Roll out record-and-inspect mode as a canary in the actual production topology.
+   Validate deployment-specific filesystem, credentials, framework/driver versions,
+   request concurrency, load/overhead and accessibility requirements. A passing Compose
+   baseline does not establish compatibility with every codebase or arbitrary network
+   filesystem. Existing benchmarks do not measure this release.
 
-1. Rebuild and rerun the entire Compose suite after the harness corrections. The
-   container run did execute the network tests; a stop test exposed a startup-timer
-   assumption, now replaced by completion-driven synchronization. Require zero failed,
-   errored or skipped tests in the new report. The authoring shell still blocks sockets.
-2. Run the disposable MySQL/SQL Server probes described in
-   [the Flask demo](examples/flask/README.md), then validate the actual framework/driver,
-   database version, worker lifecycle, storage volume and concurrency used in deployment.
-   Qualify broker delivery/retries/prefork separately from Celery eager mode.
-3. Complete full UI/mobile/accessibility review and deployment load/overhead checks.
-   Earlier benchmark figures do not measure this release.
-4. Review the combined committed changes, then perform the single authorized final
-   merge when validation is accepted. CI/docs run on main pushes; successful main CI
-   builds the exact tested commit. Branch protection must prevent direct main pushes
-   if literal merges-only enforcement is required.
-5. Publishing additionally requires the exact package version in
-   `REDLINE_RELEASE_VERSION`, existing environment approvals, and owner authorization.
-   See [RELEASING.md](RELEASING.md). Merging alone does not authorize publication.
-
-This is an unreleased alpha candidate, not a production-qualified release yet.
+The complete local integration gate is green. Main CI and publication authorization
+remain separate gates; no tag or publication has occurred.
