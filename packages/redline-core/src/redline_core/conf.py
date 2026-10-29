@@ -63,6 +63,7 @@ FEATURES: tuple[str, ...] = (
     "explain",
     "profile",
     "replay",
+    "replay_writes",
     "snapshot",
     "load",
     "logs",
@@ -73,8 +74,46 @@ FEATURES: tuple[str, ...] = (
 #: What each preset changes; a preset only sets defaults – any explicit value wins.
 PRESETS: dict[str, dict[str, Any]] = {
     "dev": {},
-    "staging": {"sample_rate": 0.25, "access": "token", "capture_locals": False},
+    "shared-dev": {
+        "capture_request_body": False,
+        "capture_response_body": False,
+        "capture_locals": False,
+        "capture_error_details": False,
+        "capture_logs": False,
+        "capture_sql_params": False,
+        "log_level": "WARNING",
+        "access": "token",
+        "read_only": True,
+        "max_age_days": 3,
+        "load_from_ui": False,
+        "checks_from_ui": False,
+        "analysis_from_ui": False,
+        "features": {"replay": False, "replay_writes": False},
+    },
+    "staging": {
+        "sample_rate": 0.25,
+        "access": "token",
+        "capture_locals": False,
+        "capture_sql_params": False,
+        "features": {"replay_writes": False},
+    },
     "production": {
+        "writer_queue_size": 64,
+        "max_trace_bytes": 262_144,
+        "max_span_data_bytes": 8_192,
+        "max_sql_bytes": 16_384,
+        "max_spans_per_trace": 500,
+        "capture_sql_params": False,
+        "capture_error_details": False,
+        "capture_logs": False,
+        "features": {
+            "replay": False,
+            "replay_writes": False,
+            "load": False,
+            "checks": False,
+            "explain": False,
+            "profile": False,
+        },
         "sample_rate": 0.05,
         "always_keep_errors": True,
         "capture_request_body": False,
@@ -134,6 +173,8 @@ class Settings:
 
     enabled: bool = True
     storage_path: str = ".redline/redline.db"
+    storage_role: str = "web"
+    extra_stores: tuple[str, ...] = ()
 
     # sampling (what gets stored)
     sample_rate: float = 1.0
@@ -150,6 +191,18 @@ class Settings:
     redact_headers: tuple[str, ...] = DEFAULT_REDACT_HEADERS
     #: Regular expressions matched (``re.search``) against body/query/param key names.
     redact_keys: tuple[str, ...] = DEFAULT_REDACT_KEYS
+
+    capture_sql_params: bool | str = True
+    redact_profiles: tuple[str, ...] = ()
+    redact_tables: tuple[str, ...] = ()
+    redact_routes: Mapping[str, str] = field(default_factory=dict)
+    capture_loggers: tuple[str, ...] = ()
+    ignore_loggers: tuple[str, ...] = ()
+    session_expected: Mapping[str, str] = field(default_factory=lambda: {"NOCOUNT": "OFF"})
+    user_resolver: Any = None
+    request_id_headers: tuple[str, ...] = ("X-Request-ID", "X-Correlation-ID")
+    allow_storage_in_repo: bool = False
+    instrument_engines: str = "explicit"
 
     # detectors
     n_plus_one_threshold: int = 5
@@ -169,6 +222,10 @@ class Settings:
     max_age_days: int | None = 7
     #: Bound of the background writer's queue; traces beyond it are dropped and counted.
     writer_queue_size: int = 1_000
+    max_sql_bytes: int = 65_536
+    max_span_data_bytes: int = 32_768
+    max_tag_bytes: int = 2_048
+    max_trace_bytes: int = 1_048_576
 
     #: Spans kept per trace; beyond it spans are counted but not stored (``0``/``None``:
     #: no cap). Query counts, query time and N+1 detection stay exact.
@@ -204,6 +261,7 @@ class Settings:
     log_level: str = "INFO"
     max_logs_per_trace: int = 200
     capture_locals: bool = True
+    capture_error_details: bool = True
 
     # developer experience
     #: ``vscode``, ``cursor``, ``pycharm``, ``idea``, ``sublime``, ``none`` or a template
@@ -303,6 +361,20 @@ class Settings:
             if not isinstance(key, str):
                 raise SettingsError(f"Redline setting names must be strings, got {key!r}.")
             raw[key.lower()] = value
+        redact = raw.pop("redact", None)
+        if redact is not None:
+            if not isinstance(redact, Mapping) or set(redact) - {
+                "keys",
+                "tables",
+                "profiles",
+                "routes",
+            }:
+                raise SettingsError("redact accepts keys, tables, profiles and routes")
+            for name, value in redact.items():
+                target = "redact_" + name
+                if target in raw:
+                    raise SettingsError(f"Configure either redact.{name} or {target}, not both")
+                raw[target] = value
         known = cls.field_names()
         unknown = sorted(set(raw) - set(known))
         if unknown:
@@ -357,6 +429,12 @@ class Settings:
 
 
 _SEQ_FIELDS = {
+    "extra_stores",
+    "redact_profiles",
+    "redact_tables",
+    "capture_loggers",
+    "ignore_loggers",
+    "request_id_headers",
     "ignore_paths",
     "redact_headers",
     "redact_keys",
@@ -365,7 +443,7 @@ _SEQ_FIELDS = {
     "trusted_proxies",
 }
 _PATH_FIELDS = {"storage_path", "project_root", "token_file"}
-_MAP_FIELDS = {"basic_users", "features"}
+_MAP_FIELDS = {"basic_users", "features", "redact_routes", "session_expected"}
 #: Integer settings where ``0`` and ``None`` both mean "no limit".
 _OPTIONAL_LIMITS = ("max_rows", "max_age_days", "max_spans_per_trace", "history_retention_days")
 
@@ -436,13 +514,19 @@ def _validate(s: Settings) -> None:
         "detect_blocking",
         "capture_logs",
         "capture_locals",
+        "capture_error_details",
         "load_from_ui",
         "read_only",
         "ui_enabled",
         "trust_unix_socket",
+        "allow_storage_in_repo",
     ):
         _check_type(s, name, (bool,), "True or False")
     for name in (
+        "max_sql_bytes",
+        "max_span_data_bytes",
+        "max_tag_bytes",
+        "max_trace_bytes",
         "orm_instances_threshold",
         "repeated_writes_threshold",
         "deep_offset_rows",
@@ -464,6 +548,14 @@ def _validate(s: Settings) -> None:
         _check_type(s, name, (int,), "an integer")
         if getattr(s, name) < 0:
             raise SettingsError(f"Redline setting {name!r} must not be negative.")
+    for name, minimum in {
+        "max_sql_bytes": 256,
+        "max_span_data_bytes": 256,
+        "max_tag_bytes": 32,
+        "max_trace_bytes": 4096,
+    }.items():
+        if getattr(s, name) < minimum:
+            raise SettingsError(f"{name} must be at least {minimum}")
     for name in _OPTIONAL_LIMITS:
         if getattr(s, name) is None:
             continue
@@ -541,6 +633,31 @@ def _validate(s: Settings) -> None:
             re.compile(pattern)
         except re.error as exc:
             raise SettingsError(f"Invalid regular expression {pattern!r}: {exc}.") from None
+    if not isinstance(s.capture_sql_params, bool) and s.capture_sql_params != "reads_only":
+        raise SettingsError("capture_sql_params must be True, False or 'reads_only'")
+    if any(not isinstance(k, str) or not isinstance(v, str) for k, v in s.session_expected.items()):
+        raise SettingsError("session_expected maps option names to expected SQL values")
+    if s.user_resolver is not None and not callable(s.user_resolver):
+        raise SettingsError("user_resolver must be a synchronous callable or None")
+    if not isinstance(s.storage_role, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", s.storage_role):
+        raise SettingsError("storage_role must be a simple role name")
+    if len(s.extra_stores) > 8:
+        raise SettingsError("At most eight extra_stores are supported")
+    if s.instrument_engines not in {"explicit", "all", "flask_sqlalchemy"}:
+        raise SettingsError("instrument_engines must be explicit, all or flask_sqlalchemy")
+    from .privacy import PROFILES
+
+    if set(s.redact_profiles) - set(PROFILES):
+        raise SettingsError("Unknown redaction profile")
+    if any(
+        not isinstance(k, str) or v not in {"body", "values"} for k, v in s.redact_routes.items()
+    ):
+        raise SettingsError("redact_routes maps method/path patterns to body or values")
+    for pattern in s.redact_tables:
+        try:
+            re.compile(pattern)
+        except re.error as exc:
+            raise SettingsError(f"Invalid table pattern: {exc}") from None
     _validate_access(s)
 
 

@@ -97,7 +97,7 @@ class _Runtime:
             alias = alias_for(engine, self.engines)
         self.engines[alias] = engine
         if self.settings.enabled:
-            instrument_engine(engine, alias)
+            instrument_engine(engine, alias, recorder=self.recorder)
         return alias
 
     def discover_engines(self) -> None:
@@ -181,7 +181,17 @@ class Redline:
         url_prefix: str | None = None,
         permission: Callable[[Any], Any] | None = None,
         store: Store | None = None,
+        recorder: Recorder | None = None,
+        mode: str = "standalone",
     ) -> None:
+        if mode not in {"standalone", "nested"}:
+            raise ValueError("mode must be standalone or nested")
+        if mode == "nested" and (recorder is None or recorder.store is None):
+            raise ValueError("nested mode requires the outer recorder with a configured store")
+        if recorder is not None and (settings is not None or store is not None):
+            raise ValueError("A shared recorder owns its settings and store")
+        self._shared_recorder = recorder
+        self._mode = mode
         if url_prefix is not None:
             url_prefix = "/" + url_prefix.strip("/")
             if url_prefix == "/":
@@ -241,7 +251,7 @@ class Redline:
     def init_app(self, app: Flask) -> None:
         if "redline" in app.extensions:
             raise RuntimeError("Redline is already installed on this app.")
-        settings = self._settings
+        settings = self._shared_recorder.settings if self._shared_recorder else self._settings
         if not isinstance(settings, Settings):
             settings = {**(app.config.get(CONFIG_KEY) or {}), **(settings or {})}
         resolved = resolve_settings(settings, native_hook=self.permission is not None)
@@ -252,9 +262,15 @@ class Redline:
         if own not in cfg.ignore_paths:
             cfg = cfg.replace(ignore_paths=[*cfg.ignore_paths, own])
 
-        store = self._store if self._store is not None else SQLiteStore.from_settings(cfg)
+        store = (
+            self._shared_recorder.store
+            if self._shared_recorder
+            else self._store
+            if self._store is not None
+            else SQLiteStore.from_settings(cfg)
+        )
         suggester = SQLAlchemyFixSuggester(None, project_root=cfg.project_root)
-        recorder = configure(cfg, store, [suggester])
+        recorder = self._shared_recorder or configure(cfg, store, [suggester])
 
         permission = self.permission
         runtime = _Runtime(
@@ -281,6 +297,7 @@ class Redline:
                 app.wsgi_app,
                 recorder,
                 prefix,
+                nested=self._mode == "nested",
                 badge=runtime.badge_on,
                 debug=lambda: bool(app.debug),
                 force_ok=lambda environ: runtime.access.may_force(
@@ -289,4 +306,5 @@ class Redline:
             )
             install_hooks(app, runtime.discover_engines)
             runtime.discover_engines()
-        atexit.register(runtime.close)
+        if self._shared_recorder is None:
+            atexit.register(runtime.close)

@@ -19,6 +19,10 @@ import sys
 from collections.abc import Callable, Sequence
 from typing import Any, TextIO
 
+from . import operations
+from .check_sql import command as _cmd_sql
+from .check_sql import configure_cli as _configure_sql
+
 __all__ = ["COMMANDS", "main"]
 
 EXIT_OK, EXIT_FAIL, EXIT_USAGE, EXIT_INTERRUPTED = 0, 1, 2, 130
@@ -1346,6 +1350,25 @@ Handler = Callable[[argparse.Namespace, TextIO, TextIO], int]
 
 #: name -> (help, configure(parser), handler, subcommands {name: (help, configure, handler)})
 COMMANDS: dict[str, tuple[str, Callable[[argparse.ArgumentParser], None], Handler, dict]] = {
+    "export": (
+        "preview or explicitly send sanitized OTLP recording summaries",
+        operations.configure_export,
+        operations.export_command,
+        {},
+    ),
+    "audit-store": (
+        "count possible unmasked profile keys without displaying values",
+        operations.configure_audit,
+        operations.audit_command,
+        {},
+    ),
+    "check-imports": (
+        "explicitly import a development target in an isolated subprocess",
+        operations.configure_imports,
+        operations.imports_command,
+        {},
+    ),
+    "check-sql": ("lint SQL in Python without importing the app", _configure_sql, _cmd_sql, {}),
     "analyze": ("analyze Python source without executing it", _configure_analyze, _cmd_analyze, {}),
     "load": (
         "run a load test (open model) against a running app",

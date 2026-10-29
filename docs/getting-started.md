@@ -18,54 +18,39 @@ Redline is a core and one adapter per framework, released in lockstep:
 | `flask-redline` | `flask_redline` | you run Flask, with or without Flask-SQLAlchemy |
 | `litestar-redline` | `litestar_redline` | you run Litestar with SQLAlchemy |
 
-!!! warning "Install from GitHub: Redline is not on PyPI yet"
-
-    Each adapter pins the exact core it was tested with (`redline-core==0.2.0a1`). If you
-    install an adapter from Git **alone**, pip looks for `redline-core` on PyPI, finds
-    nothing and fails:
-
-    ```text
-    ERROR: Could not find a version that satisfies the requirement redline-core==0.2.0a1
-    ```
-
-    Name the core in the **same command** and pip uses your URL to satisfy the pin.
-
-    There is a second reason to be careful: the name `redline-core` is not reserved on
-    PyPI by this project. Never run `pip install redline-core` against the public index
-    for a package you did not publish yourself, and always install the core from the Git
-    URL.
+Published prereleases are available on PyPI. Choose your framework's adapter; it
+installs its matching core. The checkout may contain newer features than the published
+version, so use a local workspace when testing unreleased changes.
 
 === "Django"
 
     ```bash
-    pip install \
-      "django-redline @ git+https://github.com/Pythondeveloper6/redline#subdirectory=packages/django-redline" \
-      "redline-core @ git+https://github.com/Pythondeveloper6/redline#subdirectory=packages/redline-core"
+    pip install --pre django-redline
     ```
 
 === "FastAPI"
 
     ```bash
-    pip install \
-      "fastapi-redline @ git+https://github.com/Pythondeveloper6/redline#subdirectory=packages/fastapi-redline" \
-      "redline-core @ git+https://github.com/Pythondeveloper6/redline#subdirectory=packages/redline-core"
+    pip install --pre fastapi-redline
     ```
 
 === "Flask"
 
     ```bash
-    pip install \
-      "flask-redline @ git+https://github.com/Pythondeveloper6/redline#subdirectory=packages/flask-redline" \
-      "redline-core @ git+https://github.com/Pythondeveloper6/redline#subdirectory=packages/redline-core"
+    pip install --pre flask-redline
     ```
 
 === "Litestar"
 
     ```bash
-    pip install \
-      "litestar-redline @ git+https://github.com/Pythondeveloper6/redline#subdirectory=packages/litestar-redline" \
-      "redline-core @ git+https://github.com/Pythondeveloper6/redline#subdirectory=packages/redline-core"
+    pip install --pre litestar-redline
     ```
+
+Each adapter pins the exact core it was tested with. Pin both to the same release in
+your deployment lock file; do not mix an unreleased adapter with an older core. Review the
+[PyPI project](https://pypi.org/project/django-redline/) and release history when choosing
+a published version. Alpha releases require deployment-specific validation before use
+with real traffic; see [Production](production.md).
 
 Add extras to the **core** requirement:
 
@@ -76,11 +61,12 @@ Add extras to the **core** requirement:
 | `httpx`, `requests`, `redis`, `asyncpg`, `psycopg`, `strawberry`, `graphene` | the library at a compatible version | the matching [integration](integrations.md) |
 
 ```bash
-pip install "redline-core[profile,load] @ git+https://github.com/Pythondeveloper6/redline#subdirectory=packages/redline-core"
+pip install --pre "redline-core[profile,load]"
 ```
 
-`uv pip install` accepts the same requirement strings. In a lock file, pin a tag or a
-commit (`...redline@<sha>#subdirectory=...`) rather than a moving branch.
+Use the core version pinned by your installed adapter when adding extras. `uv pip install`
+accepts the same requirements. If installing directly from Git, install adapter and core
+from the same reviewed commit in one command; pin that commit instead of a moving branch.
 
 To work on Redline itself, or to try the demos, clone the repository instead:
 

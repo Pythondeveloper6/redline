@@ -22,16 +22,15 @@ your app DB or records itself, supports async, groups N+1s, and adds EXPLAIN and
 ## Install
 
 ```bash
-pip install \
-  "django-redline @ git+https://github.com/Pythondeveloper6/redline#subdirectory=packages/django-redline" \
-  "redline-core @ git+https://github.com/Pythondeveloper6/redline#subdirectory=packages/redline-core"
+pip install --pre django-redline
 ```
 
-Not on PyPI yet: install from GitHub, naming `redline-core` in the same command (the adapter
-pins it exactly). Docs: <https://pythondeveloper6.github.io/redline/>.
+Published packages are available on PyPI. This checkout describes development v0.4;
+installed behavior depends on the released version. Docs:
+<https://pythondeveloper6.github.io/redline/>.
 
-Add the extra to the core requirement for flamegraphs:
-`"redline-core[profile] @ git+https://github.com/Pythondeveloper6/redline#subdirectory=packages/redline-core"`.
+For flamegraphs install the adapter's profile extra:
+`pip install --pre "django-redline[profile]"`.
 
 ```python
 # settings.py
@@ -187,6 +186,43 @@ with span("render-pdf", pages=3):
 
 Supports Django 5.2, 6.0 and 6.1 on Python 3.12+. A runnable demo is in
 [`examples/django`](https://github.com/Pythondeveloper6/redline/blob/main/examples/django).
+
+
+## v0.4 real-world workflows
+
+The next release adds:
+
+- Handled SQL failures with vendor/SQLSTATE/native-code classification, raw rowcounts,
+  failed-attempt counts and stable issue groups, even when the application returns HTTP 200.
+- SQL Server estimated plans, guarded actual-plan collection and catalog candidates;
+  explicit engine ownership, optional all-engine observation and observed session-state evidence.
+- Offline `redline check-sql` for supported raw-SQL Python shapes, JSON/JUnit reports,
+  baselines, explicit compile checks and schema snapshots. Static checks are conservative.
+- Generic background jobs, stages, row outcomes, retries and optional Celery signals;
+  a Jobs page and commit-before-failure evidence for investigating partial job completion.
+- SQL value policies, privacy profiles, route rules, request/user correlation and redaction preview.
+- Bounded capture, failure-safe observation, storage auditing, read-only worker-store browsing,
+  and explicit sanitized OTLP summary export.
+
+Use these to investigate a caught database error, a migration that broke raw SQL, a worker
+that committed before failing, an N+1 endpoint, or a performance refactor whose responses
+must remain equivalent. The UI exposes SQL evidence, jobs, offline SQL checks and privacy
+preview alongside the existing timelines, plans, profiles and refactor reports.
+
+For production choose the **record-and-inspect** preset, private storage and authenticated
+access. Replay, load/refactor runs, source analysis and database plan execution are disabled
+by default there. Live MySQL/SQL Server drivers, broker/prefork behavior and the intended
+filesystem/deployment must be qualified before rollout; fixture tests do not establish
+compatibility with every codebase.
+
+See the detailed [workflow guide](https://github.com/Pythondeveloper6/redline/blob/main/docs/real-world-workflows.md),
+[production guide](https://github.com/Pythondeveloper6/redline/blob/main/docs/production.md)
+and [feature catalog](https://github.com/Pythondeveloper6/redline#feature-catalog).
+
+Please test Redline on a real development or staging project and
+[open an issue](https://github.com/Pythondeveloper6/redline/issues/new) for bugs or feature
+requests. Include framework/database/driver versions and a small sanitized reproduction.
+Never post credentials or private recordings; follow the security policy for vulnerabilities.
 
 ## License
 

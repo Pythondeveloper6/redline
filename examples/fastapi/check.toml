@@ -1,6 +1,6 @@
 # Refactor-check suite for the FastAPI demo shop. See "Try the refactor check" in README.md.
 name = "fastapi shop"
-base_url = "http://127.0.0.1:8000"
+base_url = "http://127.0.0.1:8011"
 timeout_s = 10
 repeat = 10
 warmup = 2

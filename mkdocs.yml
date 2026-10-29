@@ -119,6 +119,7 @@ nav:
   - Analysis:
       - Detectors overview: detectors.md
       - Performance workflows: performance-workflows.md
+      - Real-world workflows: real-world-workflows.md
       - Queries and data:
           - Database: database.md
           - Static N+1 scan: static-scan.md
@@ -147,6 +148,7 @@ nav:
       - Configuration: configuration.md
       - Access control: access-control.md
       - Production: production.md
+      - Full-stack testing: testing.md
       - Security: security.md
       - Storage: storage.md
       - Performance and overhead: performance.md

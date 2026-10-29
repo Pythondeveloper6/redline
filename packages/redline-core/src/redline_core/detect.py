@@ -35,6 +35,8 @@ import logging
 from collections.abc import Iterable, Sequence
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
+from redline_core.diagnostics import capture_failure
+
 from . import detectors
 from . import sql as sqlmod
 from .conf import Settings
@@ -235,7 +237,12 @@ class Detector:
             try:
                 found.extend(fn(trace, self.settings))
             except Exception:  # one broken detector must not hide the others
-                logger.exception("Redline detector %r failed", fn)
+                capture_failure("Redline detector failed")
+                trace.truncated = {
+                    **(trace.truncated or {}),
+                    "analysis_failed": True,
+                    "incomplete_evidence": True,
+                }
         return found
 
     def _suggest(self, issue: Issue, spans: list[Span]) -> Suggestion | None:
@@ -243,7 +250,7 @@ class Detector:
             try:
                 suggestion = suggester.suggest(issue, spans)
             except Exception:  # a broken suggester must never break a request
-                logger.exception("Redline fix suggester %r failed", suggester)
+                capture_failure("Redline fix suggester failed")
                 continue
             if suggestion is not None:
                 return suggestion
@@ -260,7 +267,13 @@ class Detector:
         groups: dict[tuple[str, str | None], list[Span]] = {}
         for s in spans:
             data = s.data
-            if not data.get("explainable", sqlmod.is_explainable(data.get("sql", ""))):
+            if not (
+                data.get(
+                    "read_query",
+                    data.get("explainable", sqlmod.is_explainable(data.get("sql", ""))),
+                )
+                or sqlmod.statement_kind(data.get("sql", "")) in {"EXEC", "EXECUTE"}
+            ):
                 continue
             fp = data.get("fingerprint") or sqlmod.fingerprint(data.get("sql", ""))
             loc = s.callsite.location if s.callsite else None
@@ -304,6 +317,8 @@ class Detector:
         threshold = self.settings.duplicate_threshold
         groups: dict[tuple[str, str], list[Span]] = {}
         for s in spans:
+            if s.data.get("params_captured") is False:
+                continue
             raw = s.data.get("sql", "")
             groups.setdefault((raw, _params_key(s.data.get("params"))), []).append(s)
         issues = []
@@ -327,7 +342,8 @@ class Detector:
                     detail=(
                         f"Exactly the same query with the same parameters ran "
                         f"{_plural(n, 'time')} ({total:.1f} ms in total); every run after "
-                        "the first returned data the request already had."
+                        "the first repeated observed work. Reads can change with database state; "
+                        "repeated writes may be intentional."
                     ),
                     span_ids=[s.id for s in group],
                     fingerprint=fp,

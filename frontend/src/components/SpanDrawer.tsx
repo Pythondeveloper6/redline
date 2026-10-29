@@ -44,6 +44,10 @@ export default function SpanDrawer({ span, onClose, onExplain }: { span: Span | 
                 <CopyButton text={d.sql ?? ''} label="Copy SQL" />
                 {!onExplain ? null : d.explainable ? <button className="btn btn-accent" onClick={() => onExplain(span)}>Explain</button> : <span className="text-[12px] text-muted self-center">Only SELECT queries can be explained.</span>}
               </div>
+              {d.params_captured === false && <p className="text-muted">SQL values were not captured. EXPLAIN is unavailable for this recording.</p>}
+              {d.error && <div className="card border-bad/40 p-3" role="note"><strong>SQL statement failed</strong><p>{d.error.type} · {d.error.category} · SQLSTATE {d.error.sqlstate ?? 'unknown'} · native {d.error.native ?? 'unknown'}</p><p className="break-words">{d.error.message}</p><p>The application may have caught this error.</p></div>}
+              {d.connection && <details className="card p-3"><summary className="cursor-pointer">Connection evidence</summary><pre className="overflow-x-auto mt-2">{JSON.stringify(d.connection, null, 2)}</pre><p className="text-muted">Observed connection lifetime and statement counts. Missing values are unknown.</p></details>}
+              {d.rowcount_raw != null && <p>Raw driver rowcount: <code>{d.rowcount_raw}</code>. A negative value means unavailable, not zero affected rows.</p>}
               {Array.isArray(d.params) && d.params.length > 0 && <div><div className="text-[12px] font-semibold mb-1">Params</div><pre className="m-0 rounded-md bg-raised p-2 overflow-x-auto">{JSON.stringify(d.params)}</pre></div>}
             </>
           )}
@@ -63,6 +67,7 @@ export default function SpanDrawer({ span, onClose, onExplain }: { span: Span | 
             {span.kind === 'pool_wait' && <><KV k="Database">{d.db_alias}</KV><KV k="Pool"><span className="num">{d.checked_out ?? '-'} / {d.pool_size ?? '-'}</span> <span className="text-muted">connections checked out</span></KV></>}
             {(span.kind === 'view' || span.kind === 'middleware' || span.kind === 'custom') && <KV k="Name"><span className="mono">{span.name}</span></KV>}
           </div>
+          {d.session_state_leak && <div className="card p-3"><strong>Session switches observed at checkin</strong><pre className="overflow-x-auto mt-2">{JSON.stringify(d.session_state_leak, null, 2)}</pre><p className="text-muted">Observation only. No connection settings were changed by Redline.</p></div>}
           <StackList span={span} />
         </>
       )}

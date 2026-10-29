@@ -77,6 +77,13 @@ SOURCES = ("default", "adapter", "preset", "file", "env", "framework")
 GROUPS: dict[str, tuple[str, ...]] = {
     "capture": (
         "enabled",
+        "capture_sql_params",
+        "redact_profiles",
+        "redact_tables",
+        "redact_routes",
+        "capture_loggers",
+        "ignore_loggers",
+        "request_id_headers",
         "capture_request_body",
         "capture_response_body",
         "max_body_bytes",
@@ -87,7 +94,12 @@ GROUPS: dict[str, tuple[str, ...]] = {
         "log_level",
         "max_logs_per_trace",
         "capture_locals",
+        "capture_error_details",
         "max_spans_per_trace",
+        "max_sql_bytes",
+        "max_span_data_bytes",
+        "max_tag_bytes",
+        "max_trace_bytes",
         "profile",
         "profile_sample_rate",
         "server_timing",
@@ -281,6 +293,8 @@ def parse_env_value(name: str, raw: str, *, label: str | None = None) -> Any:
     label = label or f"{ENV_PREFIX}{name.upper()}"
     kind = _kind(name)
     text = raw.strip()
+    if name == "capture_sql_params":
+        return "reads_only" if text == "reads_only" else _parse_bool(text, label)
     if kind.endswith("?") and text.lower() in _NONE:
         return None
     base = kind.rstrip("?")
@@ -467,6 +481,20 @@ def _lower_keys(mapping: Mapping[str, Any] | None, where: str) -> dict[str, Any]
         if not isinstance(key, str):
             raise SettingsError(f"Redline setting names must be strings, got {key!r} ({where}).")
         out[key.lower()] = value
+    redact = out.pop("redact", None)
+    if redact is not None:
+        if not isinstance(redact, Mapping) or set(redact) - {
+            "keys",
+            "tables",
+            "profiles",
+            "routes",
+        }:
+            raise SettingsError("redact accepts keys, tables, profiles and routes")
+        for name, value in redact.items():
+            target = "redact_" + name
+            if target in out:
+                raise SettingsError(f"Configure either redact.{name} or {target}, not both")
+            out[target] = value
     return out
 
 

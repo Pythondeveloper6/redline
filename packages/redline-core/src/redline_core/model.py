@@ -57,6 +57,14 @@ SpanKind = Literal[
     "pool_wait",
 ]
 IssueKind = Literal[
+    "fresh_connection_failure",
+    "connection_churn",
+    "connection_failure",
+    "application_error",
+    "sql_error",
+    "placeholder_in_comment",
+    "dml_rowcount_unknown",
+    "session_state_leak",
     "n_plus_one",
     "duplicate_query",
     "slow_query",
@@ -101,6 +109,14 @@ SPAN_KINDS: tuple[str, ...] = (
     "pool_wait",
 )
 ISSUE_KINDS: tuple[str, ...] = (
+    "fresh_connection_failure",
+    "connection_churn",
+    "connection_failure",
+    "application_error",
+    "sql_error",
+    "placeholder_in_comment",
+    "dml_rowcount_unknown",
+    "session_state_leak",
     "n_plus_one",
     "duplicate_query",
     "slow_query",

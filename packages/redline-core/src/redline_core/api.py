@@ -37,6 +37,8 @@ from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlsplit
 
+from redline_core.diagnostics import capture_failure
+
 from . import __version__, ui
 from .access import is_local_host, route_policy
 from .conf import FEATURES, Settings, editor_url_template, resolve_release
@@ -217,7 +219,7 @@ class RedlineAPI:
         except (_NotSupported, NotImplementedError) as exc:
             return error(501, "not_supported", str(exc) or "This store does not support it.")
         except Exception as exc:  # the profiler UI must never take the app down
-            logger.exception("Redline API error on %s %s", method, path)
+            capture_failure("Redline API processing failed")
             return error(500, "internal_error", f"{type(exc).__name__}: {exc}")
 
     def _route(
@@ -495,9 +497,25 @@ class RedlineAPI:
         trace = self.store.get(trace_id, include_profile=False)
         if trace is None:
             return error(404, "trace_not_found", f"No trace {trace_id!r}.")
+        if trace.tags.get("secondary_store"):
+            return error(
+                403,
+                "secondary_store",
+                (
+                    "Open EXPLAIN in the worker’s own Redline instance; this UI cannot "
+                    "verify its database binding."
+                ),
+            )
         span = trace.span(span_id)
         if span is None:
             return error(404, "span_not_found", f"No span {span_id!r} in trace {trace_id!r}.")
+        if span.data.get("auto_engine"):
+            return error(
+                501,
+                "unregistered_engine",
+                "Register this engine with the application before database inspection; "
+                "its recorded alias is observation-only.",
+            )
         if span.kind != "sql" or not span.data.get("explainable"):
             return error(
                 400, "not_explainable", "Only single read-only SELECT queries can be explained."

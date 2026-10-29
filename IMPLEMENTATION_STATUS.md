@@ -1,92 +1,79 @@
-# v0.3 selected feature expansion
+# v0.4 release validation
 
-Implementation is present on `release/v0.3`, version `0.3.0a1`.
-No merge, tag, publication or current CI success is claimed. `HANDOFF.md` is unchanged.
+All implementation, tests, examples, UI and documentation are together on local
+`release/v0.4`. All five distributions currently use `0.4.0a1`.
+There is one planned final merge to `main` and one coordinated release. Nothing has
+been pushed, tagged or published. `HANDOFF.md` remains unchanged and uncommitted.
 
-**Deferred to the next release:** F03, F08, F14 and F16. They are not implemented here.
+## Implemented scope
 
-The user guide and test instructions are in [Performance workflows](docs/performance-workflows.md).
-The selection is recorded in [Feature candidates](FEATURE_CANDIDATES.md).
+- SQL failure evidence, structured vendor errors, raw rowcounts, comment-placeholder
+  checks, optional all-engine observation and observed connection/session-state findings.
+- SQL Server estimated and guarded actual plans, catalog inspection, offline SQL checks,
+  explicit compilation and schema snapshots, with documented support limits.
+- Jobs, stages, bounded row outcomes, Celery signals, request/user correlation and
+  commit-before-failure evidence; Jobs and SQL/privacy tools in the UI.
+- Production record-and-inspect defaults, bounded capture, safe privacy fallbacks,
+  failure-safe SQL observers, recorder ownership, storage loss counters, readonly
+  secondary browsing and duplicate-ID refusal.
+- Root and package READMEs, detailed production/settings/security/API/workflow guides,
+  expanded demos and driver probes. See [README](README.md),
+  [workflow guide](docs/real-world-workflows.md) and [release plan](RELEASE_0_4_PLAN.md).
 
-## Where to test the selected features
+These are bounded implementations, not a promise of compatibility with every Python
+codebase. Full distributed trace stitching, a general OTLP span/log exporter, RQ/Dramatiq
+adapters and arbitrary shared-network-filesystem storage are not implemented support.
 
-| Selection | Implemented surface | UI workflow |
-|---|---|---|
-| F01 | Auto-discovered pytest plugin; query/outbound-call/issue assertions; context-local capture | Checks request editor generates pytest snippets; Analysis → Recording health links stored test requests |
-| F02 | Absolute per-request budgets with missing-data failures | Checks → Budgets and response rules; suite badges, summary and expanded report show budget failures |
-| F04, F05 | Keyed arrays and explicit numeric tolerances | Checks request editor; report shows applied rules and invalid identities; save/edit/export preserve rules |
-| F06 | Observed target Python/framework metadata and declared environment labels | Suite environment editor; report warnings; request runtime details |
-| F07 | Coverage against retained traffic, including common route parameters | Analysis → Suite coverage |
-| F09–F12 | Repeated writes, observed OFFSET, cumulative round trips and pool waits | Requests → Issues; Try detector thresholds previews existing evidence |
-| F13 | Route no-SQL budgets, pytest max_queries=0 and explicit no-query blocks | Checks policies; recorded SQL and exceptions show unexpected access |
-| F15 | Adapter-observed response byte budgets/findings | Request issues and threshold preview |
-| F17 | Observed cumulative issue cost and occurrence ranking | Issues → ordering controls; sampling/overlap caveat remains visible |
-| F18 | Supporting spans, rule metadata, thresholds and completeness | Request Issues tab and span details |
-| F19 | Persistent exact-match suppressions with reason and expiry | Analysis → Suppressions; Issues → Show suppressed; raw CI/test findings remain available |
-| F20 | Recording health, drop/profile indicators and test-request links | Analysis → Recording health; request recording diagnostics |
-| F21 | Interval-based time attribution without double counting | Request → Time breakdown and recording health |
-| F22 | Real issue → seeded check suite with forbidden issue kind | Issues → Verify a fix; existing baseline/compare workflow checks responses, metrics and resolution |
-| P01, P07 | Existing runtime N+1/index advice retained; Python loop scan added | Existing Issues/Database pages; Analysis → Python source |
-| P02, P06, P11, P12, P14 | Bounded AST candidates for aggregation/filtering/repeated scans/sorting/membership | Analysis → Python source: paste/open source, load example or scan configured project |
-| P03 | Repeated aggregate scan candidates | Request Issues and threshold preview |
-| P04, P08 | Wide-column and covering-index catalog candidates | Expand a real SQL group → Inspect columns / indexes |
-| P05 | Django construction / SQLAlchemy session-load counters | Request Issues; real /patterns demos and synthetic model-count sample |
-| P09 | Actual filtered-row plan evidence plus inspectable existing indexes | Existing EXPLAIN UI and on-demand catalog inspection; no claim that an unused index is faster |
-| P10 | Exact generated JSON expression candidates and sampled JSON decode hotspots | SQL catalog inspection; profiled request Issues and synthetic JSON sample |
-| P13 | Known binary cache sizes and explicit decode-block timings | Request Issues, threshold preview and synthetic cache sample |
-
-Developer integrations have inspectable UI policies, evidence and reports. The browser does
-not run arbitrary pytest or shell commands. Source inference and catalog advice are
-conservative candidates; the guide documents supported shapes and false-negative limits.
-Runtime row volume is not misrepresented as proof of Python-side processing or unused data.
-
-## Reproducible UI examples
-
-- Every shop has a real GET `/patterns` endpoint (Django: `/patterns/`). Before refactor:
-  four queries, repeated aggregate scans, deep pagination and full model construction.
-  With `SHOP_REFACTOR=1`: two queries and the intended findings disappear.
-- Their check suites include keyed `items` and an explicit tolerance for `total`. The
-  refactor deliberately reverses the array and changes total by 0.005 so the rules matter.
-- POST `/patterns/writes` executes six individual updates and rolls back all of them.
-- Analysis → Detector samples records nine clearly labeled synthetic traces for findings
-  that are less convenient to provoke. They do not execute SQL or represent measured
-  traffic. Replay and real database inspection are disabled for synthetic evidence.
-- `scripts/check_demo_patterns.py` runs all four real workflows in-process against
-  disposable databases. No server ports are opened. For manual servers use 8011+.
-
-## Verification
+## Local results (2026-10-29)
 
 | Check | Result |
 |---|---|
-| Full core suite | 1,183 passed, 5 skipped; 21 setup errors from denied socket binding |
-| Core excluding the three server-dependent files | 1,165 passed, 5 skipped |
-| Django adapter | 188 passed, 1 skipped |
-| FastAPI adapter | 125 passed |
-| Flask adapter | 132 passed |
-| Litestar adapter | 114 passed |
-| Frontend helpers | 31 passed; TypeScript compilation passed |
-| Four real demo workflows | Passed: queries 4 → 2, findings fixed, equivalent responses under explicit rules, writes rolled back, source API working |
-| Lint / format / whitespace | Passed |
-| Strict documentation build | Passed |
-| Version consistency | All five packages at 0.3.0a1 |
-| Production UI build | Rebuilt through scripts/build_ui.sh; fresh build matches byte-for-byte |
-| Wheels | All five built locally; imports, UI/badge assets and source analyzer checked in a fresh local wheel environment using installed framework dependencies |
-| Installed pytest plugin | Auto-discovery passed; compliant request succeeds, over-budget and missing-capture cases fail as expected |
+| Core excluding three server-dependent files | 1,470 passed, 6 optional-service skips |
+| Three server-dependent files | 18 passed; 21 setup errors at socket bind (`PermissionError: Operation not permitted`), no assertion failures |
+| Django | 199 passed, 1 optional PostgreSQL skip |
+| FastAPI | 125 passed |
+| Flask | 132 passed |
+| Litestar | 114 passed |
+| Optional Celery 5.6.3 | Eager success/failure/retry test passed using cached dependencies; no broker/prefork claim |
+| Frontend helpers | 35 passed; TypeScript and production build passed |
+| Demos | All four pattern workflows and the real-world workflow harness passed in-process |
+| Documentation | Strict MkDocs build passed |
+| Workflow definitions | Actionlint passed for CI, docs and release workflows |
+| Code hygiene | Ruff check/format, whitespace and lockstep version checks passed; offline lock check passed |
+| Packages | Five wheels and source distributions built; wheel imports/assets/type markers checked in a fresh environment using existing third-party dependencies |
+| Browser | Chrome desktop checks of safe-fallback request/SQL/payload views and synthetic Jobs list/detail; full mobile/accessibility/live-server review remains outstanding |
 
-A busy-host assertion in the existing FastAPI blocking test was corrected to check the
-deliberate `time.sleep` span and its issue, allowing unrelated lag observations.
+The core skips cover optional Celery, Redis and PostgreSQL services. Celery was checked
+separately in eager mode. Real SQL Server/MySQL probes were not executed against external
+databases; driver-shaped fixtures and probe guard tests are not live qualification.
 
-## Required remaining validation
+## Reproducible full-stack tests
 
-1. Run the 21 existing server setup tests in an environment that permits local sockets.
-   They failed during `bind()` with `PermissionError: Operation not permitted`; they did
-   not reach their test bodies. No product assertions were skipped to make the full run pass.
-2. Complete desktop/mobile visual and accessibility review. Native browser automation timed
-   out before returning a usable page. A local fixture preview was built, but it was not
-   visually inspected; no screenshot/accessibility approval is claimed.
-3. Run the normal CI matrix before any push/release decision. The old PR's green status
-   does not validate these changes. Re-measure request-path overhead before
-   making new overhead claims; the published figures remain explicitly for earlier code.
+The committed test-project setup is in `examples/compose.yaml` and `examples/testing/`.
+It runs the five complete suites, live PostgreSQL/MySQL/SQL Server and Redis/prefork
+checks, Chromium desktop/mobile flows, demos, docs and package smoke tests. See
+[the shared guide](examples/testing/README.md). Compose config, local harness guards
+and test collection pass; the live stack remains unrun because this session cannot
+access OrbStack's socket and elevated Docker execution is disabled. Do not treat the
+new test definitions as a successful live run.
 
-No merge, tag or publication was performed. The author flag and owner approval rules
-continue to apply to commit/release work.
+## Remaining release gates
+
+1. Run the full core suite where loopback sockets are permitted:
+   `cd packages/redline-core && uv run --no-sync pytest`.
+   Do not remove or weaken the 21 blocked tests to obtain a green result.
+2. Run the disposable MySQL/SQL Server probes described in
+   [the Flask demo](examples/flask/README.md), then validate the actual framework/driver,
+   database version, worker lifecycle, storage volume and concurrency used in deployment.
+   Qualify broker delivery/retries/prefork separately from Celery eager mode.
+3. Complete full UI/mobile/accessibility review and deployment load/overhead checks.
+   Earlier benchmark figures do not measure this release.
+4. Review the combined committed changes, then perform the single authorized final
+   merge when validation is accepted. CI/docs run on main pushes; successful main CI
+   builds the exact tested commit. Branch protection must prevent direct main pushes
+   if literal merges-only enforcement is required.
+5. Publishing additionally requires the exact package version in
+   `REDLINE_RELEASE_VERSION`, existing environment approvals, and owner authorization.
+   See [RELEASING.md](RELEASING.md). Merging alone does not authorize publication.
+
+This is an unreleased alpha candidate, not a production-qualified release yet.

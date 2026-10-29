@@ -1325,3 +1325,58 @@ pytest snippets; Analysis exposes source scans, coverage, recording quality and 
 management. Request detail exposes preview thresholds, evidence, time attribution and
 on-demand catalog inspection. Issues expose observed-impact sorting and a real-request
 link to a verification suite. Browser interactions do not execute arbitrary shell commands.
+
+## 21. v0.4 database failures, jobs and shared environments
+
+Five packages remain in lockstep at 0.4.0a1; the storage schema remains additive v4.
+New issue kinds are sql_error, application_error, placeholder_in_comment,
+dml_rowcount_unknown, session_state_leak, fresh_connection_failure, connection_churn
+and connection_failure. Failed statements count as attempts and remain findings even
+when application code catches them. Missing codes, connection ages and observations
+stay unknown. Negative rowcounts never establish NOCOUNT or a failed write.
+
+Vendor identity/error classification is driver-independent. SQL Server estimated plans
+use a dedicated connection and separate SHOWPLAN ON/query/OFF calls, with invalidation
+if reset fails. Explicit actual plans require the existing execution opt-in and a sync
+driver exposing multiple result sets; cleanup and rollback are mandatory. Planner
+suggestions and session findings never issue DDL, resets or retries automatically.
+Session-state findings compare observed changes with configured expectations; defaults
+include only NOCOUNT OFF. Unobserved procedures/cursors/resets are not inferred.
+
+SQLAlchemy all-engine discovery is opt-in, process-scoped and lazy; explicit engines
+remain idempotent. Observation caches are bounded/weak and per-process. Recording has
+no automatic exporter. Existing access, read-only and feature gates remain in force.
+Write replay is a browser feature control rather than application endpoint authorization.
+
+SQL value capture accepts True, False and reads_only. Disabled capture also removes SQL
+literals/source snippets and withholds potentially value-bearing SQL error messages.
+Built-in redaction profiles and route modes are applied before persistence, including
+logs and exception locals. Shared-dev disables bodies, locals, SQL values and active UI
+actions. Redaction is pattern-based, not certification. User resolvers are synchronous,
+explicit callables returning only an identifier; callback failures cannot break responses.
+Request IDs are labels, never authorization credentials.
+
+The bounded AST SQL checker never imports application modules. Offline findings are
+candidates; dynamic input, syntax failures and limits are visible. Explicit online
+compilation uses a development DSN, dedicated connection and cleanup; deferred name
+resolution, NULL parameter typing and runtime behavior prevent a schema guarantee.
+Schema snapshots contain bounded default-schema column metadata, not rows.
+
+Job helpers produce TASK traces with nested stage spans, bounded reason-digest outcome
+counters and no arguments/results/row samples. Celery is optional and installed in the
+worker process. Parent/request correlation, success/failure/retry states and observed
+commits before later failures are inspectable. No pre-start task execution is invented.
+Flask nested mode requires a shared recorder/store and reuses an active outer context.
+
+Secondary SQLite stores are opened read-only for request/job/profile browsing. Aggregates,
+history, live tails and mutations remain primary-only; secondary database inspection is
+refused because the UI cannot establish its executor binding. WAL must be available for
+a writable store. Role/host/process path templates do not certify filesystem safety.
+
+The API adds bounded POST analysis/sql and analysis/redaction endpoints under existing
+analysis/read-only gates. No DSN or arbitrary filesystem root is accepted. Existing
+request search also matches configured request/user/job ID tags. UI evidence and mock
+previews must identify unavailable backend actions rather than simulate a successful scan.
+
+Routine CI and docs workflows run on pushes to main only. Local merges do not push,
+trigger remote checks or authorize package publication.
