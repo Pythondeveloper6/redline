@@ -1419,18 +1419,25 @@ def _configure_analyze(parser):
     )
     parser.add_argument("--json", action="store_true", help="emit a JSON report")
     parser.add_argument("--fail", action="store_true", help="exit 1 when findings are present")
+    parser.add_argument("--max-files", type=int, default=200, help="Python file budget (1–10000)")
+    parser.add_argument(
+        "--max-project-bytes", type=int, default=2_000_000, help="source byte budget (1–64000000)"
+    )
 
 
 def _cmd_analyze(args, out, err):
     import json
     from pathlib import Path
 
-    from .analyze import analyze_project, analyze_source
+    from .analyze import analyze_project, analyze_source, validate_scan_limits
 
     try:
         path = Path(args.path)
+        validate_scan_limits(args.max_files, args.max_project_bytes)
         report = (
-            analyze_project(path)
+            analyze_project(
+                path, max_files=args.max_files, max_project_bytes=args.max_project_bytes
+            )
             if path.is_dir()
             else analyze_source(path.read_text(encoding="utf-8"), str(path))
         )

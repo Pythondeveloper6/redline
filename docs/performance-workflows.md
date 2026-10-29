@@ -186,18 +186,28 @@ the POST operations. The UI never accepts an arbitrary server filesystem root.
 ```bash
 redline analyze ./app --json
 redline analyze ./app --fail
+# Explicit larger-project budget (defaults remain conservative):
+redline analyze ./app --max-files 1000 --max-project-bytes 16000000 --json
 ```
 
 Exit codes: `0` completed, `1` findings with `--fail`, `2` invalid/unreadable input or an
 incomplete scan. Code is parsed and never imported or executed. Source inputs are capped
 at 200 KB each; projects at 200 Python files, 2 MB and 20,000 visited entries. Dependency/generated directories
-and symlinks are skipped. Errors, skipped files and limits remain visible.
+and symlinks are skipped. CLI users can raise the project budget with `--max-files`
+(up to 10,000) and `--max-project-bytes` (up to 64,000,000). The same options are
+available on `redline check-sql`; the per-file and 20,000-entry limits still apply.
+UI scans keep the defaults. Errors, skipped files and limits remain visible.
 
 Supported candidates include queryset operations inside loops, Python-side aggregation
 and filtering, repeated fixed-range scans, repeated sorting, list membership inside loops,
 and known blocking calls inside async functions. Queryset inference recognizes Django-style
 chains and known SQLAlchemy Session/AsyncSession annotations or direct constructors;
-unknown factories and dynamic aliases may be missed. Findings are suggestions for review,
+Known `get`, `scalar`, `scalars`, `execute` and `query` calls are recognized.
+Module-level local helpers are summarized through up to eight call edges; shadowed
+helper names are excluded. A query in the first iterable is evaluated once and is
+not classified as repeated by that loop; calls in later iterables can repeat.
+Session identity-map hits, short-circuit branches and intentional chunking still need
+runtime review. Cross-module helpers, unknown factories and dynamic aliases may be missed. Findings are suggestions for review,
 not proof of runtime evaluation, unused data or a safe transformation. Preserve null,
 precision, duration rounding, hashing, ordering and mutation behavior when fixing them.
 
