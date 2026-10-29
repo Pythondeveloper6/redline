@@ -21,7 +21,8 @@ version is below `1.0` the public API may change between minor versions.
   online checks use server-described parameter types and result columns under NOEXEC, and
   flag literal row reads the described SELECT no longer returns. Snapshots include SQL
   Server triggers and routine parameters, and schema drift recompiles only statements that
-  reference affected tables.
+  reference affected tables. `redline schema-watch` polls the comparison, writes a baseline
+  on its first run and can persist a `schema_drift` issue without running migrations.
 - Generic jobs/stages/row outcomes, optional Celery signals, retry outcomes and commit-before-
   failure evidence; Jobs, SQL checker and redaction-preview UI surfaces.
 - Shared-dev defaults, SQL value capture policies, privacy profiles and route rules,

@@ -22,6 +22,8 @@ from typing import Any, TextIO
 from . import operations
 from .check_sql import command as _cmd_sql
 from .check_sql import configure_cli as _configure_sql
+from .schema_watch import command as _cmd_schema_watch
+from .schema_watch import configure_cli as _configure_schema_watch
 
 __all__ = ["COMMANDS", "main"]
 
@@ -1367,6 +1369,12 @@ COMMANDS: dict[str, tuple[str, Callable[[argparse.ArgumentParser], None], Handle
         {},
     ),
     "check-sql": ("lint SQL in Python without importing the app", _configure_sql, _cmd_sql, {}),
+    "schema-watch": (
+        "recompile SQL after schema drift and optionally raise a UI issue",
+        _configure_schema_watch,
+        _cmd_schema_watch,
+        {},
+    ),
     "analyze": ("analyze Python source without executing it", _configure_analyze, _cmd_analyze, {}),
     "load": (
         "run a load test (open model) against a running app",

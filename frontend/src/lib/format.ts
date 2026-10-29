@@ -52,7 +52,7 @@ export const ISSUE_LABEL: Record<string, string> = {
   external_in_transaction: 'HTTP in transaction', slow_external: 'Slow external call', duplicate_external: 'Duplicate external call',
   connection_failure: 'Connection failure',
   application_error: 'Application error',
-  sql_error: 'SQL error', placeholder_in_comment: 'Comment bind', dml_rowcount_unknown: 'Unknown DML rowcount', session_state_leak: 'Observed session state', fresh_connection_failure: 'Fresh connection failures', connection_churn: 'Connection churn',
+  sql_error: 'SQL error', placeholder_in_comment: 'Comment bind', dml_rowcount_unknown: 'Unknown DML rowcount', session_state_leak: 'Observed session state', schema_drift: 'Schema drift', fresh_connection_failure: 'Fresh connection failures', connection_churn: 'Connection churn',
   slow_cache_decode: 'Slow cache decode',
   json_decode_hotspot: 'JSON decoding hotspot',
   many_orm_instances: 'Many ORM instances',
@@ -82,4 +82,5 @@ export const ISSUE_STYLE: Record<string, { tone: 'bad' | 'warn' | 'info'; d: str
   slow_external: { tone: 'bad', d: 'M12 3a9 9 0 100 18 9 9 0 000-18zM12 7v5l3 2' },
   duplicate_external: { tone: 'warn', d: 'M9 9h10v10H9zM5 15V5h10' },
   retry_storm: { tone: 'bad', d: 'M20 11a8 8 0 00-14.9-3M4 4v4h4M4 13a8 8 0 0014.9 3M20 20v-4h-4' },
+  schema_drift: { tone: 'warn', d: 'M4 6c0-1.7 3.6-3 8-3s8 1.3 8 3-3.6 3-8 3-8-1.3-8-3zM4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6M8 12h8M13 9l3 3-3 3' },
 }

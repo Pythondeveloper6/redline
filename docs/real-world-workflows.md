@@ -152,6 +152,25 @@ resolution. Use an isolated development login/database: server compilation can i
 extensions or planner functions. Driver messages and DSNs are not included in
 machine-readable results.
 
+### Watching a development schema
+
+```bash
+# One check (exit 1 on drift or a compile error), suitable for cron:
+redline schema-watch app/queries.py --dsn "$DEV_DATABASE_DSN" \
+  --snapshot schema-snapshot.json
+
+# Poll every five minutes and raise a schema_drift Issue in the UI:
+redline schema-watch app/queries.py --dsn "$DEV_DATABASE_DSN" \
+  --snapshot schema-snapshot.json --interval 300 --store .redline/redline.db
+```
+
+The first run writes the baseline without alerting. Later runs compile only statements that
+reference affected tables, and `--full` forces a complete pass. `--store` writes one
+synthetic `TASK` trace carrying a `schema_drift` issue (affected table and routine names
+only; no rows or SQL text). The command can also run from a Celery beat task or a CI job.
+Exit `0` means no drift, `1` means drift or compile errors, and `2` means the watch could
+not run (driver, DSN or permissions).
+
 ## Safer shared-development recording
 
 ```toml
