@@ -11,23 +11,38 @@ been pushed, tagged or published. `HANDOFF.md` remains unchanged and uncommitted
   checks, optional all-engine observation and observed connection/session-state findings.
 - SQL Server estimated and guarded actual plans, catalog inspection, offline SQL checks,
   explicit compilation and schema snapshots, with documented support limits.
-- Jobs, stages, bounded row outcomes, Celery signals, request/user correlation and
-  commit-before-failure evidence; Jobs and SQL/privacy tools in the UI.
+- Jobs, stages, bounded row outcomes, Celery signals, request/user correlation,
+  commit-before-failure evidence, per-stage outcomes and a 24-hour jobs summary;
+  Jobs and SQL/privacy tools in the UI.
 - Production record-and-inspect defaults, bounded capture, safe privacy fallbacks,
   failure-safe SQL observers, recorder ownership, storage loss counters, readonly
   secondary browsing and duplicate-ID refusal.
+- OTLP trace/log export with sanitized SQL spans, W3C `traceparent` propagation, schema
+  watch, SQL Server unused-index analysis and raw-SQL N+1 batching advice.
+- `check-imports` follows statically visible imports inside task functions; `redline check
+  compare/run --ruff` carries Ruff JSON into Markdown and JUnit.
+- Storage self-test and cross-process coverage: `redline doctor` probes WAL beside the
+  store and warns on Linux network/virtual mounts; a test writes one file from two
+  independent OS processes. The overhead benchmark includes an mssql-shaped fake-DBAPI
+  cell; its `full` mode measured +0.054 ms per request and +53.5 us per query (a narrow miss of the 50 us target).
 - Root and package READMEs, detailed production/settings/security/API/workflow guides,
   expanded demos and driver probes. See [README](README.md),
   [workflow guide](docs/real-world-workflows.md) and [release plan](RELEASE_0_4_PLAN.md).
 
 These are bounded implementations, not a promise of compatibility with every Python
-codebase. Full distributed trace stitching, a general OTLP span/log exporter, RQ/Dramatiq
-adapters and arbitrary shared-network-filesystem storage are not implemented support.
+codebase. RQ/Dramatiq adapters, `redline_core.dbapi.wrap`, the Postgres store, a dedicated
+cross-deploy error-regression view and AI diagnosis are still open (see the 0.5/0.6 tables
+in [the roadmap](docs/roadmap.md)). Arbitrary shared-network-filesystem storage is not
+supported: `redline doctor` warns, and a writable store still requires WAL. Full
+distributed trace stitching beyond explicit Celery jobs remains out of scope.
 
 ## Successful full-stack qualification (2026-10-29)
 
 Run `20261029T052447Z-caaef5f7` completed with container exit code 0 and
 `qualified: true`. The implementation at `8a7ea9f` passed every requested Compose step.
+The commits after `8a7ea9f` (through the storage/benchmark and CI-hygiene work) have
+targeted regression tests and the local gate described below, but they are **not** part of
+that Compose run. A fresh full qualification is required before merge.
 The machine-readable report and logs are under ignored `examples/testing/results/`.
 This record changes documentation only; it does not change the tested implementation.
 
@@ -73,7 +88,8 @@ by this complete green result.
    Validate deployment-specific filesystem, credentials, framework/driver versions,
    request concurrency, load/overhead and accessibility requirements. A passing Compose
    baseline does not establish compatibility with every codebase or arbitrary network
-   filesystem. Existing benchmarks do not measure this release.
+   filesystem. The mssql-shaped cell measures instrumentation only (fake DBAPI, no SQL
+   Server latency); run it on the target hardware and revisit `profile` mode separately.
 
 The complete local integration gate is green. Main CI and publication authorization
 remain separate gates; no tag or publication has occurred.
