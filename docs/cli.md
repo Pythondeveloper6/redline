@@ -141,6 +141,8 @@ fail it). It takes `--json` and `--project-root DIR` like `redline config`.
 | Check | Looks at |
 |---|---|
 | `storage` | a temporary file can actually be created/written in the nearest existing parent; an existing store can be opened for writing without truncation |
+| `storage WAL` | a throwaway SQLite database beside the store really accepts `PRAGMA journal_mode=WAL`; failure is a hard error because a writable store refuses non-WAL |
+| `filesystem` | on Linux, the mount type from `/proc/self/mountinfo`; `nfs`, `cifs`, `9p`, `virtiofs`, `fuse` and similar mounts warn that WAL may not be reliable |
 | `ui bundle` | the prebuilt UI is present in `redline-core` |
 | `access` | `open` fails (warns when `REDLINE_ALLOW_OPEN=1` is set); `access` not set in the file or environment warns (FastAPI, Flask and Litestar answer `404` outside debug mode unless the app sets it in code); `trust_unix_socket` warns; `local` outside the `dev` preset warns, because behind a proxy nobody can reach Redline |
 | `token` | shorter than 24 characters (warn), an unreadable `token_file` (fail), a `token_file` readable by other users (warn) |

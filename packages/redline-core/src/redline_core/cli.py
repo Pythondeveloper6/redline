@@ -540,19 +540,56 @@ def _doctor_checks(resolved: Any) -> list[tuple[str, str, str]]:
     checks: list[tuple[str, str, str]] = []
 
     # storage
-    path = s.storage_path
+    from .storage.safety import (
+        UNRELIABLE_WAL_FILESYSTEMS,
+        filesystem_type,
+        prepare_path,
+        probe_wal,
+        probe_writable,
+    )
+
+    try:
+        path = prepare_path(s)
+    except SettingsError as exc:
+        checks.append(("fail", "storage", str(exc)))
+        path = None
     if path == ":memory:":
         checks.append(("ok", "storage", "in memory"))
-    else:
+    elif path is not None:
         target = os.path.abspath(path)
+        kind = filesystem_type(target)
         try:
-            from .storage.safety import probe_writable
-
             probe_writable(target)
         except OSError:
             checks.append(("fail", "storage", f"cannot create or write {target}"))
         else:
             checks.append(("ok", "storage", f"{target} is writable"))
+        if kind in UNRELIABLE_WAL_FILESYSTEMS:
+            checks.append(
+                (
+                    "warn",
+                    "filesystem",
+                    f"{kind} may not support SQLite WAL reliably; use a Docker named "
+                    "volume or a local disk",
+                )
+            )
+        try:
+            wal = probe_wal(target)
+        except OSError:
+            checks.append(("fail", "storage WAL", f"cannot test WAL beside {target}"))
+        else:
+            if wal:
+                suffix = f" on {kind}" if kind else ""
+                checks.append(("ok", "storage WAL", f"journal_mode=wal works{suffix}"))
+            else:
+                checks.append(
+                    (
+                        "fail",
+                        "storage WAL",
+                        "journal_mode=wal was refused; move storage to a supported local "
+                        "filesystem",
+                    )
+                )
 
     # UI bundle
     if ui.is_built():

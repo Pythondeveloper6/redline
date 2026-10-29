@@ -27,6 +27,7 @@ _CONTEXT_VALUE = re.compile(
     r"@value\s*=\s*(.+?)(?=,\s*@(?:key|value|read_only)\b|\s*$)", re.I | re.S
 )
 _CONTEXT_READ_ONLY = re.compile(r"@read_only\s*=\s*(\d+|N?'(?:true|false|on|off)')", re.I)
+_STATE_HINT = re.compile(r"\b(?:SET|EXEC|SET_CONFIG|RESET|DISCARD)\b", re.I)
 
 
 def _statements(sql):
@@ -89,6 +90,11 @@ def _observe_context(changes, span, statement):
 
 
 def observe(info, sql, span):
+    # Most statements are plain SELECT/DML. Do not tokenize them just to discover they
+    # set no session state; the cheap uppercase probe keeps the observation path free.
+    upper = sql.upper()
+    if not any(marker in upper for marker in ("SET ", "EXEC", "SET_CONFIG", "RESET", "DISCARD")):
+        return
     if span.data.get("vendor") != "mssql":
         observe_generic(info, sql, span)
         return
