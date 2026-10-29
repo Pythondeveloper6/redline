@@ -124,7 +124,7 @@ class SQLAlchemyFixSuggester:
         mappers = self._mappers()
         candidates = _candidates(mappers, filters)
         raw_hint = "(text(" in ((callsite.code or "") if callsite else "")
-        if not candidates or raw_hint:
+        if raw_hint:
             raw = self._raw_sql(issue, spans, filters, _tables, callsite)
             if raw is not None:
                 return raw

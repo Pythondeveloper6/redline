@@ -354,7 +354,20 @@ class SQLiteStore(CheckStoreMixin):
         )
         conn.row_factory = sqlite3.Row
         if self.path != ":memory:":
-            mode = conn.execute("PRAGMA journal_mode=WAL").fetchone()[0]
+            # Two processes may initialize the same new file at once. SQLite can report
+            # "database is locked" for the WAL switch even though both connections have a
+            # busy timeout, so retry that one statement; schema setup then uses the same
+            # timeout and serialized busy handling.
+            deadline = time.monotonic() + 10.0
+            while True:
+                try:
+                    mode = conn.execute("PRAGMA journal_mode=WAL").fetchone()[0]
+                    break
+                except sqlite3.OperationalError as exc:
+                    if "locked" not in str(exc).lower() or time.monotonic() >= deadline:
+                        conn.close()
+                        raise
+                    time.sleep(0.05)
             if str(mode).lower() != "wal":
                 conn.close()
                 raise RuntimeError(

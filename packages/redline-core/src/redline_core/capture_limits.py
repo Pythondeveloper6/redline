@@ -67,7 +67,18 @@ def _fast_bounded(
         ).encode("utf-8")
     except (TypeError, ValueError, OverflowError):
         return _NO_FAST
-    return value if len(encoded) <= max_bytes else _NO_FAST
+    if len(encoded) > max_bytes:
+        return _NO_FAST
+
+    def detached(item: Any) -> Any:
+        kind = type(item)
+        if kind is dict:
+            return {key: detached(child) for key, child in item.items()}
+        if kind is list:
+            return [detached(child) for child in item]
+        return item
+
+    return detached(value)
 
 
 def bounded_value(
