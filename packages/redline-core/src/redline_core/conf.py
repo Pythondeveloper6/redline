@@ -201,7 +201,7 @@ class Settings:
     session_expected: Mapping[str, str] = field(default_factory=lambda: {"NOCOUNT": "OFF"})
     session_expected_context: tuple[str, ...] = ()
     user_resolver: Any = None
-    request_id_headers: tuple[str, ...] = ("X-Request-ID", "X-Correlation-ID")
+    request_id_headers: tuple[str, ...] = ("X-Request-ID", "X-Correlation-ID", "traceparent")
     allow_storage_in_repo: bool = False
     instrument_engines: str = "explicit"
 

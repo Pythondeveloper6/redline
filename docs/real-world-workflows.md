@@ -235,8 +235,9 @@ control, not authorization for the application's own write endpoints.
 
 Configured request/response ID headers become a `request_id` tag; response IDs take
 precedence at completion. Incoming IDs are available when a job is published. IDs are
-labels, never authorization credentials. The default headers are X-Request-ID and
-X-Correlation-ID; W3C trace-context stitching is not implemented.
+labels, never authorization credentials. The default headers are X-Request-ID,
+X-Correlation-ID and `traceparent`. A valid W3C `traceparent` also fills the OTel trace and
+parent-span ids, and published jobs carry a child `traceparent`.
 
 ```python
 from redline_core import tag
@@ -331,13 +332,19 @@ Use Ruff and application tests directly for Python correctness; Redline is not a
 ```bash
 redline export --store /path/to/redline.db             # OTLP JSON preview only
 redline export --store /path/to/redline.db \
-  --endpoint http://127.0.0.1:4318/v1/traces --send      # explicit transmission
+  --endpoint http://127.0.0.1:4318/v1/traces --send      # explicit span transmission
+redline export --store /path/to/redline.db \
+  --endpoint http://127.0.0.1:4318/v1/traces \
+  --logs-endpoint http://127.0.0.1:4318/v1/logs --send
 ```
 
-The initial exporter sends recording summaries with fixed names and selected numeric/status
-attributes. It omits SQL, bodies, arbitrary tags and error text. It is not a full span/log
-exporter or a production batching/retry pipeline. No exporter runs automatically during
-recording.
+The exporter sends a root recording span plus sanitized SQL spans using `db.system`,
+`db.operation`, `db.statement` (the normalized fingerprint unless `--include-sql` is
+explicit), `error.type` and selected numeric/status attributes. It also builds OTLP log
+records for recorded issues. It omits bodies, parameter values, arbitrary tags and error
+messages. A valid incoming `traceparent` supplies the exported trace id and parent span;
+otherwise ids are derived from the recording id. It is not a production batching/retry
+pipeline, and no exporter runs automatically during recording.
 
 Routine CI and docs deployment run only on pushes to main, including merges. Package
 publication follows a successful CI run on main only when the repository variable
