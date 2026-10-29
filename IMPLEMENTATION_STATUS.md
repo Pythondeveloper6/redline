@@ -56,7 +56,10 @@ checks, Chromium desktop/mobile flows, demos, docs and package smoke tests. See
 but test-runner configuration, DSN, metadata and repeat-run issues caused other failures.
 The second container run passed every check except one Django permission test under
 root. That test and the shared effective-write probe are corrected; local Django has
-202 passes and one optional PostgreSQL skip. Rebuild/rerun the full container suite.
+202 passes and one optional PostgreSQL skip. A subsequent container run passed Django
+and every check except a fast-request profiling assertion in Litestar. Profiling tests
+now use a sufficiently long existing route, with explicit zero-sample core coverage.
+Rebuild/rerun the full container suite.
 This session cannot access OrbStack's socket and elevated Docker execution is disabled.
 Do not treat test definitions or earlier partial successes as full qualification.
 

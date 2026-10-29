@@ -106,7 +106,7 @@ it does not purge an existing broker. Named volumes belong to this Compose proje
 
 ## Current evidence
 
-The latest full container run (`20261029T050217Z-eb50dbb6`) passed all 1,517 core tests,
+The full container run (`20261029T050217Z-eb50dbb6`) passed all 1,517 core tests,
 the FastAPI/Flask/Litestar suites, all 28 live/harness cases, both demo harnesses,
 documentation and every packaging/wheel check, with no skips in those suites. Django
 had one failure: a permission test assumed that chmod(0500) denies root writes.
@@ -115,6 +115,12 @@ That assumption is now replaced with a deterministic denied-operation test plus 
 actual-user permission test. Django and the CLI share a filesystem write probe, with
 regressions ensuring existing data is unchanged and temporary probes are cleaned up.
 The local Django suite passes; its optional live PostgreSQL case needs the container.
+
+The subsequent run (`20261029T051235Z-a762f1ec`) passed Django and every other
+qualification step except Litestar's fast-request profiling assertion. A request shorter
+than the sampler interval can correctly have no profile. Litestar and FastAPI's real
+profiling tests now use the existing slow endpoint; a deterministic core regression
+covers valid zero-sample recordings without fabricating a profile.
 
 The full stack must still be rebuilt/rerun before qualification. The authoring session
 cannot access OrbStack's socket, so local checks do not replace a fresh container result.

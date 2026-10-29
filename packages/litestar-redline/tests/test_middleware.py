@@ -185,14 +185,16 @@ def test_run_header_becomes_tags(make_env):
 
 
 def test_profile_opt_in_query_and_header(make_env):
+    # The async slow route awaits 50 ms; a sub-millisecond order lookup can
+    # legitimately finish before the sampler records anything.
     env = make_env()
     env.app.debug = True  # honoured in debug mode (or with Redline credentials)
     with client(env) as c:
-        c.get("/orders/1")
-        c.get("/orders/1?_redline=profile")
-        c.get("/orders/2", headers={"X-Redline-Profile": "1"})
+        c.get("/slow/1")
+        c.get("/slow/1?_redline=profile")
+        c.get("/slow/2", headers={"X-Redline-Profile": "1"})
     items = {(t["path"], t["has_profile"]) for t in env.traces()}
-    assert items == {("/orders/1", False), ("/orders/1", True), ("/orders/2", True)}
+    assert items == {("/slow/1", False), ("/slow/1", True), ("/slow/2", True)}
     prof_id = next(t["id"] for t in env.traces() if t["has_profile"])
     profile = env.store.get_profile(prof_id)
     assert profile["$schema"].startswith("https://www.speedscope.app")

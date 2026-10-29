@@ -121,3 +121,34 @@ def test_profile_title_is_the_request():
     t = rec.finish_trace(b, status=200, route="/orders/", view="shop.views.order_list")
     want = "GET /orders/ — shop.views.order_list"
     assert t.profile["name"] == want and t.profile["profiles"][0]["name"] == want
+
+
+def test_profiler_zero_samples_is_valid_and_recording_is_kept(monkeypatch):
+    from types import SimpleNamespace
+
+    from redline_core.conf import Settings
+    from redline_core.recorder import Recorder
+
+    events = []
+
+    class EmptyProfiler:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            events.append("start")
+
+        def stop(self):
+            events.append("stop")
+            return SimpleNamespace(sample_count=0)
+
+    import sys
+
+    monkeypatch.setitem(sys.modules, "pyinstrument", SimpleNamespace(Profiler=EmptyProfiler))
+    recorder = Recorder(Settings(profile="opt_in", sample_rate=0, always_keep_slower_than_ms=1e12))
+    builder = recorder.start_trace(method="GET", path="/fast", profile_requested=True)
+    trace = recorder.finish_trace(builder, status=200)
+    assert events == ["start", "stop"]
+    assert trace.profile is None and not trace.has_profile
+    assert "profile_error" not in trace.tags
+    assert trace.tags["sampled_by"] == "profile"
