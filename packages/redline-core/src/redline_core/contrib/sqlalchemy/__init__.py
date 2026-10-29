@@ -609,8 +609,10 @@ def _instrument_lifecycle(engine, alias):
     @_observer
     def connected(dbapi, record):
         from redline_core.connection_health import connected as note_connected
+        from redline_core.connection_health import register
 
         note_connected(engine.pool)
+        register(engine.pool, alias=alias, vendor=engine.dialect.name)
         record.info["redline_lifecycle"] = {"born": _perf(), "statements": 0}
 
     @_observer

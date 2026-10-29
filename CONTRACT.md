@@ -423,11 +423,13 @@ New tables (written by the writer thread in the same transaction as the trace):
 - `rollups(bucket, release, route, method, count, errors, sum_ms, hist, sum_queries, sum_query_ms, issues)` – hourly, upserted per trace, kept `history_retention_days`.
 - `releases(release, first_seen, last_seen)`.
 - `issue_index(issue_id, kind, severity, title, route, first_seen, last_seen, first_release, last_release, occurrences)` – survives trace pruning.
+- `lifecycle_hourly(bucket, release, db_alias, vendor, connects_hour, fresh_failures_hour, updated_at)` – max-per-hour gauges from each process, kept `history_retention_days`; no DSN, credentials or row data.
 - `runs(id, created_at, finished_at, status, name, config, summary)` and `run_steps(run_id, step, started_at, ended_at, target_rps, achieved_rps, sent, ok, errors, dropped, hist, error_breakdown)`.
 
 New `Store` methods (SQLiteStore implements all; a custom store may raise `NotImplementedError`, which the API maps to 501 `not_supported`):
 `search_sql(q, window, limit)`, `sql_workload(window)`, `cache_stats(window)`, `external_stats(window)`,
 `history(route, method, start, end, bucket)`, `releases()`, `compare_periods(a, b)`, `issue_index(window=None)`,
+`record_lifecycle(metrics, release=None)`, `lifecycle(window, limit=200)`,
 `save_run(run)`, `save_run_step(run_id, step)`, `finish_run(run_id, status, summary)`, `get_run(id)`, `list_runs(limit)`, `delete_run(id)`, `run_bottlenecks(run_id)`,
 `traces_since(started_at, trace_id, limit)` (for live tail).
 
@@ -516,6 +518,7 @@ Concrete decisions (v0.2 implementation):
 | `GET api/history?route=&method=&window=30d&bucket=1h\|1d` | `{series: [{t, count, p50_ms, p95_ms, p99_ms, error_rate, avg_queries}], releases: [{release, first_seen}]}` (no route = whole app) |
 | `GET api/releases` | `{items: [{release, first_seen, last_seen, requests}]}` |
 | `GET api/history/compare?a=&b=` | `a`/`b` are `release:<name>` or `range:<start>-<end>` (epoch seconds). `{a, b, endpoints: [{route, method, a: Stats, b: Stats, delta_p95_pct, delta_queries, verdict: "regressed"\|"improved"\|"same"\|"new"\|"gone"}], issues: {new: [...], resolved: [...], persisting: [...]}}`; regressed = p95 +20% and +5 ms, or avg queries +1 |
+| `GET api/lifecycle?window=&limit=` | `{window, items: [{bucket, release, db_alias, vendor, connects_hour, fresh_failures_hour, updated_at}]}`; hourly gauges, newest first, at most 500 rows |
 | `GET api/runs` / `GET api/runs/{id}` | runs list / `{id, name, status, config, created_at, finished_at, steps: [Step], summary: {knee_step, max_ok_rps, verdict}}` with `Step = {step, target_rps, achieved_rps, sent, ok, errors, dropped, p50_ms, p95_ms, p99_ms, max_ms, error_rate, error_breakdown}` |
 | `GET api/runs/{id}/bottlenecks` | `{steps: [{step, target_rps}], items: [{key, kind, label, callsite, per_step: [{step, mean_ms, p95_ms, count}], growth: float}]}` sorted by growth – the "query X went 3 ms → 410 ms" view |
 | `POST api/runs` / `POST api/runs/{id}/stop` / `DELETE api/runs/{id}` | start (403 `load_disabled` unless `load_from_ui`; the target is always the app's own base URL, given by the adapter) / stop / delete |
@@ -1349,8 +1352,9 @@ left mutable are lower-severity findings. Values are digests. Unobserved
 procedures/cursors/resets are not inferred.
 
 SQLAlchemy all-engine discovery is opt-in, process-scoped and lazy; explicit engines
-remain idempotent. Observation caches are bounded/weak and per-process. Recording has
-no automatic exporter. Existing access, read-only and feature gates remain in force.
+remain idempotent. Observation caches are bounded/weak and per-process. Connection
+lifecycle gauges are flushed to `lifecycle_hourly` as max-per-hour rows even when the trace
+is sampled out; `GET api/lifecycle` exposes them. Recording has no automatic exporter. Existing access, read-only and feature gates remain in force.
 Write replay is a browser feature control rather than application endpoint authorization.
 
 SQL value capture accepts True, False and reads_only. Disabled capture also removes SQL
