@@ -199,6 +199,7 @@ class Settings:
     capture_loggers: tuple[str, ...] = ()
     ignore_loggers: tuple[str, ...] = ()
     session_expected: Mapping[str, str] = field(default_factory=lambda: {"NOCOUNT": "OFF"})
+    session_expected_context: tuple[str, ...] = ()
     user_resolver: Any = None
     request_id_headers: tuple[str, ...] = ("X-Request-ID", "X-Correlation-ID")
     allow_storage_in_repo: bool = False
@@ -435,6 +436,7 @@ _SEQ_FIELDS = {
     "capture_loggers",
     "ignore_loggers",
     "request_id_headers",
+    "session_expected_context",
     "ignore_paths",
     "redact_headers",
     "redact_keys",

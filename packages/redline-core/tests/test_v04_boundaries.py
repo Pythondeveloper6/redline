@@ -138,7 +138,10 @@ def test_mssql_compile_failed_reset_invalidates_and_rolls_back():
     engine = SimpleNamespace(dialect=SimpleNamespace(name="mssql"), connect=lambda: Connection())
     with pytest.raises(RuntimeError, match="reset failed"):
         compile_statement(engine, "SELECT :value")
-    assert calls == ["SET NOEXEC ON", "SELECT :value", "SET NOEXEC OFF", "invalidate", "rollback"]
+    assert calls[0].startswith("EXEC sys.sp_describe_undeclared_parameters")
+    assert "SET NOEXEC ON" in calls
+    assert "SELECT @value" in calls
+    assert calls[-3:] == ["SET NOEXEC OFF", "invalidate", "rollback"]
 
 
 def test_unsafe_compile_never_opens_a_connection():
