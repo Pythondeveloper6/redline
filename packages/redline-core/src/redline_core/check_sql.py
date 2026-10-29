@@ -31,6 +31,109 @@ RULES = {
 }
 
 
+_ROW_METHODS = {
+    "fetchone",
+    "fetchall",
+    "fetchmany",
+    "first",
+    "one",
+    "one_or_none",
+    "scalar",
+    "scalar_one",
+    "scalar_one_or_none",
+    "mappings",
+}
+_RESULT_METHODS = {"execute", "exec_driver_sql", "executemany"}
+_ROW_ATTRIBUTES = {
+    "append",
+    "count",
+    "extend",
+    "get",
+    "index",
+    "items",
+    "keys",
+    "pop",
+    "values",
+}
+
+
+def _call_name(node):
+    if not isinstance(node, ast.Call):
+        return ""
+    if isinstance(node.func, ast.Name):
+        return node.func.id
+    if isinstance(node.func, ast.Attribute):
+        return node.func.attr
+    return ""
+
+
+def _targets(node):
+    targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+    return {
+        part.id
+        for target in targets
+        for part in ast.walk(target)
+        if isinstance(part, ast.Name) and isinstance(part.ctx, ast.Store)
+    }
+
+
+def _result_reads(scope, limit=100):
+    """Best-effort literal columns read from row objects in this scope.
+
+    A row object is a value assigned from ``fetchone()``/``first()``/``mappings()`` and
+    similar, or a loop variable over an ``execute()`` result (or a list of rows). Only
+    literal string subscripts (``row["col"]``) and plain attributes (``row.col``) are
+    reported; dynamic keys and tuple indexes are ignored. This is a candidate list for
+    online result-set comparison, never a proof that the column is read.
+    """
+    rows: set[str] = set()
+    results: set[str] = set()
+    for node in ast.walk(scope):
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            name = _call_name(node.value)
+            if name in _ROW_METHODS:
+                rows.update(_targets(node))
+            elif name in _RESULT_METHODS:
+                results.update(_targets(node))
+        elif isinstance(node, (ast.For, ast.AsyncFor)):
+            iterator = node.iter
+            source = iterator.id if isinstance(iterator, ast.Name) else _call_name(iterator)
+            if source in results or source in rows or source in _ROW_METHODS | _RESULT_METHODS:
+                rows.update(_targets(node))
+    found = {}
+    for node in ast.walk(scope):
+        if (
+            isinstance(node, ast.Subscript)
+            and isinstance(node.value, ast.Name)
+            and node.value.id in rows
+            and isinstance(node.slice, ast.Constant)
+            and isinstance(node.slice.value, str)
+            and 0 < len(node.slice.value) <= 128
+        ):
+            found.setdefault(node.slice.value, node.lineno)
+        elif (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id in rows
+            and node.attr
+            and not node.attr.startswith("_")
+            and node.attr not in _ROW_ATTRIBUTES
+            and node.attr not in _ROW_METHODS
+        ):
+            found.setdefault(node.attr, node.lineno)
+    return [
+        {"name": name, "line": line}
+        for name, line in sorted(found.items(), key=lambda item: (item[1], item[0]))[:limit]
+    ]
+
+
+def _read_scope(scopes, tree):
+    for scope in scopes:
+        if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            return scope
+    return tree
+
+
 def _constant(node, constants, depth=0):
     if depth > 12:
         raise ValueError("constant expression too deep")
@@ -126,6 +229,7 @@ def extract(source, file="<source>"):
         }:
             aliases.update(n.asname or n.name for n in node.names if n.name == "text")
     statements, skipped, seen = [], [], set()
+    read_cache = {}
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call) or not node.args:
             continue
@@ -208,7 +312,16 @@ def extract(source, file="<source>"):
             keys = binding_call.args[1].keys
             if all(isinstance(k, ast.Constant) and isinstance(k.value, str) for k in keys):
                 bindings = [k.value for k in keys]
-        statements.append({"file": file, "line": arg.lineno, "sql": value, "bindings": bindings})
+        scope = _read_scope(scopes, tree)
+        statements.append(
+            {
+                "file": file,
+                "line": arg.lineno,
+                "sql": value,
+                "bindings": bindings,
+                "result_reads": read_cache.setdefault(id(scope), _result_reads(scope)),
+            }
+        )
     return statements, skipped
 
 
@@ -362,6 +475,7 @@ def command(args, out, err):
             )
             return 2
         for item in report["compilation"]:
+            report["findings"].extend(item.get("findings", ()))
             if item["status"] != "compiled":
                 report["skipped"].append(
                     {
@@ -370,6 +484,7 @@ def command(args, out, err):
                         "reason": "Online compilation " + item["status"],
                     }
                 )
+        report["findings"].sort(key=lambda f: (f["file"], f["line"], f["kind"]))
     baseline = set()
     if args.baseline:
         try:
