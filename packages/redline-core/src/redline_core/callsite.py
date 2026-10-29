@@ -72,6 +72,7 @@ class CallsiteCapturer:
         # filename -> display path (project file) or None (skip). Plain dict reads and
         # writes are atomic, so concurrent fills at worst compute a verdict twice.
         self._cache: dict[str, str | None] = {}
+        self._captures: dict[tuple, Callsite] = {}
 
     # classification --------------------------------------------------------
     def classify(self, filename: str) -> str | None:
@@ -102,6 +103,7 @@ class CallsiteCapturer:
 
     def clear_cache(self) -> None:
         self._cache.clear()
+        self._captures.clear()
 
     # capture ---------------------------------------------------------------
     def capture(self, skip: int = 1, frame: FrameType | None = None) -> Callsite | None:
@@ -135,15 +137,23 @@ class CallsiteCapturer:
         if not found:
             return None
         found.reverse()  # outermost first, innermost last
+        key = tuple(found)
+        cached_site = self._captures.get(key)
+        if cached_site is not None:
+            return cached_site
         file, line, function = found[-1]
         source = linecache.getline(self._abspath(file), line).strip() or None
-        return Callsite(
+        site = Callsite(
             file=file,
             line=line,
             function=function,
             code=source,
             stack=tuple(Frame(file=a, line=b, function=c) for a, b, c in found),
         )
+        if len(self._captures) >= 4096:
+            self._captures.clear()
+        self._captures[key] = site
+        return site
 
     def _abspath(self, display: str) -> str:
         return os.path.join(self.project_root, display.replace("/", os.sep))

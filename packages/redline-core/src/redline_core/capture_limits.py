@@ -12,7 +12,62 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from typing import Any
+
+_NO_FAST: Any = object()
+_JSON_DUMPS = json.dumps
+_SURROGATE = re.compile("[\ud800-\udfff]")
+
+
+def _fast_bounded(
+    value: Any, *, max_bytes: int, max_depth: int, max_items: int, max_string_bytes: int
+) -> Any:
+    """Return ``value`` unchanged when it is small, exact-builtin and JSON-safe.
+
+    No truncation is needed in that case, so the slower traversal would return the same
+    object with ``truncated=False``. Anything outside the ordinary shape falls back.
+    """
+    if json.dumps is not _JSON_DUMPS:  # someone inspects/replaces encoding itself
+        return _NO_FAST
+    remaining = [max_items]
+
+    def visit(item: Any, depth: int) -> bool:
+        kind = type(item)
+        if kind is str:
+            return len(item) <= max_string_bytes and _SURROGATE.search(item) is None
+        if kind in (type(None), bool):
+            return True
+        if kind is int:
+            return item.bit_length() <= 64
+        if kind is float:
+            return math.isfinite(item)
+        if kind not in (dict, list) or depth >= max_depth:
+            return False
+        if remaining[0] < 1:
+            return False
+        entries = item.items() if kind is dict else enumerate(item)
+        for key, child in entries:
+            if kind is dict and (
+                type(key) is not str
+                or len(key) > max_string_bytes
+                or _SURROGATE.search(key) is not None
+            ):
+                return False
+            remaining[0] -= 1
+            if remaining[0] < 0 or not visit(child, depth + 1):
+                return False
+        return True
+
+    if not visit(value, 0):
+        return _NO_FAST
+    try:
+        encoded = _JSON_DUMPS(
+            value, ensure_ascii=True, separators=(",", ":"), allow_nan=False
+        ).encode("utf-8")
+    except (TypeError, ValueError, OverflowError):
+        return _NO_FAST
+    return value if len(encoded) <= max_bytes else _NO_FAST
 
 
 def bounded_value(
@@ -43,6 +98,16 @@ def bounded_value(
 
     if max_depth > 64:
         raise ValueError("max_depth must be <= 64")
+
+    fast = _fast_bounded(
+        value,
+        max_bytes=max_bytes,
+        max_depth=max_depth,
+        max_items=max_items,
+        max_string_bytes=max_string_bytes,
+    )
+    if fast is not _NO_FAST:
+        return fast, False
 
     remaining_items = max_items
     active: set[int] = set()

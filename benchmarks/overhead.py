@@ -13,6 +13,8 @@ trivial SQLite queries:
   in-memory SQLite).
 * **litestar** - raw ASGI calls on one event loop -> ``RedlinePlugin`` middleware -> ``async def``
   handler -> SQLAlchemy Core (sync engine, in-memory SQLite).
+* **mssql**    - Flask -> Redline hooks -> view -> SQLAlchemy Core on a **fake pyodbc-shaped
+  DBAPI** (no server): the same cursor.execute/fetchall path, ``db.system=mssql``.
 
 Modes:
 
@@ -42,7 +44,7 @@ import tempfile
 import time
 
 MODES = ("off", "disabled", "sample0", "full", "profile")
-FRAMEWORKS = ("django", "fastapi", "flask", "litestar")
+FRAMEWORKS = ("django", "fastapi", "flask", "litestar", "mssql")
 LOW, HIGH = 0, 20
 
 
@@ -250,6 +252,45 @@ def flask_worker(mode: str, n_queries: int, iterations: int, warmup: int) -> lis
     return out
 
 
+def mssql_worker(mode: str, n_queries: int, iterations: int, warmup: int) -> list[float]:
+    from fake_mssql_dbapi import DBAPI
+    from flask import Flask
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.pool import StaticPool
+
+    tmp = tempfile.mkdtemp(prefix="redline-bench-")
+    engine = create_engine("mssql+pyodbc://", module=DBAPI, poolclass=StaticPool)
+    app = Flask(__name__)
+
+    @app.get("/bench/")
+    def bench():
+        with engine.connect() as conn:
+            for i in range(n_queries):
+                conn.execute(text("SELECT id, name FROM item WHERE id = ?"), {"id": i % 50}).all()
+        return {"ok": True}
+
+    if mode != "off":
+        from flask_redline import Redline
+
+        Redline(
+            app,
+            engine=engine,
+            settings=redline_settings(mode, tmp),
+            permission=lambda r: True,
+        )
+
+    client = app.test_client()
+    for _ in range(warmup):
+        client.get("/bench/")
+    out = []
+    for _ in range(iterations):
+        t = time.perf_counter_ns()
+        resp = client.get("/bench/")
+        out.append((time.perf_counter_ns() - t) / 1e3)
+        assert resp.status_code == 200
+    return out
+
+
 def litestar_worker(mode: str, n_queries: int, iterations: int, warmup: int) -> list[float]:
     import asyncio
 
@@ -342,7 +383,9 @@ def versions() -> str:
     return ", ".join(f"{n} {version(n)}" for n in names)
 
 
-def report(iterations: int, rounds: int, results: dict) -> str:
+def report(
+    iterations: int, rounds: int, results: dict, frameworks: tuple[str, ...] = FRAMEWORKS
+) -> str:
     lines = [
         "# Redline overhead benchmarks",
         "",
@@ -356,7 +399,12 @@ def report(iterations: int, rounds: int, results: dict) -> str:
         f"- Queries per request: {LOW} (fixed cost) and {HIGH} (adds {HIGH - LOW} queries).",
         "",
     ]
-    for fw in FRAMEWORKS:
+    if "mssql" in frameworks:
+        lines.append(
+            "The `mssql` cell uses a fake pyodbc-shaped DBAPI, not a SQL Server connection."
+        )
+        lines.append("")
+    for fw in frameworks:
         base = {n: results[(fw, "off", n)] for n in (LOW, HIGH)}
         lines += [
             f"## {fw}",
@@ -390,6 +438,12 @@ def main() -> None:
     ap.add_argument("--quick", action="store_true")
     ap.add_argument("--iterations", type=int, default=1500)
     ap.add_argument("--rounds", type=int, default=3)
+    ap.add_argument(
+        "--framework",
+        action="append",
+        choices=FRAMEWORKS,
+        help="run only this framework (repeatable)",
+    )
     ap.add_argument("--worker", nargs=5, metavar=("FW", "MODE", "N", "ITERS", "WARMUP"))
     args = ap.parse_args()
 
@@ -400,21 +454,23 @@ def main() -> None:
             "fastapi": fastapi_worker,
             "flask": flask_worker,
             "litestar": litestar_worker,
+            "mssql": mssql_worker,
         }[fw]
         print(json.dumps(fn(mode, int(n), int(iters), int(warm))))
         return
 
     iterations, rounds = (150, 1) if args.quick else (args.iterations, args.rounds)
+    frameworks = tuple(args.framework) if args.framework else FRAMEWORKS
     per_round = iterations // rounds
     results: dict[tuple, list[float]] = {}
     for r in range(rounds):  # interleave rounds so machine drift hits every mode equally
-        for fw in FRAMEWORKS:
+        for fw in frameworks:
             for mode in MODES:
                 for n in (LOW, HIGH):
                     print(f"round {r + 1}/{rounds} {fw} {mode} q={n}", file=sys.stderr)
                     cell = run_cell(fw, mode, n, per_round, max(50, per_round // 10))
                     results.setdefault((fw, mode, n), []).extend(cell)
-    print(report(per_round * rounds, rounds, results))
+    print(report(per_round * rounds, rounds, results, frameworks))
 
 
 if __name__ == "__main__":

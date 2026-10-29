@@ -519,10 +519,21 @@ class Redactor:
         """
         from .capture_limits import bounded_value
 
-        # Validate the public budget before observing any application value.
-        bounded_value(None, max_bytes=max_bytes)
-        normal, input_cut = _bounded_sql_input(params, max_bytes=max_bytes)
+        if type(max_bytes) is not int or max_bytes < 4:
+            raise ValueError("max_bytes must be an integer >= 4")
+        fast = _fast_json_value(
+            params, max_bytes=max_bytes, max_items=200, max_depth=8, max_string_bytes=2000
+        )
+        if fast is _NO_FAST:
+            normal, input_cut = _bounded_sql_input(params, max_bytes=max_bytes)
+        else:
+            normal, input_cut = fast, False
         redacted = self.sql_params(sql, normal)
+        fast_output = _fast_json_value(
+            redacted, max_bytes=max_bytes, max_items=200, max_depth=8, max_string_bytes=500
+        )
+        if fast_output is not _NO_FAST:
+            return fast_output, input_cut
         safe, output_cut = bounded_value(
             redacted, max_bytes=max_bytes, max_items=200, max_depth=8, max_string_bytes=500
         )
@@ -539,6 +550,59 @@ class Redactor:
     def _param_columns(sql: str) -> tuple[str | None, ...]:
         """Column each placeholder of ``sql`` is bound to (``None`` when unknown)."""
         return tuple(column for column, _ in _param_slots(sql))
+
+
+_NO_FAST: Any = object()
+
+
+def _fast_json_value(
+    value: Any,
+    *,
+    max_bytes: int,
+    max_items: int,
+    max_depth: int,
+    max_string_bytes: int,
+) -> Any:
+    """The value itself when it is already small, exact-builtin and JSON-safe.
+
+    This is the common path for ``{"id": 7}`` and avoids multiple bounded traversals.
+    Anything unusual returns ``_NO_FAST`` so the bounding/redaction path handles it.
+    """
+    remaining = [max_items]
+
+    def visit(item: Any, depth: int) -> bool:
+        kind = type(item)
+        if kind is str:
+            return len(item) <= max_string_bytes
+        if kind in (type(None), bool):
+            return True
+        if kind is int:
+            return item.bit_length() <= 64
+        if kind is float:
+            return item == item and item not in (float("inf"), float("-inf"))
+        if kind not in (dict, list, tuple) or depth >= max_depth:
+            return False
+        if remaining[0] < 1:
+            return False
+        for key, child in item.items() if kind is dict else enumerate(item):
+            if kind is dict and (type(key) is not str or len(key) > max_string_bytes):
+                return False
+            remaining[0] -= 1
+            if remaining[0] < 0 or not visit(child, depth + 1):
+                return False
+        return True
+
+    if not visit(value, 0):
+        return _NO_FAST
+    import json
+
+    try:
+        encoded = json.dumps(
+            value, ensure_ascii=True, separators=(",", ":"), allow_nan=False
+        ).encode("utf-8")
+    except (TypeError, ValueError, OverflowError):
+        return _NO_FAST
+    return value if len(encoded) <= max_bytes else _NO_FAST
 
 
 def _bounded_sql_input(value: Any, *, max_bytes: int) -> tuple[Any, bool]:
