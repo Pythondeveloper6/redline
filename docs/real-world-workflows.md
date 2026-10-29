@@ -53,15 +53,23 @@ reviewing NOCOUNT, OUTPUT/returning results, batches and driver behavior; it doe
 NOCOUNT is enabled or that a write failed. A 404 alone never establishes that cause.
 
 Direct session switches are observed without issuing probes or resets. SQL Server's
-NOCOUNT/XACT_ABORT/ANSI/ARITHABORT switches, selected PostgreSQL SET/RESET options and
-MySQL session options are recognized. A checkin finding requires a configured expected
-value. The default expectation is only `NOCOUNT = OFF`:
+NOCOUNT/XACT_ABORT/ANSI/ARITHABORT switches, transaction isolation level,
+`IDENTITY_INSERT`, language/date/timeout/deadlock settings and `sp_set_session_context`
+keys are recognized alongside selected PostgreSQL `SET`/`set_config` options and MySQL
+session/user variables. A checkin finding requires a configured expected value. The
+default expectation is only `NOCOUNT = OFF`, and SQL Server context keys are declared
+explicitly:
 
 ```python
 settings = {
     "session_expected": {"NOCOUNT": "OFF", "XACT_ABORT": "OFF"},
+    "session_expected_context": ["person_id", "endpoint", "request_id"],
 }
 ```
+
+Expected context keys are quiet when set with `@read_only = 1`; a leftover key set with
+`@read_only = 0`, or a key outside the list, is reported as a lower-severity finding.
+Values are stored as digests, never plaintext.
 
 Generic string-valued options are stored as digests; expected values use the same SQL
 value spelling. `SET LOCAL` is not treated as a persistent change, and observed PostgreSQL

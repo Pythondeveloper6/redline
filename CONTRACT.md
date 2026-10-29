@@ -1341,7 +1341,12 @@ if reset fails. Explicit actual plans require the existing execution opt-in and 
 driver exposing multiple result sets; cleanup and rollback are mandatory. Planner
 suggestions and session findings never issue DDL, resets or retries automatically.
 Session-state findings compare observed changes with configured expectations; defaults
-include only NOCOUNT OFF. Unobserved procedures/cursors/resets are not inferred.
+include only NOCOUNT OFF. SQL Server also observes isolation level, IDENTITY_INSERT,
+language/date/timeout/deadlock switches and `sp_set_session_context` keys; PostgreSQL and
+MySQL observe session options, `set_config(..., false)` and user variables. Expected
+context keys set with `@read_only = 1` are quiet, while unexpected keys and expected keys
+left mutable are lower-severity findings. Values are digests. Unobserved
+procedures/cursors/resets are not inferred.
 
 SQLAlchemy all-engine discovery is opt-in, process-scoped and lazy; explicit engines
 remain idempotent. Observation caches are bounded/weak and per-process. Recording has
