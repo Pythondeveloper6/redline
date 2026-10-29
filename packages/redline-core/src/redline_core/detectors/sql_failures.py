@@ -130,7 +130,7 @@ def detect(trace, settings):
                 severity="critical"
                 if kind == "sql_error"
                 and error.get("category") in {"schema", "parameter", "trigger_output"}
-                else "warning",
+                else str(first.data.get("session_state_severity", "warning")),
                 title=titles[kind],
                 detail=details[kind],
                 span_ids=[s.id for s in spans],
