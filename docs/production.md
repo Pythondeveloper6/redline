@@ -129,6 +129,13 @@ filesystem. WAL being available is necessary, but does not prove the underlying 
 safe under multiple containers. A writable store refuses a non-WAL result. Non-development
 presets refuse an in-repository store unless explicitly overridden.
 
+Run `redline doctor` **inside the actual container**, with the same mount and working
+directory as the app. Its `storage WAL` check creates a throwaway database beside the store
+and requires `journal_mode=wal` to work; its `filesystem` check warns on Linux mount types
+commonly used by network/virtual shares. The check does not write to the configured store.
+The test suite also writes to one file from two independent OS processes, but only your
+deployment's volumes and process model prove your topology.
+
 `{role}`, `{hostname}` and `{pid}` path placeholders help choose separate files. They are not
 an application namespace automatically added to a shared store. Use an application/environment
 prefix yourself. Files from unrelated codebases must not be mixed accidentally.

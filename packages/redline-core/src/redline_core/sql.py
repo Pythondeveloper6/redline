@@ -398,6 +398,7 @@ def offset_value(sql: str, params: Any = None) -> int | None:
 
 
 @lru_cache(maxsize=4096)
+@lru_cache(maxsize=4096)
 def effective_kinds(sql: str) -> tuple[str, ...]:
     """Leading kinds in semicolon-delimited batches; not a procedural SQL parser."""
     clean = _TOKEN.sub(

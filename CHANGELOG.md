@@ -29,6 +29,10 @@ version is below `1.0` the public API may change between minor versions.
   on its first run and can persist a `schema_drift` issue without running migrations.
   Unused-index analysis covers SQL Server's usage DMV, and repeated raw `text()` SQL gets a
   batching hint when no ORM relationship matches.
+- `redline doctor` now runs a real WAL self-test beside the store and warns on Linux
+  network/virtual mounts; two independent OS processes are tested writing one SQLite file.
+  The SQLAlchemy query path avoids repeated bounding/classification work on ordinary rows.
+- The overhead benchmark has an `mssql` cell driven through a fake pyodbc-shaped DBAPI.
 - `redline check-imports` follows statically visible imports inside task functions after
   loading each task module, and `redline check compare/run --ruff` includes Ruff JSON in
   Markdown and JUnit without becoming a linter.

@@ -947,7 +947,8 @@ decision's headers (and `X-Frame-Options: DENY`). TestClient peers named `testcl
 
 - `redline config [--json] [--project-root DIR]` – effective config (file + env layers only; code-level settings are
   not visible), source per value (`env REDLINE_X` for env), warnings. Exit 2 on invalid configuration.
-- `redline doctor [--json] [--project-root DIR]` – `ok`/`warn`/`fail` checks: storage writable, UI bundle present,
+- `redline doctor [--json] [--project-root DIR]` – `ok`/`warn`/`fail` checks: storage writable, a real WAL
+  self-test beside the store, a Linux mount-type warning for network/virtual filesystems, UI bundle present,
   access (open → fail, or warn with `REDLINE_ALLOW_OPEN`; `access` not set → warn (404 outside debug unless set
   in code); `trust_unix_socket` → warn; local outside dev → warn), token length / `token_file`
   readable by others, basic hash strength (< 100 000 iterations → warn), `secret_key` missing with token/basic,

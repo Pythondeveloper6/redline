@@ -1096,7 +1096,10 @@ def record_span(
     )
     if type(data) is not dict:
         data, cut = {}, True
-    name, name_cut = bounded_value(name, max_bytes=2048, max_string_bytes=1024)
+    if type(name) is str and len(name) <= 120 and name.isascii():
+        name_cut = False
+    else:
+        name, name_cut = bounded_value(name, max_bytes=2048, max_string_bytes=1024)
     if type(name) is not str:
         name, name_cut = "[unavailable]", True
     if cut or name_cut:

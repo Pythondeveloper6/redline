@@ -109,6 +109,16 @@ There is no downgrade. If you may need to roll back to 0.1, copy `.redline/redli
 first. The data is a cache of recent requests, so deleting the file is always an
 acceptable fix for a store that will not open.
 
+## Verifying the filesystem
+
+`redline doctor` creates a temporary SQLite database in the nearest existing parent of the
+store and requires `PRAGMA journal_mode=WAL` to succeed there. It also reports a warning
+for Linux mounts that commonly break SQLite's shared-memory file (`nfs`, `cifs`, `9p`,
+`virtiofs`, `fuse` and similar). The probe never opens or initializes the configured store.
+Run it in the same container, mount and working directory as the application. A successful
+probe is necessary but not sufficient for concurrent containers; a named volume or local
+disk is safer than a bind mount through a VM sharing layer.
+
 ## The writer thread
 
 `SQLiteStore.save(trace)` puts the trace on a bounded queue (`writer_queue_size`, default
@@ -145,7 +155,9 @@ reads are small, but note:
 
 - UI reads and the writer take turns. A long aggregate (a 7-day Endpoints page over many
   thousands of traces) delays the writer for its duration.
-- Several **processes** can share the file (WAL, 10-second busy timeout), but see
+- Several **processes** can share the file (WAL, 10-second busy timeout). The test suite
+  opens one file from two independent OS processes (100 traces each) and checks the count;
+  it does not use fork, so it exercises the same path as separate containers. See
   [Production: process models](production.md#process-models) for the caveats.
 - After `fork()` (gunicorn `--preload`, uWSGI without `lazy-apps`) the store opens a
   new connection, queue and writer thread in the child; the parent's connection is never
