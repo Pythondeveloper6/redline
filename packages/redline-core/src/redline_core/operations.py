@@ -11,9 +11,18 @@ def configure_export(parser):
     parser.add_argument("--store", required=True)
     parser.add_argument("--endpoint")
     parser.add_argument(
+        "--logs-endpoint",
+        help="optional OTLP logs endpoint for recorded issues",
+    )
+    parser.add_argument(
+        "--include-sql",
+        action="store_true",
+        help="include raw SQL text instead of the normalized fingerprint",
+    )
+    parser.add_argument(
         "--send",
         action="store_true",
-        help="send the displayed summary format to the explicit collector",
+        help="send the displayed spans and logs to the explicit collectors",
     )
     parser.add_argument("--limit", type=int, default=100)
 
@@ -23,12 +32,26 @@ def export_command(args, out, err):
     from .storage.multiple import TraceReader
 
     if not 1 <= args.limit <= 500 or (args.send and not args.endpoint):
-        print("Use limit 1..500 and an explicit endpoint for --send", file=err)
+        print("Use limit 1..500 and an explicit traces endpoint for --send", file=err)
+        return 2
+    if args.logs_endpoint and not args.send:
+        print("--logs-endpoint requires --send", file=err)
         return 2
     reader = TraceReader(args.store)
     try:
         traces = [reader.get(i["id"]) for i in reader.list(limit=args.limit).items]
-        print(json.dumps(export(traces, args.endpoint, dry_run=not args.send)), file=out)
+        print(
+            json.dumps(
+                export(
+                    traces,
+                    args.endpoint,
+                    dry_run=not args.send,
+                    logs_endpoint=args.logs_endpoint,
+                    include_sql=args.include_sql,
+                )
+            ),
+            file=out,
+        )
         return 0
     except Exception:
         print("Export failed; verify store, collector and protocol support", file=err)

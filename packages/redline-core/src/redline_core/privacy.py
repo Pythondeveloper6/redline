@@ -109,6 +109,12 @@ def correlate(trace, request_headers, response_headers, settings):
         }
 
     request, response = normal(request_headers), normal(response_headers)
+    from .tracecontext import parse_traceparent
+
+    context = parse_traceparent(response.get("traceparent") or request.get("traceparent"))
+    if context:
+        trace.tags["otel_trace_id"] = context["trace_id"]
+        trace.tags["otel_parent_span_id"] = context["parent_span_id"]
     for name in settings.request_id_headers:
         if name.lower() in {h.lower() for h in settings.redact_headers}:
             continue
