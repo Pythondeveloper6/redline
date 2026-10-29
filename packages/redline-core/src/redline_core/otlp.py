@@ -2,47 +2,154 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
-
-def _id(value, length=32):
-    return hashlib.sha256(str(value).encode()).hexdigest()[:length]
+from .tracecontext import hex_id, parent_span_id, trace_id
 
 
-def payload(traces):
-    """Build sanitized summary spans; omit bodies, SQL text/values, errors and arbitrary tags."""
-    items = []
-    for trace in traces:
-        start = int(trace.started_at * 1_000_000_000)
-        attrs = [
-            ("redline.framework", trace.framework),
-            ("redline.method", trace.method),
-            ("redline.status", str(trace.status)),
-            ("redline.query_count", str(trace.query_count)),
-        ]
-        # Paths/job names and SQL identifiers can be sensitive too; hash names by default.
-        items.append(
-            {
-                "traceId": _id(trace.id),
-                "spanId": _id(trace.id + ":root", 16),
-                "name": "redline.recording",
-                "kind": 1,
-                "startTimeUnixNano": str(start),
-                "endTimeUnixNano": str(start + int(trace.duration_ms * 1_000_000)),
-                "attributes": [{"key": k, "value": {"stringValue": v}} for k, v in attrs],
-                "status": {"code": 2 if trace.status >= 400 else 1},
-            }
+def _value(value):
+    if isinstance(value, bool):
+        return {"boolValue": value}
+    if isinstance(value, int):
+        return {"intValue": str(value)}
+    return {"stringValue": str(value)}
+
+
+def _attributes(items):
+    return [{"key": key, "value": _value(value)} for key, value in items]
+
+
+def _status(trace):
+    return {"code": 2 if trace.status >= 400 else 1}
+
+
+def _root_span(trace, root_id, otel_trace_id):
+    start = int(trace.started_at * 1_000_000_000)
+    span = {
+        "traceId": otel_trace_id,
+        "spanId": root_id,
+        "name": "redline.recording",
+        "kind": 1,
+        "startTimeUnixNano": str(start),
+        "endTimeUnixNano": str(start + int(trace.duration_ms * 1_000_000)),
+        "attributes": _attributes(
+            [
+                ("redline.framework", trace.framework),
+                ("redline.method", trace.method),
+                ("redline.status", str(trace.status)),
+                ("redline.query_count", str(trace.query_count)),
+                ("redline.incomplete", bool(trace.truncated)),
+            ]
+        ),
+        "status": _status(trace),
+    }
+    incoming_parent = parent_span_id(trace)
+    if incoming_parent:
+        span["parentSpanId"] = incoming_parent
+    return span
+
+
+def _sql_span(trace, span, root_id, otel_trace_id, include_sql):
+    error = span.data.get("error") or {}
+    kinds = span.data.get("statement_kinds") or ()
+    operation = str(kinds[0]).upper() if kinds else "SQL"
+    statement = span.data.get("sql") if include_sql else span.data.get("fingerprint")
+    attributes = [
+        ("db.system", span.data.get("vendor") or "other"),
+        ("db.operation", operation),
+        ("redline.db_alias", span.data.get("db_alias") or "default"),
+        ("redline.rows", str(span.data.get("rows", ""))),
+    ]
+    if statement:
+        attributes.append(("db.statement", str(statement)))
+    if error:
+        attributes.append(
+            ("error.type", str(error.get("type") or error.get("category") or "error"))
         )
+    start = int(trace.started_at * 1_000_000_000) + int(span.start_ms * 1_000_000)
+    parent = hex_id("redline:" + trace.id + ":" + (span.parent_id or "root"), 16)
+    result = {
+        "traceId": otel_trace_id,
+        "spanId": hex_id("redline:" + trace.id + ":" + span.id, 16),
+        "parentSpanId": parent if span.parent_id else root_id,
+        "name": operation,
+        "kind": 3,
+        "startTimeUnixNano": str(start),
+        "endTimeUnixNano": str(start + int(span.duration_ms * 1_000_000)),
+        "attributes": _attributes(attributes),
+        "status": {"code": 2 if error else 1},
+    }
+    if error:
+        result["status"]["message"] = "SQL statement failed"
+    return result
+
+
+def payload(traces, *, include_sql=False):
+    """OTLP traces with a root span plus sanitized SQL spans.
+
+    SQL text is the normalized fingerprint by default; bodies, parameter values, arbitrary
+    tags and error messages are never exported.
+    """
+    spans = []
+    for trace in traces:
+        otel_trace_id = trace_id(trace)
+        root_id = hex_id("redline:" + trace.id + ":root", 16)
+        spans.append(_root_span(trace, root_id, otel_trace_id))
+        for span in trace.spans:
+            if span.kind == "sql":
+                spans.append(_sql_span(trace, span, root_id, otel_trace_id, include_sql))
     return {
         "resourceSpans": [
             {
                 "resource": {
                     "attributes": [{"key": "service.name", "value": {"stringValue": "redline"}}]
                 },
-                "scopeSpans": [{"scope": {"name": "redline"}, "spans": items}],
+                "scopeSpans": [{"scope": {"name": "redline"}, "spans": spans}],
+            }
+        ]
+    }
+
+
+_SEVERITY = {"info": (9, "INFO"), "warning": (13, "WARN"), "critical": (17, "ERROR")}
+
+
+def logs_payload(traces):
+    """OTLP log records for recorded issues; stable ids make repeated exports deduplicable."""
+    records = []
+    for trace in traces:
+        otel_trace_id = trace_id(trace)
+        root_id = hex_id("redline:" + trace.id + ":root", 16)
+        stamp = str(int(trace.started_at * 1_000_000_000))
+        for issue in trace.issues:
+            number, text = _SEVERITY.get(issue.severity, (9, "INFO"))
+            records.append(
+                {
+                    "timeUnixNano": stamp,
+                    "severityNumber": number,
+                    "severityText": text,
+                    "body": {"stringValue": str(issue.title)[:512]},
+                    "attributes": _attributes(
+                        [
+                            ("issue.id", issue.id),
+                            ("issue.kind", issue.kind),
+                            ("issue.severity", issue.severity),
+                            ("issue.count", str(issue.count)),
+                            ("redline.trace_id", trace.id),
+                        ]
+                    ),
+                    "traceId": otel_trace_id,
+                    "spanId": root_id,
+                }
+            )
+    return {
+        "resourceLogs": [
+            {
+                "resource": {
+                    "attributes": [{"key": "service.name", "value": {"stringValue": "redline"}}]
+                },
+                "scopeLogs": [{"scope": {"name": "redline"}, "logRecords": records}],
             }
         ]
     }
@@ -53,11 +160,8 @@ class _NoRedirect(HTTPRedirectHandler):
         return None
 
 
-def export(traces, endpoint, *, dry_run=True):
-    data = payload(traces)
-    if dry_run:
-        return data
-    parts = urlsplit(endpoint)
+def _endpoint(value):
+    parts = urlsplit(value)
     if (
         parts.scheme not in {"http", "https"}
         or not parts.hostname
@@ -67,6 +171,10 @@ def export(traces, endpoint, *, dry_run=True):
         or parts.fragment
     ):
         raise ValueError("Use an explicit HTTP(S) collector URL without credentials or query")
+
+
+def _send(endpoint, data):
+    _endpoint(endpoint)
     request = Request(
         endpoint,
         data=json.dumps(data).encode(),
@@ -79,6 +187,29 @@ def export(traces, endpoint, *, dry_run=True):
             raise ValueError("Collector response exceeds limit")
         if body:
             result = json.loads(body)
-            if result.get("partialSuccess", {}).get("rejectedSpans", 0):
-                raise ValueError("Collector rejected spans")
-    return {"sent": True, "recordings": len(data["resourceSpans"][0]["scopeSpans"][0]["spans"])}
+            rejected = result.get("partialSuccess", {})
+            if any(
+                rejected.get(key, 0) for key in ("rejectedSpans", "rejectedLogRecords", "rejected")
+            ):
+                raise ValueError("Collector rejected telemetry")
+
+
+def export(traces, endpoint, *, dry_run=True, logs_endpoint=None, include_sql=False):
+    """Preview, or explicitly POST spans (plus logs when requested) to an OTLP collector."""
+    spans = payload(traces, include_sql=include_sql)
+    logs = logs_payload(traces)
+    if dry_run:
+        return {"spans": spans, "logs": logs}
+    if not endpoint:
+        raise ValueError("An explicit traces endpoint is required for --send")
+    _send(endpoint, spans)
+    log_records = len(logs["resourceLogs"][0]["scopeLogs"][0]["logRecords"])
+    if logs_endpoint and log_records:
+        _send(logs_endpoint, logs)
+    return {
+        "sent": True,
+        "recordings": len(traces),
+        "spans": len(spans["resourceSpans"][0]["scopeSpans"][0]["spans"]),
+        "log_records": log_records,
+        "logs_sent": bool(logs_endpoint and log_records),
+    }

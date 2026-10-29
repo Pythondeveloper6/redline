@@ -20,7 +20,8 @@ version is below `1.0` the public API may change between minor versions.
 - SQL Server identity, estimated/opt-in actual XML plan collection, logical-read summaries
   and bounded catalog inspection. Live driver validation remains required.
 - Offline `redline check-sql`, explicit online compilation and schema snapshots, bounded
-  store auditing, import checks and explicit sanitized OTLP summary export. SQL Server
+  store auditing, import checks and explicit sanitized OTLP export of SQL spans and issue
+  log records. SQL Server
   online checks use server-described parameter types and result columns under NOEXEC, and
   flag literal row reads the described SELECT no longer returns. Snapshots include SQL
   Server triggers and routine parameters, and schema drift recompiles only statements that

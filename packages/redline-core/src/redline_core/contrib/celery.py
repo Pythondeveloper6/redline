@@ -46,6 +46,12 @@ class CeleryIntegration:
             parent=headers.get("redline", {}),
         )
         ctx.__enter__()
+        from ..tracecontext import parse_traceparent
+
+        context = parse_traceparent(headers.get("traceparent"))
+        if context:
+            tag("otel_trace_id", context["trace_id"])
+            tag("otel_parent_span_id", context["parent_span_id"])
         _active.set((*_active.get(), (task_id, ctx, None)))
 
     def failure(self, task_id=None, exception=None, **kwargs):
@@ -79,7 +85,11 @@ class CeleryIntegration:
         if headers is not None and sender in self.app.tasks:
             value = propagation_headers()
             if value:
-                headers["redline"] = value
+                headers["redline"] = {
+                    key: item for key, item in value.items() if key != "traceparent"
+                }
+                if value.get("traceparent"):
+                    headers["traceparent"] = value["traceparent"]
 
     def uninstall(self):
         for signal, handler in self.listeners:

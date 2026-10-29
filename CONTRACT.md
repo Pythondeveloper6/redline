@@ -1355,8 +1355,13 @@ procedures/cursors/resets are not inferred.
 SQLAlchemy all-engine discovery is opt-in, process-scoped and lazy; explicit engines
 remain idempotent. Observation caches are bounded/weak and per-process. Connection
 lifecycle gauges are flushed to `lifecycle_hourly` as max-per-hour rows even when the trace
-is sampled out; `GET api/lifecycle` exposes them. Recording has no automatic exporter. Existing access, read-only and feature gates remain in force.
-Write replay is a browser feature control rather than application endpoint authorization.
+is sampled out; `GET api/lifecycle` exposes them. Explicit OTLP export sends a root span,
+sanitized SQL spans (`db.system`, `db.operation`, fingerprint `db.statement` unless raw SQL
+is explicitly opted in, `error.type`) and issues as log records; bodies, parameter values,
+arbitrary tags and error messages are omitted. A valid incoming W3C `traceparent` supplies
+the exported trace/parent ids and is forwarded to jobs. Recording has no automatic exporter.
+Existing access, read-only and feature gates remain in force. Write replay is a browser
+feature control rather than application endpoint authorization.
 
 SQL value capture accepts True, False and reads_only. Disabled capture also removes SQL
 literals/source snippets and withholds potentially value-bearing SQL error messages.

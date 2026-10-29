@@ -54,6 +54,12 @@ def job(name, *, recorder=None, task_id=None, queue=None, attempt=0, parent=None
             for key in ("request_id", "parent_trace_id"):
                 if parent.get(key) is not None:
                     tag(key, parent[key])
+            from .tracecontext import parse_traceparent
+
+            context = parse_traceparent(parent.get("traceparent"))
+            if context:
+                tag("otel_trace_id", context["trace_id"])
+                tag("otel_parent_span_id", context["parent_span_id"])
         elif parent is not None:
             builder.capture_limited = True
         try:
@@ -140,7 +146,10 @@ def propagation_headers():
     builder = current()
     if builder is None or not builder.active or builder.finished:
         return {}
+    from .tracecontext import outgoing_traceparent
+
     return {
         "parent_trace_id": builder.id,
         **({"request_id": builder.tags["request_id"]} if builder.tags.get("request_id") else {}),
+        "traceparent": outgoing_traceparent(builder),
     }
