@@ -20,7 +20,7 @@ code touches directly is :func:`span`::
 
 from __future__ import annotations
 
-__version__ = "0.4.0a2"
+__version__ = "0.5.0a1"
 
 from .conf import Settings, SettingsError
 from .detect import Detector, FixSuggester, GenericSuggester

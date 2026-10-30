@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { Suspense, useEffect, useRef, useState } from 'react'
 import { NavLink, Outlet, useLocation } from 'react-router-dom'
 import { api } from '../api'
 import { setTheme, useTheme, type ThemePref } from '../theme'
@@ -138,7 +138,9 @@ export default function Shell() {
         </div>
       </header>
       <main className="flex-1 mx-auto w-full max-w-[1500px] px-3 sm:px-5 py-4" key={epoch}>
-        <Outlet />
+        <Suspense fallback={<div className="card p-4 text-muted" role="status" aria-live="polite" aria-busy="true">Loading page…</div>}>
+          <Outlet />
+        </Suspense>
       </main>
       <CommandPalette open={palette} onClose={() => setPalette(false)} meta={meta.data} />
       <ShortcutsHelp open={help} onClose={() => setHelp(false)} />
