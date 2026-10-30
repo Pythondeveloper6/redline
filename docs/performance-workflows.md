@@ -207,7 +207,7 @@ Module-level local helpers are summarized through up to eight call edges; shadow
 helper names are excluded. A query in the first iterable is evaluated once and is
 not classified as repeated by that loop; calls in later iterables can repeat.
 Session identity-map hits, short-circuit branches and intentional chunking still need
-runtime review. Cross-module helpers, unknown factories and dynamic aliases may be missed. Findings are suggestions for review,
+runtime review. Helpers outside the scanned project, unknown factories and dynamic aliases may be missed. Findings are suggestions for review,
 not proof of runtime evaluation, unused data or a safe transformation. Preserve null,
 precision, duration rounding, hashing, ordering and mutation behavior when fixing them.
 
@@ -250,3 +250,25 @@ requests. A request's **Time breakdown and recording health** partitions wall ti
 database-only, external-only, pool-wait-only, cross-category overlap and remaining time.
 Concurrent spans are not added twice. Remaining time is uninstrumented time, not measured
 CPU. Truncated spans, dropped logs and profile errors remain visible.
+
+
+### Project imports and SQL literal coverage
+
+Project scans now follow explicit imports only between files included by the configured
+scan budgets. Stable aliases, relative imports and package re-exports propagate query
+helper summaries for up to eight project passes. The JSON `project_inference` field
+reports the pass count, inferred helper exports and limitations. Exceeding the propagation
+cap marks the scan incomplete. Wildcards, dynamic imports, unknown application factories
+and class dispatch may still hide queries; single-file/pasted-source analysis cannot
+follow imports into other files.
+
+Known SQLAlchemy `Session`/`AsyncSession` annotations include Optional, Annotated and
+bounded string forms. Known sessionmaker/async_sessionmaker factories and their
+context-manager bindings establish session provenance without importing SQLAlchemy.
+Arbitrary `get_sessionmaker()` functions and variable names are not assumed to be sessions.
+
+`redline check-sql` recovers stable SQLAlchemy text clauses, literal wrappers, small pure
+SQL templates and imported literal constants from the same bounded scanned set. It never
+imports the application or evaluates arbitrary Python. Unknown ORM expressions and dynamic
+SQL remain unresolved and cause exit 2. Runtime capture and isolated explicit compilation
+remain necessary for those shapes; zero lint findings is not full SQL validation.

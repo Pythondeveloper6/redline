@@ -8,7 +8,32 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). While the
 version is below `1.0` the public API may change between minor versions.
 
-## Unreleased: 0.4.0a2
+## Unreleased: 0.5.0a1
+
+### Added
+
+- Bounded project import summaries detect repeated query helpers across scanned Python
+  modules, including explicit aliases, relative imports and stable package re-exports.
+- SQLAlchemy session inference covers Optional/Annotated/string annotations and known
+  sessionmaker/async_sessionmaker factories and context-manager bindings.
+- Offline SQL checks recover stable text-clause constants, safe literal-return SQL
+  template helpers and imported literal constants, without importing application code.
+  ORM expressions remain explicitly unvalidated and require capture/compilation.
+- Optional boto3 SDK operation spans capture service, operation, status and duration
+  without storing SDK arguments, response bodies, bucket names or object keys.
+- `fastapi_redline.add_background_task` records sync/async in-process tasks as distinct
+  jobs with parent correlation. Argument/result capture and exception details are suppressed
+  for these jobs; original task exceptions and execution scheduling are preserved.
+- Recording health reports installed/loaded/instrumented optional integrations and explains
+  that hook status is not evidence of observed activity.
+
+### Fixed
+
+- Split UI pages into lazy chunks while keeping navigation and palette destinations available.
+- Disable URL-based module preloads so embedded offline snapshots can load lazy chunks
+  from their data-URL import map; verified against a real Safari-rendered export.
+
+## 0.4.0a2 development baseline
 
 ### Fixed
 

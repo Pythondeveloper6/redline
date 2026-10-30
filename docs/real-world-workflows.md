@@ -1,6 +1,6 @@
 # Database failures, jobs and shared environments
 
-These tools are part of the **0.4.0a2 development release**. They extend the existing
+These tools are part of the **0.5.0a1 development release**. They extend the existing
 request profiler; they do not replace application tests, a database migration system or
 production error monitoring. Recording does not start an exporter. Active load/check,
 online compilation and export commands contact only their explicitly selected targets.

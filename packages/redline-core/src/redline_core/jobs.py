@@ -39,11 +39,22 @@ def tag(key, value):
 
 
 @contextmanager
-def job(name, *, recorder=None, task_id=None, queue=None, attempt=0, parent=None):
+def job(
+    name,
+    *,
+    recorder=None,
+    task_id=None,
+    queue=None,
+    attempt=0,
+    parent=None,
+    capture_error_details=None,
+):
     """Record one job, preserving an outer request/job context on exit."""
     rec = recorder or get_recorder()
     label = rec.redactor.text(_label(name))
     with rec.recording(framework="other", method="TASK", path=label, route=label) as builder:
+        if capture_error_details is False:
+            builder.capture_error_details = False
         tag("job.name", name)
         if task_id is not None:
             tag("job.id", task_id)

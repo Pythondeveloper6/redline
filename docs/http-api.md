@@ -797,7 +797,7 @@ setting and the feature and not `read_only`) and `access: {policy, login, read_o
 
 ## Things to know
 
-- **The API is not versioned.** The development release is `0.4.0a2`: the shape may change between alpha
+- **The API is not versioned.** The development release is `0.5.0a1`: the shape may change between alpha
   releases. The frontend and the core ship together, so they never disagree.
 - **Redacted values are redacted in the API too.** There is no way to ask for the
   original.

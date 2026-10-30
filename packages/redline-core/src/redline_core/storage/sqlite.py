@@ -1123,9 +1123,10 @@ class SQLiteStore(CheckStoreMixin):
             g[1] += total
             g[2] = max(g[2], float(r[5]))
             g[3] += int(r[6])
-            if n >= 2:
+            identity_known = not str(r[0]).startswith("SDK:")
+            if identity_known and n >= 2:
                 g[4] += 1
-            if n >= 3 and r[6] >= 1:
+            if identity_known and n >= 3 and r[6] >= 1:
                 g[5] += 1
             g[6].record(total / n if n else 0.0, n)
         out = [
