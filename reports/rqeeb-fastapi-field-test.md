@@ -2,13 +2,15 @@
 
 Date: 2026-10-29. Target: `/Volumes/Data/Dev/rqeeb-backend-fastapi`.
 
-## Final rating: 7.5 / 10 after corrections
+## Current rating: 8.0 / 10 for prepared 0.5.0a1
 
-Baseline rating: **6.5/10**. The prepared `0.4.0a2` improves static accuracy and
-whole-project coverage. The final score remains limited by unresolved dynamic SQL,
-cross-module inference and the installation/network/MySQL/browser checks that could
-not be completed in this environment. It is an engineering assessment, not a measured
-percentage of all defects detected.
+Baseline rating: **6.5/10**; the first correction release `0.4.0a2` scored **7.5/10**.
+The prepared `0.5.0a1` adds import-aware analysis, safer SQL recovery, optional SDK/task
+capture and visible integration coverage. Native-browser checks now cover offline
+snapshots and the health UI. The score remains limited by unresolved dynamic SQL and
+clean online installation/live infrastructure checks. This is an engineering assessment,
+not a measured percentage of all defects detected. Historical baseline evidence below
+is retained; current release results are at the end.
 
 ## Verdict before fixes: 6.5 / 10
 
@@ -185,3 +187,130 @@ or project-description update. This test does not establish the latest installab
 PyPI version.
 
 The release is prepared locally. No push, merge, tag or package publication was performed.
+
+
+## 0.5.0a1 follow-up: 2026-10-30
+
+Branch: `release/v0.5.0a1-real-project-coverage`, based on `434b739`.
+User decisions: use recommended implementation choices and smaller models for small,
+independent work. The prior corrections remain in this branch; this follow-up targets
+the remaining actionable coverage gaps.
+
+### Implemented scope and remaining boundaries
+
+| Report gap | Current implementation | Boundary retained |
+|---|---|---|
+| Helpers behind module imports | Eight-pass bounded summaries for explicit aliases, relative imports and stable package re-exports | Only already-scanned files; dynamic imports/wildcards/class dispatch remain uncertain |
+| Session types and factories | Optional/Annotated/Union/string forms plus known SQLAlchemy sessionmaker/async_sessionmaker and context bindings | Unknown application-specific factories such as get_sessionmaker are not guessed |
+| Recoverable SQL templates | Whitelisted literal AST operations, stable SQLAlchemy text clauses/wrappers, pure literal-return helpers and imported constants | No arbitrary evaluation/imports, ORM synthesis or certification of unresolved SQL |
+| Missing HTTP/cache/SDK coverage visibility | Installed/loaded/instrumented statuses and warnings in Recording health/API | Hooks stay opt-in; active does not imply observed calls or coverage of other processes |
+| boto3 SDK activity | Optional botocore operation hook; bounded service/operation/status/duration only | No argument/response/error text, bucket/key or signed-URL storage; streaming body work is outside operation duration |
+| FastAPI in-process background work | Explicit add_background_task helper creates a separate correlated job for async/sync/callable tasks | No automatic cross-process stitching; arbitrary schedulers/voice workers still need explicit job instrumentation |
+| Raw SQL loader advice | Existing batching guidance retained; import warnings advise IN queries/eager loading only as applicable | Actual raw SQL/response-preserving rewrite remains an application change requiring review |
+| File/PDF/XLSX CPU work | Existing manual spans and profiler remain the supported tools | No unsupported automatic identification of all SDK/CPU work; inspected offloaded paths are not flagged as blocking |
+| Large UI bundle | Route chunks, stable shell while loading, eager palette metadata | All chunks still ship; lazy loading reduces initial transfer rather than eliminating total code |
+| Offline lazy chunks | URL preload helpers disabled; import-map snapshot loads native modules | Verified native Safari, not an exhaustive browser matrix |
+| Deployment and plans | Existing isolated release qualification harness retained | Docker API access and socket binding are denied here; live MySQL/Redis/Postgres and fresh full-stack qualification remain mandatory elsewhere |
+
+### Real-project rescan and runtime results
+
+The installed 0.5.0a1 wheels scan all **599 files**, with no parse errors, file skips or
+inference-limit truncation. Import inference converges in three passes. There are
+**264 source candidates**, compared with 203 after the first corrections; the 61 extra
+candidates include imported helpers and newly understood session provenance. They are
+not 61 confirmed defects. Examples manually checked include:
+
+- `modules/admin/settings/router.py:110`: a settings loop invokes imported `service.upsert`,
+  which can query/write for each setting.
+- `modules/cameras/validation.py:215`: per-service validation awaits imported `_exists_scalar`.
+- `modules/customer/employees/service.py:1053`: row imports call a validation helper that
+  can perform database work per row.
+
+All 26 original confirmed iteration false positives remain corrected. The scanner does
+not execute any target module, inspect `.env` or follow imports outside the admitted files.
+
+SQL extraction improves from **38 to 40 checked literal statements**, while unresolved
+inputs decline from **426 to 410** on the whole project: 254 are recognized ORM
+constructor expressions requiring runtime capture/explicit compilation, and 156 remain
+dynamic SQL. Most remaining shapes need runtime capture or isolated compilation. This is deliberately a conservative improvement;
+zero lint findings still exits **2** because coverage is incomplete. Unsupported ORM
+constructor expressions are labeled as needing capture/compilation when recognized.
+
+The installed-wheel feature smoke uses the real target FastAPI app and dependency
+environment. A real boto3 S3 client runs under botocore Stubber with synthetic credentials
+and no network; ListBuckets produces the expected external-operation span. An explicit
+background task produces a distinct successful TASK trace linked to its parent request,
+without storing its argument. Recording health correctly reports the installed active
+boto3 hook and inactive optional integrations.
+
+Five wheel smoke tests passed (features, requests, probes, real helper query counts and
+lifespan/assets/SQLite EXPLAIN). Two final-wheel feature/EXPLAIN smoke tests also passed
+after the last SDK safety fix. Existing **138 target project tests passed** with 0.5.0a1.
+The target repository's source, environment and pre-existing seed-script conflict remain
+unchanged.
+
+### Browser findings and fixes during this release
+
+Native Safari initially showed a blank exported snapshot. Vite's lazy-chunk preload map
+attempted URL resolution against embedded data modules, which does not honor the import
+map. Disabling URL module preloads fixed the issue; a generated self-contained production
+snapshot then visibly rendered its request timeline and SQL spans without a server.
+The real-bundle snapshot regression test now guards against the incompatible preload map.
+
+The production health view was rendered using synthetic, locally embedded API fixtures
+from the tested app. Screenshots at **390 CSS px and 1440 CSS px** showed wrapping status
+rows and no clipped integration content; keyboard focus was visibly outlined on the
+coverage disclosure. These are browser viewport layout checks, not physical mobile-device
+or complete accessibility qualification. The temporary browser tab was closed afterward.
+
+The largest production JavaScript chunk is **229,283 bytes** (previous monolithic entry
+exceeded 500 kB). No >500 kB build warning remains. Command-palette metadata is loaded
+eagerly so unvisited lazy routes remain discoverable; the navigation shell stays mounted
+while page chunks load.
+
+### Additional safety regressions caught and fixed
+
+- The background-task helper initially inherited exception-detail/local capture. It now
+  suppresses details per recording, preserving only exception type/outcome, and never
+  mutates global settings. Default capture-failure handling remains unchanged; a core
+  regression caught and prevented changing that behavior.
+- The initial SDK no-trace fast path could catch an application SDK exception and call
+  the operation a second time. Review caught it before release: the original SDK call
+  is now outside the setup exception handler. A regression asserts exactly one call and
+  preservation of the original exception. Metadata/recording failures cannot replace a
+  successful SDK result.
+- SDK resource identity is deliberately not captured. The integration therefore uses
+  SDK-prefixed methods, contributes latency/error/count totals and skips duplicate/retry
+  inference. A regression prevents three reads of different object keys from becoming
+  a false duplicate-call finding or duplicate/retry aggregate count.
+- SQL template evaluation now rejects shadowed/rebound helpers, side-effecting/decorated
+  functions and invalid argument binding. UTF-8 size is checked during f-string assembly.
+  Imported constants respect source budgets, scope shadowing, cycles and path boundaries.
+
+### Current release validation
+
+| Check | Result |
+|---|---|
+| Core supported in this sandbox | 1,605 passed, six optional/service skips |
+| FastAPI | 130 passed |
+| Django | 202 passed, one skip |
+| Flask | 132 passed |
+| Litestar | 114 passed |
+| Package Python total | **2,183 passed**, seven skips, no remaining failures/errors in supported run |
+| Target project regressions | 138 passed |
+| Installed-wheel smoke | Five passed; final SDK/lifespan smoke two passed |
+| Frontend | 35 tests, TypeScript and production build passed |
+| Browser | Offline production snapshot and health fixtures visibly rendered; 390/1440 px layouts and keyboard focus reviewed |
+| Docs and hygiene | Strict MkDocs, Ruff check/format, version/pin checks and git diff --check passed |
+| Packaging | All five ordinary wheels built; core/FastAPI installed locally; all five wheels' Python files match final source |
+| Infrastructure tests | The same 21 socket-dependent tests remain unavailable; optional database/Redis checks skipped; Docker API access denied |
+| Required dependencies/schema | No new required dependency and no storage/database migration |
+
+Current assessment: installation 7 (still provisional), runtime 8.5, static usefulness 7,
+coverage 8, guidance 9.5. Equal-weight mean: **8.0/10**. The score is not a claim that
+all dynamic queries are analyzable or that this release is production-qualified.
+Clean online installation, live database-driver plans/reconnects, network load testing,
+full Compose qualification and the supported-version CI matrix remain release gates.
+
+No push, merge, tag or publication was performed. The development branch is prepared
+for review; these remaining environment-dependent gates are explicitly not marked fixed.

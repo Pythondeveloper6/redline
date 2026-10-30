@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "fastapi-redline"
-version = "0.4.0a2"
+version = "0.5.0a1"
 description = "A modern request profiler for FastAPI and SQLAlchemy: span timelines, N+1 detection with fix diffs, one-click EXPLAIN, flamegraphs and a fast web UI."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -42,13 +42,13 @@ classifiers = [
 ]
 # Lockstep: the adapter pins the exact core release it was tested with.
 dependencies = [
-    "redline-core==0.4.0a2",
+    "redline-core==0.5.0a1",
     "fastapi>=0.110,<1.0",
     "sqlalchemy[asyncio]>=2.0,<3.0",
 ]
 
 [project.optional-dependencies]
-profile = ["redline-core[profile]==0.4.0a2"]
+profile = ["redline-core[profile]==0.5.0a1"]
 
 [project.urls]
 Homepage = "https://github.com/Pythondeveloper6/redline"

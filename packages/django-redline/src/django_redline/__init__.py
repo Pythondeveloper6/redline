@@ -18,6 +18,6 @@ from __future__ import annotations
 
 from redline_core import span
 
-__version__ = "0.4.0a2"
+__version__ = "0.5.0a1"
 
 __all__ = ["__version__", "span"]

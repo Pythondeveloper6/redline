@@ -23,6 +23,7 @@ They share a few rules:
 | SQLAlchemy | `instrument_engine(engine)` | `sql`, `transaction`, `pool_wait` spans | `sqlalchemy` |
 | httpx | `instrument_httpx()` | `http_out` spans | `httpx` |
 | requests | `instrument_requests()` | `http_out` spans | `requests` |
+| boto3 | `instrument_boto3()` | `http_out` spans per SDK operation | `boto3` |
 | redis-py | `instrument_redis()` | `cache` spans | `redis` |
 | asyncpg | `instrument_asyncpg()` | `sql` spans | `asyncpg` |
 | psycopg 3 | `instrument_psycopg()` | `sql` spans | `psycopg` |
@@ -78,6 +79,22 @@ instrument_requests()   # patches requests.Session.send
 
 Same data as httpx. Because `requests` is synchronous, calling it inside an `async def`
 handler also blocks the event loop; see [Blocking in async](async-blocking.md).
+
+## boto3
+
+```python
+from redline_core.contrib.boto3 import instrument_boto3
+
+instrument_boto3()
+```
+
+Records one `http_out` span for each botocore client operation. Span names and synthetic URLs
+contain only the service and operation (for example, `AWS s3 GetObject` and
+`https://s3.amazonaws.com/__sdk__/GetObject`). Status and duration are recorded; API arguments,
+response data, bucket and object keys, credentials, presigned URLs, and error messages are not
+captured. If HTTP-level instrumentation also observes the SDK's network request, both spans may
+appear: the SDK span measures the whole operation, while the HTTP span measures its network call.
+`instrument_boto3()` returns `False` when botocore is unavailable.
 
 ## Redis
 
@@ -167,3 +184,17 @@ record_span("http_out", "POST payments.example/charge", start,
 
 For plain timing of your own code, use `redline_core.span` ([Custom spans](custom-spans.md)).
 For a full integration with its own fix suggestions see [Extending](extending.md).
+
+
+## Checking integration coverage
+
+Open **Analysis → Recording health** (or `GET api/analysis/health`) to distinguish whether
+an optional provider is installed, loaded in this process and instrumented. The check
+never imports providers or enables hooks. An inactive hook means those calls may be
+missing; an active hook still does not prove calls occurred or cover other workers.
+HTTPX, Redis and boto3 remain explicit opt-ins.
+
+SDK operation spans use a `SDK:<operation>` method and a synthetic service URL. Because
+resource identity and individual retry attempts are deliberately omitted, these spans
+contribute latency/error/count totals but do not establish duplicate calls or retry
+storms. This avoids treating reads of different object keys as identical requests.

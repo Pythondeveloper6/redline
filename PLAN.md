@@ -186,3 +186,17 @@ setup tests cannot bind sockets in the current environment.
 | Configurable bounded CLI project budgets | File/byte/boundary/symlink regressions and complete app scan |
 | Conservative sampled-blocker attribution | Stack-name unit tests and existing blocking tests |
 | Document actual onboarding and coverage | One real-project report, wheel smoke tests and package suites |
+
+
+## 0.5.0a1 real-project coverage
+
+| Report gap | Implementation | Verification |
+|---|---|---|
+| Helpers hidden by imports | Bounded import/re-export summaries | No-execution, cycle, shadow and filesystem-boundary regressions; full app rescan |
+| Session annotation/factory types | Known SQLAlchemy provenance inference | Optional/Annotated/string/factory positive and negative cases |
+| Recoverable dynamic SQL templates | Literal AST interpreter and project constants | Shadowing, limits, pure/impure helpers and import boundary tests |
+| Missing SDK spans | Explicit boto3 hook | Fake-client safety tests and actual boto3 Stubber in target dependency environment |
+| In-process background gaps | Explicit FastAPI scheduling helper | Separate parent/job traces, sync/async/callable and failed-task privacy tests |
+| Unknown integration coverage | Health API + UI statuses | Import-free diagnostics tests and native-browser fixture render |
+| Large UI chunk / offline regression | Lazy routes, stable shell, native imports | Build sizes, palette metadata, embedded snapshot tests and Safari render |
+| Live infrastructure qualification | Existing isolated Compose release gate | Remains environment-dependent; no success claimed while Docker/socket access is denied |

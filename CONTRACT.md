@@ -1431,3 +1431,39 @@ trigger remote checks or authorize package publication.
   frame is `SQLAlchemy work`; only explicit synchronous-driver hooks justify
   `SQLAlchemy (sync)` advice. No storage/schema migration is required.
 - All five package versions and exact core pins move together to 0.4.0a2.
+
+
+## Real-project coverage (0.5.0a1)
+
+- Project source analysis follows only files already admitted by the scan budgets.
+  Stable explicit absolute/relative imports, aliases and package re-exports propagate
+  query summaries for at most eight project passes. Local helper summaries retain their
+  existing eight-edge cap. Shadowed/rebound names, wildcards, dynamic imports, unknown
+  application session factories and class dispatch are not assumed. Inference reports
+  passes/limitations; reaching the propagation cap marks coverage incomplete (exit 2).
+- Session provenance additionally recognizes Optional/Annotated/bounded string annotations
+  and known SQLAlchemy sessionmaker/async_sessionmaker constructions and with-bindings.
+  Names alone never establish a session. All findings remain syntax candidates.
+- Offline SQL resolution interprets a whitelist of AST literal operations, not Python
+  execution. Stable text clauses and imported literals are recovered from scanned files.
+  Only undecorated straight-return template helpers with literal arguments are interpreted.
+  Per-source 200 KB and expression-depth limits apply; import propagation is capped at
+  eight passes. Dynamic SQL and ORM expressions stay unresolved rather than certified valid.
+- Boto3 instrumentation is explicit and optional (`instrument_boto3` / `uninstrument_boto3`).
+  It wraps botocore BaseClient operation calls, never SDK parameters/results/error text;
+  synthetic service/operation URLs and SDK-prefixed methods feed external-call summaries.
+  Unknown resource identity does not produce duplicate/retry findings or counts. An operation
+  span may overlap lower-level HTTP instrumentation and does not measure body streaming.
+  No AWS call is made by installing the hook.
+- FastAPI `add_background_task(tasks, callable, *args, **kwargs)` schedules through Starlette,
+  preserving its threadpool behavior for sync callables. A separate TASK recording carries
+  safe parent correlation, with error messages/tracebacks/locals omitted for this wrapper.
+  Per-builder error detail suppression cannot enable capture disabled in global settings.
+  This helper does not stitch independent processes or add a queue/broker dependency.
+- GET `api/analysis/health` adds optional integration status (installed/module_loaded/
+  instrumented) without importing providers. The UI explains absent hooks are incomplete
+  coverage and that active hooks are not proof of observed calls.
+- The UI uses lazy route chunks, an inner shell loading boundary and eager route metadata.
+  Native module imports replace URL preload maps so offline import-map snapshots work.
+- All five versions and exact core pins advance to 0.5.0a1; no storage migration or new
+  required third-party dependency is introduced.

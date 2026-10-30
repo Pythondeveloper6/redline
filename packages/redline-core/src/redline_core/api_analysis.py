@@ -154,14 +154,18 @@ def route(api, method, path, params, body):
         except (ValueError, TypeError):
             return error(400, "invalid_database_check", "Choose a recorded SQL span.")
     if path == "api/analysis/health" and method == "GET":
+        from .integration_status import integration_status, integration_warnings
+
         page = api.store.list(Filters(), limit=200)
         _, meta = api.meta()
         items = page.items
+        integrations = integration_status()
         warnings = []
         if meta["storage"]["dropped"]:
             warnings.append("The writer dropped traces; retained counts are incomplete.")
         if api.settings.sample_rate < 1:
             warnings.append("Retained counts reflect sampling and keep rules, not total traffic.")
+        warnings.extend(integration_warnings(integrations))
         return 200, {
             "meta": meta,
             "capture": {
@@ -185,8 +189,12 @@ def route(api, method, path, params, body):
                 for t in items
                 if t.get("tags", {}).get("test_name")
             ],
+            "integrations": integrations,
             "warnings": warnings,
-            "note": "Latest 200 kept traces. Unobserved integrations may still be installed.",
+            "note": (
+                "Latest 200 kept traces. Integration installation and instrumentation status "
+                "do not indicate whether calls were observed."
+            ),
         }
     if path == "api/analysis/coverage" and method == "GET":
         if not api.settings.feature("checks"):

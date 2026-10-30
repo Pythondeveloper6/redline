@@ -429,3 +429,33 @@ Use synthetic data and an isolated database for load tests. Missing external/cac
 means the integration may be absent, not necessarily that the app made no calls. SDKs
 without integrations and separate jobs require explicit instrumentation. Static source
 analysis complements request capture; its candidates are not measured N+1 defects.
+
+## In-process background tasks
+
+Starlette runs a response's `BackgroundTasks` after sending the response. Redline therefore
+finishes the request trace before those tasks run; their work and latency are not part of
+the request. To record a task explicitly as its own job trace, schedule it with the helper:
+
+```python
+from fastapi import BackgroundTasks
+from fastapi_redline import add_background_task
+
+async def send_receipt(order_id: int) -> None:
+    ...
+
+@app.post("/orders/{order_id}")
+async def create_order(order_id: int, background_tasks: BackgroundTasks):
+    add_background_task(background_tasks, send_receipt, order_id)
+    return {"order_id": order_id}
+```
+
+`add_background_task(background_tasks, func, *args, **kwargs)` passes the original arguments
+to the function unchanged. Sync functions still run in Starlette's thread pool, and async
+functions are awaited. The helper records the function name, job outcome, and safe parent
+request correlation when called during a traced request. It creates a separate job trace;
+it does not extend request latency or include the task's work in the request trace. Task
+arguments and return values are not added to the job recording. Exceptions are recorded as
+failed jobs and re-raised as Starlette normally handles background task failures.
+
+This only covers tasks explicitly scheduled with the helper. It does not instrument task
+queues, brokers, or other work submitted elsewhere.

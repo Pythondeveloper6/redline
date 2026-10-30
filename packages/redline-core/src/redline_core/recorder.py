@@ -135,6 +135,7 @@ class TraceBuilder:
         "_parent_token",
         "_token",
         "active",
+        "capture_error_details",
         "capture_errors",
         "capture_limited",
         "client",
@@ -206,6 +207,9 @@ class TraceBuilder:
         self.req_body = body
         self.client = client
         self.capture_errors = 0
+        # Per-recording safety override. This may suppress configured detail capture,
+        # but deliberately cannot opt a recording into capture when settings disable it.
+        self.capture_error_details: bool | None = None
         self.capture_limited = False
         self.retained_bytes = 0
         self.job_outcomes = {}
@@ -591,7 +595,10 @@ class Recorder:
             tags=dict(builder.tags),
             profile=profile,
             error=_error_dict(
-                error, self.redactor, capture_details=self.settings.capture_error_details
+                error,
+                self.redactor,
+                capture_details=self.settings.capture_error_details
+                and builder.capture_error_details is not False,
             ),
             release=self.release,
         )
@@ -601,7 +608,14 @@ class Recorder:
                 trace.tags[key] = str(count)
             else:
                 trace.tags.pop(key, None)
-        if isinstance(error, BaseException) and trace.error:
+        error_details_enabled = (
+            self.settings.capture_error_details and builder.capture_error_details is not False
+        )
+        if (
+            isinstance(error, BaseException)
+            and trace.error
+            and builder.capture_error_details is not False
+        ):
             tb = error.__traceback__
             while tb is not None:
                 file = self.capturer.classify(tb.tb_frame.f_code.co_filename)
@@ -676,7 +690,7 @@ class Recorder:
         if (
             isinstance(error, BaseException)
             and self.settings.capture_locals
-            and self.settings.capture_error_details
+            and error_details_enabled
             and self.settings.feature("locals")
             and trace.error
         ):

@@ -1,14 +1,19 @@
-# v0.4 release validation
+# v0.5 development validation
 
 All implementation, tests, examples, UI and documentation are together on local
-`release/v0.4.0a2-field-test`. All five distributions currently use `0.4.0a2`.
-The field-evaluation corrections and current validation limits are recorded in
+`release/v0.5.0a1-field-test`. All five distributions currently use `0.5.0a1`.
+The field-evaluation corrections, real-project coverage additions and current validation limits are recorded in
 [the real-project report](reports/rqeeb-fastapi-field-test.md). The historical Compose
 qualification below predates these changes and does not qualify this revision.
 There is one planned final merge to `main` and one coordinated release. Nothing has
 been pushed, tagged or published. `HANDOFF.md` remains unchanged and uncommitted.
 
 ## Implemented scope
+
+- The 0.5.0a1 follow-up adds bounded import-aware query analysis, session provenance,
+  literal SQL recovery, opt-in boto3 and FastAPI background jobs, integration diagnostics
+  and lazy UI chunks with verified offline snapshots. See the field report for exact
+  tests and unsupported cases; this is not completion of every future 0.5/0.6 roadmap item.
 
 - SQL failure evidence, structured vendor errors, raw rowcounts, comment-placeholder
   checks, optional all-engine observation and observed connection/session-state findings.
@@ -86,7 +91,7 @@ by this complete green result.
    protection must enforce PR merges if direct main pushes must be prohibited.
 3. Publishing requires owner authorization, the exact package version in
    `REDLINE_RELEASE_VERSION` and the configured environment approvals. All five packages
-   are currently `0.4.0a2`; this is an alpha release. See [RELEASING.md](RELEASING.md).
+   are currently `0.5.0a1`; this is an alpha release. See [RELEASING.md](RELEASING.md).
 4. Roll out record-and-inspect mode as a canary in the actual production topology.
    Validate deployment-specific filesystem, credentials, framework/driver versions,
    request concurrency, load/overhead and accessibility requirements. A passing Compose
@@ -94,5 +99,7 @@ by this complete green result.
    filesystem. The mssql-shaped cell measures instrumentation only (fake DBAPI, no SQL
    Server latency); run it on the target hardware and revisit `profile` mode separately.
 
-The complete local integration gate is green. Main CI and publication authorization
-remain separate gates; no tag or publication has occurred.
+The historical full-stack gate above predates this revision. Current supported local
+checks and the Docker/network/service qualification blockers are in the field report.
+Fresh full-stack qualification, main CI and publication authorization remain separate
+gates; no tag or publication has occurred.
