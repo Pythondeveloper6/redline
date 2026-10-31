@@ -528,8 +528,20 @@ def _cmd_config(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
     return EXIT_OK
 
 
-def _doctor_checks(resolved: Any) -> list[tuple[str, str, str]]:
-    """``[(status, check, detail)]`` with status ``ok`` / ``warn`` / ``fail``."""
+def _doctor_checks(
+    resolved: Any,
+    *,
+    strict: bool = False,
+    workers: int | None = None,
+    environ: Any = None,
+) -> list[tuple[str, str, str]]:
+    """``[(status, check, detail)]`` with status ``ok`` / ``warn`` / ``fail``.
+
+    ``strict`` turns the deployment-shape warnings about a SQLite store (a network
+    filesystem, several worker processes) into failures. ``workers`` is the worker count
+    the deployment runs; without it the environment is read (``WEB_CONCURRENCY``,
+    ``GUNICORN_CMD_ARGS``, ``UVICORN_WORKERS``; ``environ`` defaults to ``os.environ``).
+    """
     import importlib.util
 
     from . import ui
@@ -542,17 +554,22 @@ def _doctor_checks(resolved: Any) -> list[tuple[str, str, str]]:
     # storage
     from .storage.safety import (
         UNRELIABLE_WAL_FILESYSTEMS,
+        detect_workers,
         filesystem_type,
         prepare_path,
         probe_wal,
         probe_writable,
     )
 
-    try:
-        path = prepare_path(s)
-    except SettingsError as exc:
-        checks.append(("fail", "storage", str(exc)))
-        path = None
+    shape = "fail" if strict else "warn"  # deployment-shape problems of a SQLite store
+    path: str | None = None
+    if s.storage_url:
+        checks += _postgres_checks(s.storage_url)
+    else:
+        try:
+            path = prepare_path(s)
+        except SettingsError as exc:
+            checks.append(("fail", "storage", str(exc)))
     if path == ":memory:":
         checks.append(("ok", "storage", "in memory"))
     elif path is not None:
@@ -567,10 +584,10 @@ def _doctor_checks(resolved: Any) -> list[tuple[str, str, str]]:
         if kind in UNRELIABLE_WAL_FILESYSTEMS:
             checks.append(
                 (
-                    "warn",
+                    shape,
                     "filesystem",
                     f"{kind} may not support SQLite WAL reliably; use a Docker named "
-                    "volume or a local disk",
+                    "volume or a local disk, or a shared PostgreSQL store (storage_url)",
                 )
             )
         try:
@@ -590,6 +607,19 @@ def _doctor_checks(resolved: Any) -> list[tuple[str, str, str]]:
                         "filesystem",
                     )
                 )
+
+    if path is not None and path != ":memory:":
+        declared = (workers, "--workers") if workers else detect_workers(environ)
+        if declared is not None and declared[0] > 1:
+            checks.append(
+                (
+                    shape,
+                    "workers",
+                    f"{declared[0]} worker processes ({declared[1]}) share one SQLite file: "
+                    "their writes queue on its lock, and every host or container keeps its "
+                    "own file. Set storage_url to a PostgreSQL database for one shared store",
+                )
+            )
 
     # UI bundle
     if ui.is_built():
@@ -744,12 +774,54 @@ def _doctor_checks(resolved: Any) -> list[tuple[str, str, str]]:
     return checks
 
 
+def _postgres_checks(url: str) -> list[tuple[str, str, str]]:
+    """The doctor's checks of a ``storage_url`` store: the driver, then a connection."""
+    import importlib.util
+
+    from .storage.postgres import mask_url, ping
+
+    where = mask_url(url)
+    if importlib.util.find_spec("psycopg") is None:
+        return [
+            (
+                "fail",
+                "storage",
+                'storage_url needs the PostgreSQL driver: pip install "redline-core[postgres]"',
+            )
+        ]
+    try:
+        version = ping(url)
+    except Exception as exc:
+        return [("fail", "storage", f"cannot connect to {where} ({type(exc).__name__})")]
+    return [("ok", "storage", f"PostgreSQL {version} at {where}, shared by every worker")]
+
+
+def _configure_doctor(p: argparse.ArgumentParser) -> None:
+    _configure_config(p)
+    p.add_argument(
+        "--strict",
+        action="store_true",
+        help="fail (not warn) when a SQLite store sits on a network filesystem or is shared "
+        "by several worker processes",
+    )
+    p.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        metavar="N",
+        help="the number of worker processes the deployment runs (default: read "
+        "WEB_CONCURRENCY, GUNICORN_CMD_ARGS and UVICORN_WORKERS)",
+    )
+
+
 def _cmd_doctor(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
     resolved = _resolve(args, err)
     if resolved is None:
         out.write("FAIL  config      the configuration does not load (see above)\n")
         return EXIT_FAIL
-    checks = _doctor_checks(resolved)
+    checks = _doctor_checks(
+        resolved, strict=getattr(args, "strict", False), workers=getattr(args, "workers", None)
+    )
     if args.json:
         import json
 
@@ -1511,7 +1583,7 @@ COMMANDS: dict[str, tuple[str, Callable[[argparse.ArgumentParser], None], Handle
     ),
     "doctor": (
         "check storage, the UI bundle and the access settings",
-        _configure_config,
+        _configure_doctor,
         _cmd_doctor,
         {},
     ),
