@@ -6,6 +6,7 @@ import ast
 import hashlib
 import json
 import re
+import sys
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
@@ -139,6 +140,70 @@ def _constant(node, constants, helpers, aliases):
     return literal_value(node, constants, helpers, aliases)
 
 
+def _stored_names(node):
+    return {
+        part.id
+        for part in ast.walk(node)
+        if isinstance(part, ast.Name) and isinstance(part.ctx, (ast.Store, ast.Del))
+    }
+
+
+def _local_constants(function, call, wanted, module_constants, helpers, aliases):
+    """Straight-line constants for ``wanted`` names just before ``call`` in ``function``.
+
+    Only top-level statements of the function body that precede the statement holding the
+    call are evaluated, in order. Any name stored inside a compound statement (branches,
+    loops, ``try``) becomes unknown, as do the function's own parameters until assigned.
+    """
+    parameters = {
+        a.arg
+        for a in [
+            *function.args.posonlyargs,
+            *function.args.args,
+            *function.args.kwonlyargs,
+            *([function.args.vararg] if function.args.vararg else []),
+            *([function.args.kwarg] if function.args.kwarg else []),
+        ]
+    }
+    env = {k: v for k, v in module_constants.items() if k.split(".", 1)[0] not in parameters}
+    known = {}
+    holder = next(
+        (stmt for stmt in function.body if any(part is call for part in ast.walk(stmt))),
+        None,
+    )
+    for stmt in function.body:
+        if stmt is holder:
+            for name in _stored_names(stmt):
+                known.pop(name, None)
+                env.pop(name, None)
+            break
+        target = None
+        if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
+            target, expr = stmt.targets[0], stmt.value
+        elif isinstance(stmt, ast.AnnAssign) and stmt.value is not None:
+            target, expr = stmt.target, stmt.value
+        elif isinstance(stmt, ast.AugAssign):
+            target = stmt.target
+            expr = (
+                ast.BinOp(left=ast.Name(id=target.id, ctx=ast.Load()), op=stmt.op, right=stmt.value)
+                if isinstance(target, ast.Name)
+                else None
+            )
+        if isinstance(target, ast.Name) and expr is not None:
+            try:
+                value = literal_value(expr, env, helpers, aliases)
+            except (ValueError, TypeError, RecursionError):
+                known.pop(target.id, None)
+                env.pop(target.id, None)
+            else:
+                known[target.id] = env[target.id] = value
+            continue
+        for name in _stored_names(stmt):
+            known.pop(name, None)
+            env.pop(name, None)
+    return {name: value for name, value in known.items() if name in wanted}
+
+
 def extract(source, file="<source>", *, imported_constants=None, _exports=None):
     if len(source.encode("utf-8")) > MAX_SOURCE_BYTES:
         return [], [{"file": file, "line": 1, "reason": "source limit exceeded"}]
@@ -188,6 +253,21 @@ def extract(source, file="<source>", *, imported_constants=None, _exports=None):
                 if not all(isinstance(target, ast.Name) for target in targets):
                     raise ValueError("unsupported assignment target")
                 value = _constant(node.value, constants, helpers, aliases)
+            except (ValueError, TypeError):
+                value = unknown
+        elif isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name):
+            names = {node.target.id}
+            try:
+                value = _constant(
+                    ast.BinOp(
+                        left=ast.Name(id=node.target.id, ctx=ast.Load()),
+                        op=node.op,
+                        right=node.value,
+                    ),
+                    constants,
+                    helpers,
+                    aliases,
+                )
             except (ValueError, TypeError):
                 value = unknown
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
@@ -388,6 +468,12 @@ def extract(source, file="<source>", *, imported_constants=None, _exports=None):
                 for helper_name, helper in available_helpers.items()
                 if helper_name not in bound_names
             }
+            if scopes and isinstance(scopes[0], (ast.FunctionDef, ast.AsyncFunctionDef)):
+                active_constants.update(
+                    _local_constants(
+                        scopes[0], node, names, stable_constants, active_helpers, aliases
+                    )
+                )
             if (
                 call_name in _RESULT_METHODS
                 and isinstance(arg, ast.Name)
@@ -412,7 +498,14 @@ def extract(source, file="<source>", *, imported_constants=None, _exports=None):
                 if contains_orm
                 else "dynamic SQL"
             )
-            skipped.append({"file": file, "line": node.lineno, "reason": reason})
+            category = (
+                "sqlalchemy_expression"
+                if contains_orm
+                else getattr(sys.exc_info()[1], "category", "dynamic")
+            )
+            skipped.append(
+                {"file": file, "line": node.lineno, "reason": reason, "category": category}
+            )
             continue
         key = (arg.lineno, value)
         if key in seen:
@@ -438,6 +531,28 @@ def extract(source, file="<source>", *, imported_constants=None, _exports=None):
             }
         )
     return statements, skipped
+
+
+def unresolved_by_reason(skipped):
+    """Count unresolved inputs by a stable category (``dynamic``, ``unknown_name``, ...)."""
+    counts = {}
+    for item in skipped:
+        category = item.get("category")
+        if category is None:
+            reason = item.get("reason", "")
+            category = (
+                "limit"
+                if "limit" in reason
+                else "invalid_source"
+                if "invalid" in reason
+                else "unreadable"
+                if "unreadable" in reason
+                else "compilation"
+                if reason.startswith("Online compilation")
+                else "dynamic"
+            )
+        counts[category] = counts.get(category, 0) + 1
+    return dict(sorted(counts.items()))
 
 
 def lint(sql, dialect="other", bindings=None):
@@ -494,6 +609,7 @@ def analyze_sql_source(source, *, file="<source>", dialect="other"):
     return {
         "findings": findings,
         "skipped": skipped,
+        "unresolved_by_reason": unresolved_by_reason(skipped),
         "statements": len(statements),
         "note": "Offline candidates only; schema and triggers are not checked.",
     }
@@ -726,6 +842,7 @@ def scan(paths, *, dialect="other", max_files=MAX_FILES, max_project_bytes=MAX_P
         result["statements"] += report["statements"]
         result["files"] += 1
     result["findings"].sort(key=lambda f: (f["file"], f["line"], f["kind"]))
+    result["unresolved_by_reason"] = unresolved_by_reason(result["skipped"])
     return result
 
 
@@ -794,6 +911,7 @@ def command(args, out, err):
                     }
                 )
         report["findings"].sort(key=lambda f: (f["file"], f["line"], f["kind"]))
+    report["unresolved_by_reason"] = unresolved_by_reason(report["skipped"])
     baseline = set()
     if args.baseline:
         try:
