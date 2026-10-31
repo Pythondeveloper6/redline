@@ -118,3 +118,55 @@ relation inside cannot slip in.
   finding is "check this", not "this is slow". The runtime detector is the confirmation.
 - It reads templates and DRF serializers. Python code that does `for o in orders:
   o.customer.name` is what the runtime detector and its fix diff are for.
+
+## Source analysis: cross-module helpers, dynamic SQL and precision
+
+The template scan above has two Python-source companions, `redline analyze` (performance
+patterns such as a query inside a loop) and `redline check-sql` (raw SQL lint). Neither imports
+your code; both read the syntax tree within the usual file and byte budgets.
+
+**Cross-module helpers.** `analyze` follows a helper that runs a query across files of the
+scanned project: `from pkg.b import load_user`, `import pkg.b as b; b.load_user()`,
+`from . import b` and re-exports through a package `__init__` all count. A loop in module A
+that calls such a helper is reported as a `query_in_loop` candidate. Resolution is bounded
+(a fixed number of propagation passes), has cycle protection, and only follows files included
+in the scan; dynamic imports, wildcard imports and class dispatch may be missed.
+
+**Dynamic SQL.** `check-sql` evaluates SQL text built from constants without running
+anything: f-strings with constant parts, `+`, `%` and `.format()` on module-level constants,
+`" ".join([...])` of literals, `+=` accumulation, and straight-line local reassignments inside
+a function. Anything inside a branch, loop or `try`, a parameter, a call result or an
+attribute stays unresolved. `.format()` fields with attribute or index access are refused.
+
+Unresolved inputs are counted by reason in the report (`--json`):
+
+```json
+{"unresolved_by_reason": {"call": 2, "sqlalchemy_expression": 1, "unknown_name": 4}}
+```
+
+Each entry of `skipped` also carries a `category`. Categories: `unknown_name`, `call`,
+`attribute_or_subscript`, `operand`, `unsafe_format`, `unsafe_helper`,
+`sqlalchemy_expression`, `too_large`, `too_deep`, `limit`, `invalid_source`, `unreadable`,
+`compilation` and `dynamic` (anything else).
+
+**Measuring false positives.** `scripts/measure_static_precision.py` runs both analyzers over a
+labelled corpus (`packages/redline-core/tests/fixtures/static_precision`) and prints
+precision, recall and false-positive rate; a test keeps precision above a floor. Lines
+marked `# expect: <kind>` are true positives; `# fp: <kind>` marks a shape the analyzer is
+known to report wrongly (it counts against precision until fixed).
+
+```bash
+uv run python scripts/measure_static_precision.py          # the bundled corpus
+uv run python scripts/measure_static_precision.py --json
+```
+
+On your own codebase:
+
+```bash
+uv run python scripts/measure_static_precision.py src/ > findings.txt   # lists finding ids
+# review them; put the ids that were wrong into reviewed.json, e.g. ["a1b2...", "c3d4..."]
+uv run python scripts/measure_static_precision.py src/ --false-positives reviewed.json --json
+```
+
+The result gives the false-positive rate overall and per finding kind for your code, which is
+the number to use when deciding whether to gate CI on a rule.
