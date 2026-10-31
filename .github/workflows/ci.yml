@@ -39,8 +39,10 @@ jobs:
     name: ruff
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10.3.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           enable-cache: true
           cache-dependency-glob: "uv.lock"
@@ -57,8 +59,10 @@ jobs:
       matrix:
         python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
     steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10.3.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           enable-cache: true
           cache-dependency-glob: "uv.lock"
@@ -69,8 +73,10 @@ jobs:
       # drivers) so the contrib tests run instead of failing to import.
       - name: Install redline-core (isolated venv)
         working-directory: packages/redline-core
+        env:
+          PYTHON_VERSION: ${{ matrix.python-version }}
         run: |
-          uv venv --python "${{ matrix.python-version }}" "$RUNNER_TEMP/venv"
+          uv venv --python "$PYTHON_VERSION" "$RUNNER_TEMP/venv"
           VIRTUAL_ENV="$RUNNER_TEMP/venv" uv pip install -e ".[profile]" --group dev
       # Coverage is gated (measured ~86% locally with every optional integration installed);
       # the floor leaves room for interpreter cells that skip a few optional imports.
@@ -89,8 +95,10 @@ jobs:
         python-version: ["3.12", "3.13", "3.14"]
         django: ["5.2", "6.0", "6.1"]
     steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10.3.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           enable-cache: true
           cache-dependency-glob: "uv.lock"
@@ -99,12 +107,14 @@ jobs:
       # Replace the locked Django with this cell's. The adapter allows Django>=5.2,<6.2,
       # so each spec stays inside it.
       - name: Pin Django ${{ matrix.django }}
+        env:
+          DJANGO_CELL: ${{ matrix.django }}
         run: |
-          case "${{ matrix.django }}" in
+          case "$DJANGO_CELL" in
             5.2) spec="django>=5.2,<6.0" ;;
             6.0) spec="django>=6.0,<6.1" ;;
             6.1) spec="django>=6.1,<6.2" ;;
-            *)   echo "::error::unknown Django cell '${{ matrix.django }}'"; exit 1 ;;
+            *)   echo "::error::unknown Django cell '$DJANGO_CELL'"; exit 1 ;;
           esac
           uv pip install "$spec"
           uv run --no-sync python -c "import django; print('Django', django.get_version())"
@@ -120,16 +130,20 @@ jobs:
       matrix:
         python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
     steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10.3.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           enable-cache: true
           cache-dependency-glob: "uv.lock"
           python-version: ${{ matrix.python-version }}
       # Isolated venv for the same reason as the core job (workspace requires >=3.12).
       - name: Install fastapi-redline (isolated venv)
+        env:
+          PYTHON_VERSION: ${{ matrix.python-version }}
         run: |
-          uv venv --python "${{ matrix.python-version }}" "$RUNNER_TEMP/venv"
+          uv venv --python "$PYTHON_VERSION" "$RUNNER_TEMP/venv"
           VIRTUAL_ENV="$RUNNER_TEMP/venv" uv pip install -e "packages/redline-core[profile]" \
             -e "packages/fastapi-redline[profile]" "pytest>=8.3" "pytest-asyncio>=0.24" \
             "httpx>=0.27" "aiosqlite>=0.20" "greenlet>=3.0" "uvicorn>=0.29" "sqlmodel>=0.0.48"
@@ -145,16 +159,20 @@ jobs:
       matrix:
         python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
     steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10.3.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           enable-cache: true
           cache-dependency-glob: "uv.lock"
           python-version: ${{ matrix.python-version }}
       # Isolated venv for the same reason as the core job (workspace requires >=3.12).
       - name: Install flask-redline (isolated venv)
+        env:
+          PYTHON_VERSION: ${{ matrix.python-version }}
         run: |
-          uv venv --python "${{ matrix.python-version }}" "$RUNNER_TEMP/venv"
+          uv venv --python "$PYTHON_VERSION" "$RUNNER_TEMP/venv"
           VIRTUAL_ENV="$RUNNER_TEMP/venv" uv pip install -e "packages/redline-core[profile]" \
             -e "packages/flask-redline[profile]" "pytest>=8.3" "flask-sqlalchemy>=3.1" \
             "asgiref>=3.8" "httpx>=0.27" "requests>=2.31"
@@ -170,16 +188,20 @@ jobs:
       matrix:
         python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
     steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10.3.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           enable-cache: true
           cache-dependency-glob: "uv.lock"
           python-version: ${{ matrix.python-version }}
       # Isolated venv for the same reason as the core job (workspace requires >=3.12).
       - name: Install litestar-redline (isolated venv)
+        env:
+          PYTHON_VERSION: ${{ matrix.python-version }}
         run: |
-          uv venv --python "${{ matrix.python-version }}" "$RUNNER_TEMP/venv"
+          uv venv --python "$PYTHON_VERSION" "$RUNNER_TEMP/venv"
           VIRTUAL_ENV="$RUNNER_TEMP/venv" uv pip install -e "packages/redline-core[profile]" \
             -e "packages/litestar-redline[profile]" "pytest>=8.3" "pytest-asyncio>=0.24" \
             "httpx>=0.27" "aiosqlite>=0.20" "greenlet>=3.0" "advanced-alchemy>=0.20"
@@ -212,8 +234,8 @@ jobs:
       REDLINE_TEST_POSTGRES_DSN: postgresql://postgres:postgres@localhost:5432/redline
       REDLINE_TEST_PG: postgresql://postgres:postgres@localhost:5432/redline
     steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10.3.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           enable-cache: true
           cache-dependency-glob: "uv.lock"
@@ -266,8 +288,10 @@ jobs:
       REDLINE_TEST_MYSQL_DSN: mysql+pymysql://root:redline_test_only@127.0.0.1:3306/redline_test_integration
       REDLINE_TEST_MYSQL_ASYNC_DSN: mysql+aiomysql://root:redline_test_only@127.0.0.1:3306/redline_test_integration
     steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10.3.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           enable-cache: true
           cache-dependency-glob: "uv.lock"
@@ -288,8 +312,10 @@ jobs:
     name: frontend bundle
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: lts/*
           cache: npm
@@ -317,8 +343,10 @@ jobs:
     name: docs
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10.3.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           enable-cache: true
           python-version: "3.13"
@@ -328,8 +356,10 @@ jobs:
     name: build and install-check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10.3.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           enable-cache: true
           python-version: "3.13"
@@ -351,8 +381,10 @@ jobs:
     name: jobs and nested frameworks
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10.3.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           python-version: "3.13"
       - run: uv sync --all-packages --frozen
@@ -364,7 +396,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Full Compose suite (including SQL Server on native Linux amd64)
         run: >-
           docker compose -f examples/compose.yaml up --build
@@ -372,7 +406,7 @@ jobs:
       - name: Service logs
         if: failure()
         run: docker compose -f examples/compose.yaml logs --no-color --tail=100
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: compose-qualification

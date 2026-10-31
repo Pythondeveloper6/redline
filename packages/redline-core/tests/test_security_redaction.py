@@ -269,3 +269,67 @@ def test_recorder_masks_path_params_and_unresolved_paths():
     b = rec.start_trace(method="GET", path="/x/a8Fk2LmQ9zX0pR7tY4wB1nC6/")
     t = rec.finish_trace(b, status=404)
     assert t.path == f"/x/{MASK}/"
+
+
+# ── Linear-time redaction of attacker-controlled text ────────────────────────────────
+
+
+def _timed_text(text: str) -> float:
+    import time
+
+    red = r()
+    start = time.perf_counter()
+    red.text(text)
+    return time.perf_counter() - start
+
+
+def test_text_redaction_is_linear_on_dotted_runs_before_a_scheme():
+    # Request bodies, log messages and error messages are attacker-controlled; a run of
+    # scheme characters must not make the URL scan restart at every dot.
+    assert _timed_text("a." * 50_000 + " ://") < 0.5
+
+
+def test_text_redaction_is_linear_on_repeated_jwt_prefixes():
+    assert _timed_text("eyJ-" * 25_000) < 0.5
+
+
+def test_linear_patterns_still_mask_urls_and_jwts():
+    red = r()
+    jwt = (
+        "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0"
+        ".dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"
+    )
+    assert red.text(f"token {jwt} end") == f"token {MASK} end"
+    assert red.text(f"({jwt})") == f"({MASK})"
+    assert red.text(f"x.{jwt}") == f"x.{MASK}"
+    assert "pw" not in red.text("see postgres://bob:pw@db/x and +http://u:pw@h/")
+    assert "pw" not in red.text("git+ssh://u:pw@h/r")
+
+
+def test_error_and_header_texts_are_cut_before_redaction():
+    import time
+
+    from redline_core.recorder import _error_dict
+
+    start = time.perf_counter()
+    payload = _error_dict({"type": "E", "message": "a." * 200_000 + " ://"}, r())
+    assert time.perf_counter() - start < 0.5
+    assert payload is not None and len(payload["message"]) <= 4000
+
+
+def test_token_used_as_url_username_is_masked():
+    # git and HTTP clients accept a bare token as the userinfo with no password.
+    token = "ghp_" + "a1B2c3D4e5" * 4
+    red = r()
+    assert token not in red.url(f"https://{token}@github.com/org/repo.git")
+    assert token not in red.text(f"cloning https://{token}@github.com/org/repo.git failed")
+    # an ordinary user name stays visible
+    assert red.url("https://bob@example.com/x") == "https://bob@example.com/x"
+
+
+def test_default_keys_cover_access_keys_signatures_and_credentials():
+    red = r()
+    for key in ("access_key", "X-Access-Key", "aws_access_key_id", "signature", "credentials"):
+        assert red.is_secret_key(key), key
+    for key in ("author", "user_id", "status"):
+        assert not red.is_secret_key(key), key

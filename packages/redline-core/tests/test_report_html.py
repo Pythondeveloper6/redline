@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import os
 import re
 from argparse import ArgumentParser
 
@@ -147,3 +148,17 @@ def test_existing_otlp_export_is_unchanged(store_path):
     code, out, _ = run_export("--store", str(store_path))
     data = json.loads(out)
     assert code == 0 and set(data) == {"spans", "logs"}
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file modes")
+def test_cli_export_is_owner_only_and_does_not_follow_symlinks(store_path, tmp_path):
+    # The page holds (redacted) captured data: create it 0600, like the store.
+    target = tmp_path / "out.html"
+    assert run_export("rec-1", "--html", str(target), "--store", str(store_path))[0] == 0
+    assert target.stat().st_mode & 0o777 == 0o600
+    victim = tmp_path / "victim.txt"
+    victim.write_text("keep")
+    link = tmp_path / "link.html"
+    link.symlink_to(victim)
+    assert run_export("rec-1", "--html", str(link), "--store", str(store_path))[0] == 1
+    assert victim.read_text() == "keep"

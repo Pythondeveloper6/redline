@@ -72,7 +72,7 @@ def issue_id(kind: str, fingerprint: str | None, location: str | None) -> str:
     ``location`` so each endpoint gets its own issue.
     """
     key = f"{kind}|{fingerprint or ''}|{location or ''}"
-    return hashlib.sha1(key.encode("utf-8")).hexdigest()[:16]
+    return hashlib.sha1(key.encode("utf-8"), usedforsecurity=False).hexdigest()[:16]
 
 
 def _plural(n: int, word: str) -> str:

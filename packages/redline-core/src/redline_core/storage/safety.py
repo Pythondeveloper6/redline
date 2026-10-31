@@ -44,10 +44,10 @@ def prepare_path(settings):
             "directory outside the checkout."
         )
         if resolved.parent.name == ".redline":
-            resolved.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            ignore = resolved.parent / ".gitignore"
-            if not ignore.exists():
-                ignore.write_text("*\n")
+            from .private import ensure_private_dir
+
+            # O_EXCL create: never overwrites, never writes through a symlink
+            ensure_private_dir(resolved.parent)
     return path
 
 

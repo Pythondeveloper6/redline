@@ -95,11 +95,13 @@ permissions to the owner only (`redline doctor` warns otherwise).
 curl -H "Authorization: Bearer $REDLINE_TOKEN" https://staging.example.com/_redline/api/meta
 ```
 
-A failed credential (login body, Bearer or Basic) counts against the client address.
-After `max_login_attempts` (10) within 300 seconds, further credential attempts from that
+A failed credential (login body, Bearer or Basic) counts against the client address (an
+IPv4 address, or the IPv6 /64 it belongs to). After `max_login_attempts` (10) within 300 seconds, further credential attempts from that
 address answer `429 too_many_requests` with `Retry-After`; a success resets it, and
 requests carrying a valid session cookie are never limited. The counters are in memory and
-per process. Behind a proxy without `trusted_proxies` all clients share one bucket
+per process; a full table evicts expired and unblocked entries before blocked ones.
+For an unknown Basic user name the password is still hashed with the same iteration count
+as the configured users, so response time does not reveal which names exist. Behind a proxy without `trusted_proxies` all clients share one bucket
 (`redline doctor` warns).
 
 !!! warning "Several worker processes need `secret_key`"

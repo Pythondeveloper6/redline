@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -196,3 +197,87 @@ def test_action_yml_is_well_formed():
     assert all("shell" in s for s in data["runs"]["steps"] if "run" in s)
     commands = "\n".join(s.get("run", "") for s in data["runs"]["steps"])
     assert "redline check run" in commands and "redline check comment" in commands
+
+
+def test_action_and_workflows_pin_third_party_actions_to_commits():
+    # A tag can be moved to different code; a full commit SHA cannot.
+    root = ACTION.parent
+    files = [ACTION, *sorted((root / ".github" / "workflows").glob("*.yml"))]
+    files = [f for f in files if f.exists()]
+    if not files:
+        pytest.skip("workflows are not part of this checkout")
+    pinned = re.compile(r"^[\w.-]+/[\w./-]+@[0-9a-f]{40} # v\d")
+    for path in files:
+        for line in path.read_text().splitlines():
+            if "uses:" in line and not line.lstrip().startswith("#"):
+                ref = line.split("uses:", 1)[1].strip()
+                assert pinned.match(ref), f"{path.name}: {ref}"
+
+
+def test_action_does_not_inline_inputs_into_scripts():
+    # Inputs reach shell scripts through env, never through `${{ }}` text substitution.
+    if not ACTION.exists():
+        pytest.skip("action.yml is not part of this checkout")
+    yaml = pytest.importorskip("yaml")
+    data = yaml.safe_load(ACTION.read_text())
+    for step in data["runs"]["steps"]:
+        assert "${{" not in step.get("run", "")
+    assert "set -f" in ACTION.read_text()
+
+
+@pytest.mark.parametrize(
+    "api_url",
+    ["http://api.example.com", "https://user:pw@api.example.com", "ftp://api.example.com"],
+)
+def test_token_is_never_sent_in_clear_or_with_credentials(api_url):
+    # Plain http is accepted only for a loopback API (tests, local mocks).
+    with pytest.raises(github.CommentError, match="GitHub API URL"):
+        github.upsert_comment("x", token="t", repository="o/r", pr_number=1, api_url=api_url)
+
+
+@pytest.mark.parametrize("repository", ["o/r/../../x", "../o", "o", "o/r?x=1"])
+def test_repository_must_be_owner_and_name(gh, repository):
+    api = gh()
+    with pytest.raises(github.CommentError, match="repository"):
+        github.upsert_comment("x", token="t", repository=repository, pr_number=1, api_url=api.url)
+    assert api.calls == []
+
+
+class _Redirect(BaseHTTPRequestHandler):
+    target = ""
+
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        self.send_response(302)
+        self.send_header("Location", self.target + self.path)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+
+def test_redirects_are_not_followed_with_the_token(gh):
+    other = gh()
+    handler = type("H", (_Redirect,), {"target": other.url})
+    server = HTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        with pytest.raises(github.CommentError, match="302"):
+            github.upsert_comment(
+                "x",
+                token="t",
+                repository="o/r",
+                pr_number=1,
+                api_url=f"http://127.0.0.1:{server.server_port}",
+            )
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert other.calls == []
+
+
+def test_oversized_api_answer_is_refused(gh, monkeypatch):
+    api = gh(existing=[{"id": i, "body": "x" * 100} for i in range(50)])
+    monkeypatch.setattr(github, "MAX_RESPONSE", 1000)
+    with pytest.raises(github.CommentError, match="too large"):
+        github.upsert_comment("x", token="t", repository="o/r", pr_number=1, api_url=api.url)

@@ -190,3 +190,15 @@ def test_routing_errors_and_internal_errors(api, store):
     store.count = boom
     status, data = api.dispatch("GET", "api/meta")
     assert status == 500 and data["error"]["code"] == "internal_error"
+
+
+def test_internal_error_message_is_redacted(api, store):
+    # Driver errors can quote a DSN; the API answer must not carry its password.
+    def boom(*a, **k):
+        raise RuntimeError("could not connect to postgres://app:hunter2@db:5432/x password=s3")
+
+    store.count = boom
+    status, data = api.dispatch("GET", "api/meta")
+    assert status == 500
+    assert "hunter2" not in data["error"]["message"] and "s3" not in data["error"]["message"]
+    assert "RuntimeError" in data["error"]["message"]

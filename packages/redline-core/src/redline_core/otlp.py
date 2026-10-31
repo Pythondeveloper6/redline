@@ -52,7 +52,7 @@ def _root_span(trace, root_id, otel_trace_id):
     return span
 
 
-def _sql_span(trace, span, root_id, otel_trace_id, include_sql):
+def _sql_span(trace, span, root_id, otel_trace_id, include_sql, redactor=None):
     error = span.data.get("error") or {}
     kinds = span.data.get("statement_kinds") or ()
     operation = str(kinds[0]).upper() if kinds else "SQL"
@@ -65,7 +65,10 @@ def _sql_span(trace, span, root_id, otel_trace_id, include_sql):
         ("redline.rows", str(span.data.get("rows", ""))),
     ]
     if statement:
-        attributes.append(("db.statement", str(statement)))
+        statement = str(statement)
+        if include_sql and redactor is not None:
+            statement = redactor.text(statement)
+        attributes.append(("db.statement", statement))
     if error:
         attributes.append(
             ("error.type", str(error.get("type") or error.get("category") or "error"))
@@ -88,7 +91,7 @@ def _sql_span(trace, span, root_id, otel_trace_id, include_sql):
     return result
 
 
-def payload(traces, *, include_sql=False):
+def payload(traces, *, include_sql=False, redactor=None):
     """OTLP traces with a root span plus sanitized SQL spans.
 
     SQL text is the normalized fingerprint by default; bodies, parameter values, arbitrary
@@ -101,7 +104,7 @@ def payload(traces, *, include_sql=False):
         spans.append(_root_span(trace, root_id, otel_trace_id))
         for span in trace.spans:
             if span.kind == "sql":
-                spans.append(_sql_span(trace, span, root_id, otel_trace_id, include_sql))
+                spans.append(_sql_span(trace, span, root_id, otel_trace_id, include_sql, redactor))
     return {
         "resourceSpans": [
             {
@@ -114,10 +117,15 @@ def payload(traces, *, include_sql=False):
     }
 
 
+def _title(title, redactor):
+    text = str(title)[:4000]
+    return (redactor.text(text) if redactor is not None else text)[:512]
+
+
 _SEVERITY = {"info": (9, "INFO"), "warning": (13, "WARN"), "critical": (17, "ERROR")}
 
 
-def logs_payload(traces):
+def logs_payload(traces, *, redactor=None):
     """OTLP log records for recorded issues; stable ids make repeated exports deduplicable."""
     records = []
     for trace in traces:
@@ -131,7 +139,7 @@ def logs_payload(traces):
                     "timeUnixNano": stamp,
                     "severityNumber": number,
                     "severityText": text,
-                    "body": {"stringValue": str(issue.title)[:512]},
+                    "body": {"stringValue": _title(issue.title, redactor)},
                     "attributes": _attributes(
                         [
                             ("issue.id", issue.id),
@@ -197,9 +205,16 @@ def _send(endpoint, data):
 
 
 def export(traces, endpoint, *, dry_run=True, logs_endpoint=None, include_sql=False):
-    """Preview, or explicitly POST spans (plus logs when requested) to an OTLP collector."""
-    spans = payload(traces, include_sql=include_sql)
-    logs = logs_payload(traces)
+    """Preview, or explicitly POST spans (plus logs when requested) to an OTLP collector.
+
+    Issue titles and (with ``include_sql``) raw SQL go through the project's redactor, as
+    in the HTML export and the digest.
+    """
+    from .report_html import project_redactor
+
+    redactor = project_redactor()
+    spans = payload(traces, include_sql=include_sql, redactor=redactor)
+    logs = logs_payload(traces, redactor=redactor)
     if dry_run:
         return {"spans": spans, "logs": logs}
     if not endpoint:

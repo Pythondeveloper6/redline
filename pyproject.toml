@@ -40,7 +40,18 @@ target-version = "py310"
 extend-exclude = ["site", "frontend", "packages/redline-core/tests/fixtures/static_precision", "examples/**/migrations", "*.md"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "C4", "RUF", "DJ"]
+select = [
+    "E", "F", "I", "UP", "B", "C4", "RUF", "DJ",
+    # Curated flake8-bandit rules: dangerous calls (exec/eval/pickle/yaml.load/shell=True),
+    # unsafe XML, TLS verification, weak hashes, missing request timeouts. The noisy
+    # heuristics (asserts, subprocess audits, SQL string building, "password" names) are
+    # reviewed by hand instead.
+    "S102", "S103", "S104", "S108", "S113", "S201", "S202", "S301", "S302", "S303", "S304",
+    "S305", "S306", "S307", "S308", "S312", "S313", "S314", "S315", "S316", "S317", "S318",
+    "S319", "S321", "S324", "S501", "S502", "S503", "S504", "S505", "S506", "S507", "S508",
+    "S509", "S601", "S602", "S604", "S605", "S609", "S610", "S611", "S612", "S701", "S702",
+    "S704",
+]
 # B008: FastAPI's `Depends(...)` in argument defaults is the framework's idiom.
 # RUF012: declarative class attributes (Django Meta, admin options) are the idiom.
 # RUF001-003: prose in docstrings and comments uses real typography (en dashes, arrows).
@@ -51,4 +62,5 @@ known-first-party = ["redline_core", "django_redline", "fastapi_redline", "flask
 
 [tool.ruff.lint.per-file-ignores]
 "**/migrations/*.py" = ["E501", "RUF012"]
-"**/tests/**/*.py" = ["DJ008"]
+"**/tests/**/*.py" = ["DJ008", "S102", "S103", "S104", "S108", "S314"]
+"{examples,scripts,benchmarks}/**/*.py" = ["S104", "S108", "S314"]

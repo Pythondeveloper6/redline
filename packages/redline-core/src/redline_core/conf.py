@@ -164,7 +164,7 @@ DEFAULT_REDACT_HEADERS: tuple[str, ...] = (
 )
 DEFAULT_REDACT_KEYS: tuple[str, ...] = (
     r"(?i)pass(word)?|secret|token|api[_-]?key|(?<![a-z])auth(orization)?(?![a-z])"
-    r"|session|csrf|card|cvv|ssn|private[_-]?key",
+    r"|session|csrf|card|cvv|ssn|private[_-]?key|access[_-]?key|signature|credential",
 )
 
 

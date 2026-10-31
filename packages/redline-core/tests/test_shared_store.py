@@ -50,6 +50,21 @@ def test_mask_url():
     assert pg.is_postgres_url(URL) and not pg.is_postgres_url("/var/lib/redline.db")
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "postgresql://shop:pa/ss@db/redline",  # an unencoded slash in the password
+        "postgresql://shop:pa?ss@db/redline",
+        "postgresql://shop:pa#ss@db/redline",
+        "postgresql://shop:pass@db/redline?sslpassword=pass",
+    ],
+)
+def test_mask_url_never_shows_the_password(url):
+    masked = pg.mask_url(url)
+    assert ":pa" not in masked and "ss@" not in masked and "=pass" not in masked
+    assert masked.startswith("postgresql://shop")
+
+
 # ── selection ───────────────────────────────────────────────────────────────────────────
 class _FakePostgres:
     calls: list = []

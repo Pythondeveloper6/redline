@@ -35,7 +35,7 @@ security review yet.
 | B2 | Any client → recorded application | every request the app serves | redaction before persistence, capture byte budgets, sampling, route rules; profiling and check tags honoured only for authorised callers |
 | B3 | Redline → the app's database | EXPLAIN, index advice, catalog reads | only recorded single read-only `SELECT`s, re-validated on the stored text; rolled-back transaction; `explain_analyze` off by default |
 | B4 | Redline → disk | store file(s), WAL, profile blobs | private file permissions, retention/pruning, WAL check, network-filesystem refusal; **no encryption at rest** |
-| B5 | Redline → other services | OTLP export, load and refactor-check targets, webhooks | nothing is sent by default; every egress needs an explicit command or setting; load targets are path-only on the server's own port |
+| B5 | Redline → other services | OTLP export, load and refactor-check targets, webhooks, the GitHub API (`redline check comment`), OpenAPI downloads | nothing is sent by default; every egress needs an explicit command or setting; load targets are path-only on the server's own port; credentials (GitHub token, webhook URL) go only over https (plain http only to loopback for the token), never across redirects; answers are size-capped |
 | B6 | Developer machine / CI → Redline CLI | `redline check`, `check-sql`, `analyze`, `load` | static commands parse source and never import it; `check-imports` imports in an isolated subprocess only when asked |
 
 ## Threats (STRIDE) and mitigations
@@ -49,9 +49,10 @@ security review yet.
 | Forced recording of attacker requests | Tampering / DoS | profile and check headers honoured only for authorised callers; bounded queue drops instead of blocking | high-cardinality traffic still costs CPU before sampling |
 | Arbitrary SQL through EXPLAIN | Elevation of privilege | EXPLAIN takes trace/span ids, never SQL; `is_explainable` on stored text; rolled back | under `explain_analyze` a planted `SELECT` calling a side-effecting function would run (in a rolled-back transaction) |
 | Store file stolen from disk or backups | Information disclosure | redaction, retention, file permissions | no at-rest encryption |
+| Crafted request data makes redaction slow | Denial of service | redaction patterns are linear-time; error, header and identifier texts are cut before they are scanned | free-text capture still costs CPU proportional to the capture budgets |
 | Recorder exhausts memory/disk | Denial of service | span/SQL/body/trace byte budgets, bounded writer queue, retention | budgets do not bound total process memory; see [capacity](production.md#capacity-and-failure-behavior) |
 | Exported telemetry leaks data | Information disclosure | OTLP export omits bodies, SQL text and free-text tags; preview by default | collector security is the operator's |
-| Malicious dependency or tampered release | Tampering | trusted publishing, PEP 740 attestations, pinned CI actions, Dependabot | users must verify attestations themselves |
+| Malicious dependency or tampered release | Tampering | trusted publishing, PEP 740 attestations, CI actions pinned to full commit SHAs, checkouts without persisted credentials, least-privilege workflow permissions, Dependabot, `pip-audit` / `zizmor` in review | users must verify attestations themselves |
 
 ## Review checklist for an independent reviewer
 

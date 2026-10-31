@@ -25,7 +25,8 @@ def _quote(value):
 def analyze_mssql(plan, sql="", params=None):
     if not isinstance(plan, str) or len(plan.encode()) > 5_000_000 or "<!" in plan:
         raise ValueError("Invalid or oversized SQL Server XML plan")
-    root = ET.fromstring(plan)
+    # "<!" is rejected above, so no DTD, entity or external reference can be declared.
+    root = ET.fromstring(plan)  # noqa: S314
     elements = list(root.iter())
     if len(elements) > 20_000:
         raise ValueError("SQL Server plan exceeds element limit")

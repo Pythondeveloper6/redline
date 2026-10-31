@@ -215,7 +215,7 @@ def install(
     for alias, eng in name_engines(engine).items():
         redline.add_engine(eng, alias)
 
-    deps: list[Any] = [Depends(redline_guard(access, prefix))]
+    deps: list[Any] = [Depends(redline_guard(access, prefix, framework_hook=bool(dependencies)))]
     if dependencies:
         deps.append(refuse_false(dependencies))
     access.log_startup(prefix, "pass install(app, dependencies=[...])")

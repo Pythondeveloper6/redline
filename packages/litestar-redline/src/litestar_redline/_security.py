@@ -119,11 +119,16 @@ def request_info(connection: ASGIConnection, mount: str) -> RequestInfo:
     )
 
 
-def redline_guard(access: Access, mount: str) -> _Guard:
-    """The guard every Redline route runs first: the core access check."""
+def redline_guard(access: Access, mount: str, *, framework_hook: bool = True) -> _Guard:
+    """The guard every Redline route runs first: the core access check.
+
+    ``framework_hook`` says whether the app attached its own guards after this one. Under
+    ``access="framework"`` they make the decision; without them the gate refuses.
+    """
+    framework_ok = (lambda: True) if framework_hook else None
 
     async def guard(connection: ASGIConnection, _handler: BaseRouteHandler) -> None:
-        decision = access.check(request_info(connection, mount), framework_ok=lambda: True)
+        decision = access.check(request_info(connection, mount), framework_ok=framework_ok)
         if not decision.allowed:
             raise RedlineHTTPError.from_decision(decision)
 
