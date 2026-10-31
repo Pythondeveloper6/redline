@@ -143,9 +143,9 @@ prefix yourself. Files from unrelated codebases must not be mixed accidentally.
 | Deployment | Intended storage arrangement | Validation needed |
 |---|---|---|
 | One application, one process | One private local file | Retention, shutdown, disk errors and normal traffic |
-| Several workers on one host | Local shared file only after a concurrent-writer test, or per-worker files | Contention, busy timeout, pruning, loss and shutdown |
-| Web and task workers | Explicit web/worker roles, preferably separate files | Worker initialization, fork behavior and correlation |
-| Several replicas/hosts | A private local file per replica | Replica-local inspection and lifecycle; no network-file sharing |
+| Several workers on one host | The shared PostgreSQL store, or a local shared file only after a concurrent-writer test, or per-worker files | Contention, busy timeout, pruning, loss and shutdown |
+| Web and task workers | The shared PostgreSQL store, or explicit web/worker roles with separate files | Worker initialization, fork behavior and correlation |
+| Several replicas/hosts | The shared PostgreSQL store (`storage_url`), or a private local file per replica | Database reachability and credentials; with files, replica-local inspection and no network-file sharing |
 | Several independent codebases | Separate processes, settings, credentials and store paths | No cross-application traces or operator access |
 
 The SQLite writer starts lazily and has fork/PID handling, but validate the actual gunicorn,
@@ -166,6 +166,34 @@ inspection, profiles and single-ID deletion are refused rather than choosing ano
 store's evidence. Cross-file reads are not an atomic distributed snapshot. Secondary
 EXPLAIN/catalog requests are refused because a web process cannot establish the worker's
 database binding. This is not a distributed store.
+
+### Multi-worker deployments
+
+A SQLite file is a single-host store. Several gunicorn/uvicorn workers can write one local
+file (WAL plus a busy timeout), but their writes queue on one file lock, and as soon as there
+is more than one host or container each keeps its own traces. For any of these, set
+`storage_url` to a PostgreSQL database ([Storage: a shared PostgreSQL
+store](storage.md#a-shared-postgresql-store)):
+
+```bash
+pip install "redline-core[postgres]"
+REDLINE_STORAGE_URL=postgresql://redline:...@db.internal:5432/redline
+```
+
+Every worker and host then writes the same store, and the UI of any of them shows all
+traffic. The store opens its connection lazily per process, so gunicorn `--preload` and
+forked task workers are safe; give it its own database or schema and a role that owns only
+that.
+
+`redline doctor` flags the risky shapes. It reads the worker count from `WEB_CONCURRENCY`,
+`--workers`/`-w` in `GUNICORN_CMD_ARGS` and `UVICORN_WORKERS` (or `--workers N` when the
+count lives elsewhere, such as a process manager's command line) and warns when more than one
+worker would share a SQLite file; it also warns for a SQLite store on a network filesystem.
+In a deployment pipeline run it with `--strict`, which turns both warnings into failures:
+
+```bash
+redline doctor --strict --workers 4
+```
 
 <a id="sampling"></a>
 
@@ -234,7 +262,8 @@ A production recommendation requires evidence for each target deployment:
 3. Live driver tests for failed statements, reconnects, parameter styles and session cleanup;
    SQL Server plan/compile tests only against an isolated database with appropriate permissions.
 4. Broker-worker success/failure/retry, prefork/restart, correlation and graceful shutdown tests.
-5. Concurrent writers, retention, backpressure and fault-injection tests under expected traffic.
+5. Concurrent writers, retention, backpressure and fault-injection tests under expected traffic
+   (`redline doctor --strict` passing for the storage topology).
 6. Sentinel privacy checks across stored traces, issues, callsites, logs and exports.
 7. A low-traffic canary with an immediate `enabled = false` rollback and independent monitoring.
 
