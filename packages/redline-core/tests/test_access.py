@@ -721,3 +721,44 @@ def test_recorder_does_not_capture_logs_or_locals_when_disabled():
         secret_local = 1  # noqa: F841
         raise ValueError("boom")
     assert rec.last_trace.error is not None and "frames" not in rec.last_trace.error
+
+
+# ── login rate limit and user-name oracle hardening ───────────────────────────────────
+
+
+def test_rate_limit_groups_ipv6_clients_by_64_prefix():
+    # One host normally owns a whole /64; per-address counting would not limit it at all.
+    g = gate(access="token", token=TOKEN, max_login_attempts=2, allowed_ips=["2001:db8::/32"])
+    assert login(g, {"token": "x"}, ip="2001:db8:1:2::1", host="[::1]").status == 401
+    assert login(g, {"token": "x"}, ip="2001:db8:1:2::2", host="[::1]").status == 401
+    assert login(g, {"token": TOKEN}, ip="2001:db8:1:2::3", host="[::1]").status == 429
+    assert login(g, {"token": TOKEN}, ip="2001:db8:1:3::1", host="[::1]").allowed
+
+
+def test_rate_limit_full_table_never_forgets_a_blocked_client(monkeypatch):
+    monkeypatch.setattr(access_mod._RateLimiter, "MAX_KEYS", 50)
+    clock = Clock()
+    limiter = access_mod._RateLimiter(3, 300.0, clock)
+    for _ in range(3):
+        limiter.fail("victim-of-guessing")
+    assert limiter.blocked("victim-of-guessing")
+    for i in range(500):  # spraying fresh addresses must not flush the blocked one
+        clock.t += 0.01
+        limiter.fail(f"198.51.100.{i}")
+    assert limiter.blocked("victim-of-guessing")
+    assert len(limiter._hits) <= 50
+
+
+def test_unknown_basic_user_costs_the_same_iterations_as_a_known_one(monkeypatch):
+    g = gate(access="basic", basic_users={"ann": hash_password("pw", iterations=2000)})
+    seen = []
+    real = access_mod.hashlib.pbkdf2_hmac
+
+    def spy(name, password, salt, iterations, *a):
+        seen.append(iterations)
+        return real(name, password, salt, iterations, *a)
+
+    monkeypatch.setattr(access_mod.hashlib, "pbkdf2_hmac", spy)
+    g.check(req(authorization=basic(user="nobody", password="x")))
+    g.check(req(authorization=basic(user="ann", password="x")))
+    assert seen[-1] == seen[-2] == 2000
