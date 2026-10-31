@@ -40,7 +40,8 @@ classifiers = [
 ]
 # Deliberately empty. The core is imported into the request path of an application and
 # must never pull a framework (or anything else) into it uninvited. Storage is stdlib
-# sqlite3; the flamegraph profiler is an opt-in extra.
+# sqlite3 (the shared PostgreSQL store is the opt-in [postgres] extra); the flamegraph
+# profiler is an opt-in extra.
 dependencies = []
 
 [project.optional-dependencies]
@@ -51,6 +52,8 @@ requests = ["requests>=2.31"]
 redis = ["redis>=5.0"]
 asyncpg = ["asyncpg>=0.29"]
 psycopg = ["psycopg>=3.1"]
+# The shared trace store (storage_url = "postgresql://..."); psycopg 3 with its bundled libpq.
+postgres = ["psycopg[binary]>=3.1"]
 strawberry = ["strawberry-graphql>=0.240"]
 graphene = ["graphene>=3.3"]
 load = ["httpx>=0.27"]

@@ -4,7 +4,9 @@
 
 Redline keeps traces in a **separate SQLite file** of its own, written by a background
 thread. This page covers the design, the schema, retention, the failure modes, and how to
-look inside.
+look inside. When several worker processes or hosts should share one store, point
+`storage_url` at a PostgreSQL database instead: see
+[A shared PostgreSQL store](#a-shared-postgresql-store).
 
 ## Why a separate file
 
@@ -155,7 +157,9 @@ reads are small, but note:
 
 - UI reads and the writer take turns. A long aggregate (a 7-day Endpoints page over many
   thousands of traces) delays the writer for its duration.
-- Several **processes** can share the file (WAL, 10-second busy timeout). The test suite
+- Several **processes** on one host can share the file (WAL, 10-second busy timeout); for
+  several hosts, or many busy workers, use the [shared PostgreSQL
+  store](#a-shared-postgresql-store). The test suite
   opens one file from two independent OS processes (100 traces each) and checks the count;
   it does not use fork, so it exercises the same path as separate containers. See
   [Production: process models](production.md#process-models) for the caveats.
@@ -268,10 +272,55 @@ You usually do not need to back it up. To take a copy of a running database cons
 use SQLite's online backup: `sqlite3 .redline/redline.db ".backup copy.db"`. Copying only
 the `.db` file while it is being written can miss data that is still in the `-wal` file.
 
+## A shared PostgreSQL store
+
+A SQLite file belongs to one host: it must sit on a local disk (WAL does not work reliably
+over NFS/SMB), and every replica keeps its own. For several worker processes, containers or
+hosts writing **one** store, use PostgreSQL:
+
+```bash
+pip install "redline-core[postgres]"            # psycopg 3 with its bundled libpq
+export REDLINE_STORAGE_URL="postgresql://redline:secret@db.internal:5432/redline"
+```
+
+or `storage_url = "postgresql://..."` in `redline.toml` (Django: `REDLINE["STORAGE_URL"]`).
+With `storage_url` set, every adapter builds `PostgresStore` instead of the SQLite file and
+`storage_path` is not used. The SQLite file stays the default.
+
+- **Same engine.** `PostgresStore` and `SQLiteStore` share one implementation
+  (`redline_core.storage.sqlite.SQLStore`); a small dialect layer rewrites placeholders,
+  `INSERT OR REPLACE` (into `ON CONFLICT ... DO UPDATE`) and the column types. Every page,
+  aggregate and API route works the same; the live suite checks that endpoints, issues, the
+  SQL workload, history and the issue index come out identical to SQLite on the same data.
+- **Same write path.** `save()` only enqueues; the writer thread writes a batch per
+  transaction. Each write transaction takes a transaction-scoped advisory lock first, so
+  writers from all processes and hosts are serialized the way SQLite serializes them (the
+  live-tail sequence and the merged hourly histograms stay exact). Reads take no lock. At a
+  few hundred kept traces per second this is not a bottleneck; sample more aggressively if
+  `storage.dropped` grows.
+- **Schema versioning.** The `meta` table holds `schema_version` as in SQLite. The first
+  process to connect creates the tables under the same lock, so workers starting together
+  create them once; reopening is a no-op.
+- **Connections.** One connection per process, opened lazily (a store built before `fork()`
+  does not hand its socket to the workers) and reopened after the server drops it. Statements
+  are not server-side prepared, so PgBouncer in transaction mode works. On macOS the GSSAPI
+  probe is disabled (`gssencmode=disable`; it crashes forked children) unless the URL sets
+  `gssencmode`.
+- **Placement.** Use a dedicated database or schema and a role that owns it; Redline never
+  writes your application database. `PostgresStore(url, schema="redline")` creates and uses
+  that schema; from settings, add `?options=-csearch_path%3Dredline` to the URL (the schema
+  must exist). Retention (`max_rows`, `max_age_days`, `history_retention_days`) is applied
+  by whichever worker's writer prunes, to the whole shared store.
+- **Secrets.** `redline config` and `GET api/config` show the URL with its password masked.
+
+Load tests and refactor checks **started from the UI** need a SQLite store (their background
+process writes into the store file), so those UI actions answer `501` with a shared store;
+the CLI (`redline load`, `redline check`) still records into SQLite files. `redline doctor`
+checks the driver and that the database answers.
+
 ## A different store
 
-The `Store` protocol is public. A Postgres store is planned for
-[v1.0](roadmap.md). To plug in your own now, pass `install(store=...)` (FastAPI),
+The `Store` protocol is public. To plug in your own, pass `install(store=...)` (FastAPI),
 `Redline(store=...)` (Flask), `RedlinePlugin(store=...)` (Litestar) or set `REDLINE["STORE"]`
 (Django); see [Extending](extending.md#the-store-protocol).
 

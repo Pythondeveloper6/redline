@@ -6,8 +6,9 @@ run: its baseline data (``kind="baseline"``) or its comparison result (``kind="c
 Writes are synchronous (``BEGIN IMMEDIATE``, like load runs) – they are rare and the
 runner needs them visible at once.
 
-Mixed into :class:`~redline_core.storage.sqlite.SQLiteStore`; it uses the store's
-``_query``, ``_write_now``, ``_lock``, ``_conn`` and ``path``.
+Mixed into :class:`~redline_core.storage.sqlite.SQLStore` (so both the SQLite and the
+PostgreSQL store); it uses the store's ``_query``, ``_write_now``, ``_lock``, ``_conn``
+and ``path``.
 """
 
 from __future__ import annotations
@@ -102,6 +103,7 @@ class CheckStoreMixin:
     """Store methods for suites, check runs and their per-request results."""
 
     path: str
+    _db_errors: tuple[type[BaseException], ...] = (sqlite3.Error,)
     _check_cache: tuple[float, set[str]] | None = None
     #: The writer validates ``X-Redline-Check`` tags against :meth:`known_check_runs`, so the
     #: recorder may keep a sampled-out check call for it (``sampled_by="check"``).
@@ -109,7 +111,7 @@ class CheckStoreMixin:
     #: A ``running`` check run younger than this is never judged dead.
     CHECK_GRACE_S = 10.0
 
-    # helpers provided by SQLiteStore
+    # helpers provided by SQLStore
     def _query(self, sql: str, params: Any = ()) -> builtins.list[sqlite3.Row]:  # pragma: no cover
         raise NotImplementedError
 
@@ -462,7 +464,7 @@ class CheckStoreMixin:
                 (time.time() - CHECK_TAG_GRACE_S,),
             )
             ids = {r["id"] for r in rows}
-        except sqlite3.Error:  # pragma: no cover - e.g. a store being closed
+        except self._db_errors:  # pragma: no cover - e.g. a store being closed
             ids = set()
         self._check_cache = (now, ids)
         return ids
