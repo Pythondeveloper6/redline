@@ -100,6 +100,34 @@ version is below `1.0` the public API may change between minor versions.
 - Public API is defined in `docs/api-stability.md`; the internal design contract and
   planning files left the public tree.
 
+### Security
+
+- `access="framework"` with no dependencies or guards attached now refuses every request
+  in the FastAPI and Litestar adapters, as Flask and Django already did (it previously
+  allowed everyone).
+- Free-text redaction (bodies, logs, error messages, locals) runs in linear time; crafted
+  input could previously cost seconds of CPU per request. Error, header and identifier
+  texts are cut before they are scanned.
+- Redaction also masks a bare token used as a URL user name; the default secret key names
+  now include access keys, signatures and credentials.
+- The EXPLAIN safety check reads MySQL `#` comments, so a quote inside one can no longer
+  hide a second statement or a locking clause.
+- `redline check comment` sends the GitHub token only over https (plain http only to
+  loopback), never follows redirects, caps API answers and validates the repository name.
+- OpenAPI downloads for `redline load init` are size-capped and follow redirects only to
+  http(s).
+- The OTLP export redacts issue titles and the raw SQL included with `--include-sql`.
+- The login rate limit counts IPv6 clients per /64 and keeps blocked clients when its table
+  is full; Basic authentication takes the same time for unknown and known user names.
+- Internal-error API answers redact the exception text.
+- Store side files, run files and `redline export --html` pages are created `0600` and are
+  never written through a symlink.
+- A PostgreSQL store URL is masked correctly when the password contains `/`, `?` or `#`.
+- CI and the GitHub Action: third-party actions pinned to full commit SHAs, checkouts do not
+  persist credentials, Pages/OIDC permissions limited to the deploy job, matrix values
+  passed through the environment, and the action's `extra-args` is never glob-expanded.
+- A curated set of flake8-bandit rules is enforced by ruff.
+
 ### Fixed (production readiness)
 
 - Tests no longer use the deprecated `starlette.middleware.wsgi` (now `a2wsgi`).
