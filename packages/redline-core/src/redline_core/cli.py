@@ -20,7 +20,7 @@ import sys
 from collections.abc import Callable, Sequence
 from typing import Any, TextIO
 
-from . import operations, project_init
+from . import digest, operations, project_init
 from .check_sql import command as _cmd_sql
 from .check_sql import configure_cli as _configure_sql
 from .schema_watch import command as _cmd_schema_watch
@@ -1636,6 +1636,12 @@ COMMANDS: dict[str, tuple[str, Callable[[argparse.ArgumentParser], None], Handle
         "detect the framework and write a starter redline.toml (never overwrites without --force)",
         project_init.configure,
         project_init.command,
+        {},
+    ),
+    "digest": (
+        "post newly seen issues to a chat webhook (deduplicated, with a state file)",
+        digest.configure,
+        digest.command,
         {},
     ),
     "audit-store": (
