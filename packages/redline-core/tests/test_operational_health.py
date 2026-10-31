@@ -83,7 +83,9 @@ def test_internal_api_errors_withhold_details_when_capture_is_disabled(store, de
     monkeypatch.setattr(api, "_route", fail)
     code, data = api.dispatch("GET", "api/traces")
     assert code == 500 and data["error"]["code"] == "internal_error"
-    assert (secret in data["error"]["message"]) is details
+    message = data["error"]["message"]
+    assert "private-password" not in message  # redacted even when details are shown
+    assert ("db/customer" in message) is details
 
 
 def test_counter_fork_handler_resets_inherited_locked_counter():

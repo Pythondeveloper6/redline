@@ -222,11 +222,14 @@ class RedlineAPI:
             return error(501, "not_supported", str(exc) or "This store does not support it.")
         except Exception as exc:  # the profiler UI must never take the app down
             capture_failure("Redline API processing failed")
-            message = (
-                f"{type(exc).__name__}: {exc}"
-                if self.settings.capture_error_details
-                else "Redline could not process this request; details are withheld."
-            )
+            if self.settings.capture_error_details:
+                from .redact import Redactor
+
+                # driver errors can quote a DSN or a secret value
+                detail = Redactor(self.settings).text(str(exc)[:2000])[:500]
+                message = f"{type(exc).__name__}: {detail}"
+            else:
+                message = "Redline could not process this request; details are withheld."
             return error(500, "internal_error", message)
 
     def _route(

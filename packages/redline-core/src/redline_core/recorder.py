@@ -1530,8 +1530,15 @@ def _error_dict(
             "traceback": "",
         }
     if isinstance(error, Mapping):
+        # Cut before redacting: the cost of the scan must not grow with the input.
         return {
-            str(k): redactor.text(v) if isinstance(v, str) and k != "type" else v
+            str(k): (
+                redactor.text(v[-40_000:])[-20_000:]
+                if k == "traceback"
+                else redactor.text(v[:4000])[:4000]
+            )
+            if isinstance(v, str) and k != "type"
+            else v
             for k, v in error.items()
         }
     try:

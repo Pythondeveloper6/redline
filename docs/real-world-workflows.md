@@ -351,8 +351,9 @@ redline export --store /path/to/redline.db \
 
 The exporter sends a root recording span plus sanitized SQL spans using `db.system`,
 `db.operation`, `db.statement` (the normalized fingerprint unless `--include-sql` is
-explicit), `error.type` and selected numeric/status attributes. It also builds OTLP log
-records for recorded issues. It omits bodies, parameter values, arbitrary tags and error
+explicit; the raw statement is then redacted like the HTML export), `error.type` and
+selected numeric/status attributes. It also builds OTLP log records for recorded issues,
+with redacted titles. It omits bodies, parameter values, arbitrary tags and error
 messages. A valid incoming `traceparent` supplies the exported trace id and parent span;
 otherwise ids are derived from the recording id. It is not a production batching/retry
 pipeline, and no exporter runs automatically during recording.
