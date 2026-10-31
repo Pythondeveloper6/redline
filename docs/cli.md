@@ -14,6 +14,7 @@ Redline has two kinds of commands:
 ```text
 redline load SCENARIO [options]       run a load test against a running app
 redline export --store DB [ID --html OUT]   OTLP preview/send, or one HTML summary
+redline digest --store DB --webhook URL    post newly seen issues to a chat webhook
 redline init                          write a starter redline.toml and update .gitignore
 redline load init ...                 write a scenario file
 redline check record|compare|run|init|show|ratchet|comment   refactor check: prove a refactor is safe
@@ -58,6 +59,30 @@ the project's redaction first. A recording shows its issues, a span waterfall, S
 statement and captured logs; a run shows its steps, errors and scenario paths. Request and
 response bodies, headers and SQL parameters are never included, and SQL is the normalized
 statement unless you add `--include-sql` (still redacted). Exit `1` when the id is unknown.
+
+### `redline digest`
+
+Posts the issues that appeared recently to a Slack-compatible incoming webhook, once each.
+
+```bash
+redline digest --store .redline/redline.db --webhook "$SLACK_WEBHOOK" --since 24h
+redline digest --store .redline/redline.db --dry-run        # print the payload
+```
+
+It reads the store read-only and picks the issues **first seen** within `--since` (default
+`24h`; `30m`, `7d`... as in the load tester) that earlier digests have not reported, at or
+above `--min-severity`. The payload is `{"text": "..."}`: a headline, then up to 20 lines
+`[severity] kind: title on route (xN)`, worst first, then `...and N more`; `--ui-url` adds a
+link to the Issues page and `--title` renames the first line. Text is passed through the
+project's redaction and Slack control characters are escaped.
+
+Issues are identified by their stable id (the fingerprint that deduplicates them across
+requests). The ids that were sent are kept in `--state FILE` (default `digest-state.json`
+next to the store) **only after the webhook answered 2xx**, so a failed run is retried by the
+next one, and an issue is never posted twice. Entries older than 30 days are dropped from the
+file. Redirects are not followed and the URL must be `http(s)` without credentials. Exit
+codes: `0` sent or nothing new, `1` store unreadable or delivery failed, `2` usage error.
+Run it from cron or a scheduled CI job on the development or staging environment.
 
 ### `redline load`
 
