@@ -203,3 +203,12 @@ Scenarios come from the app's OpenAPI document:
 ```bash
 redline load init --from-openapi http://localhost:8000/openapi.json
 ```
+
+
+### Production doctor gate
+
+`redline doctor --production --strict --json` adds the recording-only production policy
+to the ordinary storage/access probes. It validates rather than changes settings.
+Warnings retain their `warn` status in JSON but produce nonzero exit status under
+`--strict`; configuration failures also produce valid JSON. See
+[Production deployment](production.md#enforce-the-recording-only-configuration-before-deployment).
