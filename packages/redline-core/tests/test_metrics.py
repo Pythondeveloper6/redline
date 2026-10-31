@@ -45,12 +45,13 @@ def test_drops_by_reason_and_write_failures(tmp_path):
     store.close()
     store.save(trace("late"))  # closed
     store._drop("queue_full", 3)
-    store.write_failures = 2
+    store._drop("write_failure", 2, OSError("disk full"))
     values = parse(render_metrics(store))
     assert values['redline_traces_dropped_total{reason="closed"}'] == 1
     assert values['redline_traces_dropped_total{reason="queue_full"}'] == 3
-    assert values["redline_write_failures_total"] == 2
-    assert store.dropped == 4
+    assert values['redline_traces_dropped_total{reason="write_failure"}'] == 2
+    assert values["redline_write_failures_total"] == 1
+    assert store.dropped == 6
 
 
 def test_queue_full_is_counted_with_a_tiny_queue(tmp_path):

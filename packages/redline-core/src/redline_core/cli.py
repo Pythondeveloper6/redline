@@ -797,24 +797,6 @@ def _postgres_checks(url: str) -> list[tuple[str, str, str]]:
     return [("ok", "storage", f"PostgreSQL {version} at {where}, shared by every worker")]
 
 
-def _configure_doctor(p: argparse.ArgumentParser) -> None:
-    _configure_config(p)
-    p.add_argument(
-        "--strict",
-        action="store_true",
-        help="fail (not warn) when a SQLite store sits on a network filesystem or is shared "
-        "by several worker processes",
-    )
-    p.add_argument(
-        "--workers",
-        type=int,
-        default=None,
-        metavar="N",
-        help="the number of worker processes the deployment runs (default: read "
-        "WEB_CONCURRENCY, GUNICORN_CMD_ARGS and UVICORN_WORKERS)",
-    )
-
-
 def _cmd_doctor(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
     if args.json:
         import io
@@ -881,7 +863,16 @@ def _configure_doctor(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--strict",
         action="store_true",
-        help="return failure when any check warns",
+        help="return failure when any check warns; a SQLite store on a network filesystem "
+        "or shared by several worker processes is reported as FAIL",
+    )
+    p.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        metavar="N",
+        help="the number of worker processes the deployment runs (default: read "
+        "WEB_CONCURRENCY, GUNICORN_CMD_ARGS and UVICORN_WORKERS)",
     )
 
 

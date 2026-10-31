@@ -203,8 +203,10 @@ fail it). It takes `--json` and `--project-root DIR` like `redline config`, plus
 - `--workers N`: the number of worker processes the deployment runs. Without it the count
   is read from `WEB_CONCURRENCY`, `--workers`/`-w` in `GUNICORN_CMD_ARGS` and
   `UVICORN_WORKERS`.
-- `--strict`: the `filesystem` and `workers` warnings about a SQLite store fail instead.
-  Use it in deployment pipelines.
+- `--strict`: any warning makes the command exit `1`, and the `filesystem` and `workers`
+  checks about a SQLite store are reported as `FAIL`. Use it in deployment pipelines.
+- `--production`: also check the recording-only production policy (see
+  [Production doctor gate](#production-doctor-gate)).
 
 With `storage_url` set, the `storage` check verifies the PostgreSQL driver is installed and
 the database answers (password masked in the output); the SQLite file checks are skipped.
