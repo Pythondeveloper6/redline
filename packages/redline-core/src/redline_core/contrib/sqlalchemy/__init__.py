@@ -353,7 +353,7 @@ def _install_engine(sync_engine, alias, *, _auto=False):
                     or (policy == "reads_only" and is_explainable(exc_context.statement or ""))
                 )
                 details["message"] = (
-                    builder.recorder.redactor.text(str(exc_context.original_exception))[:500]
+                    builder.recorder.redactor.text(str(exc_context.original_exception)[:4000])[:500]
                     if allowed
                     else "[not captured]"
                 )

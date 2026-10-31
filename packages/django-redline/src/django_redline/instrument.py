@@ -205,7 +205,7 @@ def _record(
             original = error.__cause__ or error
             details = get_vendor(span.data["vendor"]).classify_error(original)
             details["message"] = (
-                builder.recorder.redactor.text(str(original))[:500]
+                builder.recorder.redactor.text(str(original)[:4000])[:500]
                 if builder is not None
                 and builder.recorder.settings.capture_error_details
                 and span.data.get("params_captured")
