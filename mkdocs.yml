@@ -107,6 +107,7 @@ nav:
   - Get started:
       - Getting started: getting-started.md
       - How it works: how-it-works.md
+      - Example projects: examples.md
       - The UI: the-ui.md
       - Server-Timing and the badge: server-timing-badge.md
   - Guide:
@@ -148,6 +149,7 @@ nav:
       - Configuration: configuration.md
       - Access control: access-control.md
       - Production: production.md
+      - Upgrading: upgrading.md
       - Operating Redline: operating.md
       - Full-stack testing: testing.md
       - Security: security.md
