@@ -83,6 +83,7 @@ GROUPS: dict[str, tuple[str, ...]] = {
         "redact_routes",
         "capture_loggers",
         "ignore_loggers",
+        "ignore_sql",
         "request_id_headers",
         "capture_request_body",
         "capture_response_body",

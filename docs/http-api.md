@@ -313,7 +313,13 @@ curl -s -X DELETE localhost:8000/_redline/api/traces
 
 ### GET api/endpoints
 
-Per-route aggregates. Parameter: `window`.
+Per-route aggregates. Parameters: `window`, `group_by` (optional).
+
+`group_by=blueprint` (Flask) or `group_by=tag:<key>` aggregates by a trace tag instead of
+by route: one item per tag value with `route` set to the value, `method` `"*"` and
+`routes` counting the distinct routes inside it; untagged requests are `"(none)"`. The
+response then also carries `"group_by"`. An invalid value answers 400
+(`invalid_group_by`).
 
 ```bash
 curl -s "localhost:8000/_redline/api/endpoints?window=1h"

@@ -32,6 +32,7 @@ the Flask and Litestar adapters; `fastapi_redline` re-exports them (`instrument_
 install(
     app,
     engine=None,          # Engine | AsyncEngine | [engines] | {"alias": engine}
+    engines=None,         # "auto": instrument engines created at runtime
     settings=None,        # dict | redline_core.Settings
     prefix=None,          # default: the mount_path setting, else "/_redline"
     dependencies=None,    # auth dependencies for the UI and API
@@ -137,6 +138,23 @@ EXPLAIN; any other dialect records SQL (vendor `other`) but cannot be explained.
 
     SQLite `PRAGMA` statements are not recorded. They are connection housekeeping, not
     your queries.
+
+### Engines created at runtime (per-user or per-request)
+
+Apps that build engines on the fly (for example one per user, with token authentication
+through `connect_args` or `creator=`) cannot register each one. Opt in to automatic
+discovery:
+
+```python
+install(app, engines="auto")   # or settings={"instrument_engines": "all"}
+```
+
+This sets `instrument_engines="all"`: every SQLAlchemy `Engine` (sync, or the sync engine
+inside an `AsyncEngine`) that runs a statement inside a recorded request is hooked on its
+first use, once, under a unique alias (`auto_<id>`). Engines are held weakly, so a
+disposed per-request engine is garbage collected as usual. Automatically found sync
+engines can be EXPLAINed; async ones are recorded but not EXPLAINed. Engines you pass as
+`engine=` keep their own alias. The default stays explicit registration.
 
 ## Sync and async endpoints
 

@@ -1152,17 +1152,23 @@ def record_query(
     rows: int | None = None,
     many: bool = False,
     capture_callsite: bool = True,
+    honor_ignore: bool = True,
 ) -> Span | None:
     """Record one SQL execution (``start``/``duration`` as in :func:`record_span`).
 
     ``params`` are redacted (values bound to secret-looking columns are masked) and made
     JSON-safe; for ``many=True`` pass the parameter rows, of which the first 10 are kept.
+    Statements matching the ``ignore_sql`` setting (session housekeeping) are not recorded
+    and give ``None``, unless ``honor_ignore`` is false (failed statements stay visible).
     """
     builder = _trace.get()
     if builder is None or builder.finished:
         return None
     redactor = builder.recorder.redactor
     settings = builder.recorder.settings
+    if honor_ignore and settings.ignore_sql and type(sql) is str:
+        if sqlmod.is_ignored(sql, settings.ignore_sql):
+            return None
     truncated_sql = type(sql) is not str
     if type(sql) is not str:
         sql = "UNKNOWN"
@@ -1216,6 +1222,12 @@ def record_query(
         "read_query": sqlmod.is_explainable(sql),
         "has_limit": sqlmod.has_limit(sql),
     }
+    procedure = sqlmod.procedure_name(sql)
+    if procedure is not None:
+        data["query_kind"] = "procedure"
+        data["procedure"] = procedure
+    else:
+        data["query_kind"] = sqlmod.statement_kind(sql).lower()
     callsite = builder.recorder.capturer.capture(skip=2) if capture_callsite else None
     if masked and callsite is not None:
         from dataclasses import replace

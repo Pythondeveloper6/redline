@@ -62,6 +62,47 @@ def prune_command(max_age_days: float | None, max_rows: int | None) -> None:
     click.echo(f"Pruned {deleted} trace(s); {store.count()} left.")
 
 
+@redline_cli.command("endpoints")
+@click.option("--window", default="24h", show_default=True, help="Look-back window (1h, 24h, 7d).")
+@click.option(
+    "--group-by",
+    "group_by",
+    type=click.Choice(["route", "blueprint"]),
+    default="route",
+    show_default=True,
+    help="One row per route, or per Flask blueprint.",
+)
+@click.option("--json", "as_json", is_flag=True, help="Print the rows as JSON.")
+def endpoints_command(window: str, group_by: str, as_json: bool) -> None:
+    """Per-endpoint (or per-blueprint) request counts, latency and query totals."""
+    from redline_core.storage.base import FilterError, parse_window
+
+    store = _runtime().store
+    try:
+        seconds = parse_window(window)
+        store.flush(5.0)
+        stats = store.endpoints(seconds, **({} if group_by == "route" else {"group_by": group_by}))
+    except (FilterError, ValueError) as exc:
+        raise click.UsageError(str(exc)) from exc
+    if as_json:
+        click.echo(json.dumps([{**s.to_dict(), "series": None} for s in stats], indent=2))
+        return
+    if not stats:
+        click.echo("No requests recorded in this window.")
+        return
+    head = "blueprint" if group_by == "blueprint" else "route"
+    width = min(60, max(len(head), *(len(s.route) for s in stats)))
+    click.echo(
+        f"{head:<{width}}  {'method':<6} {'reqs':>6} {'p95 ms':>8} {'avg q':>6} {'issues':>6}"
+    )
+    for s in stats:
+        route = s.route if len(s.route) <= width else s.route[: width - 1] + "…"
+        click.echo(
+            f"{route:<{width}}  {s.method:<6} {s.count:>6} {s.p95_ms:>8.1f} "
+            f"{s.avg_queries:>6.1f} {s.issue_count:>6}"
+        )
+
+
 @redline_cli.command("scan")
 @click.option("--json", "as_json", is_flag=True, help="Print the findings as JSON.")
 @click.option("--fail", is_flag=True, help="Exit with status 1 when anything is found.")

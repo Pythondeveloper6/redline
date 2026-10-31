@@ -35,7 +35,10 @@ __all__ = [
     "fingerprint_hash",
     "has_limit",
     "is_explainable",
+    "is_ignored",
     "primary_table",
+    "procedure_name",
+    "query_kind",
     "select_columns",
     "statement_kind",
     "table_aliases",
@@ -97,10 +100,89 @@ def _sub_token(match: re.Match[str]) -> str:
     return text
 
 
+#: ``EXEC [dbo].[proc] @a = 1`` (SQL Server), ``CALL proc(1)`` (MySQL/PostgreSQL) and the
+#: ODBC escape ``{CALL proc(?)}``. The dynamic-SQL runners are not procedures worth naming.
+_PROC_IDENT = r'(?:"(?:[^"]|"")+"|`[^`]+`|\[[^\]]+\]|[A-Za-z_][\w$#@]*)'
+_PROC_CALL = re.compile(
+    rf"\{{?\s*(?:\?\s*=\s*)?(?:(?P<exec>EXEC(?:UTE)?)\s+(?:@\w+\s*=\s*)?|(?P<call>CALL)\s+)"
+    rf"(?P<name>{_PROC_IDENT}(?:\s*\.\s*{_PROC_IDENT})*)(?![\w$.\[\"`])",
+    re.IGNORECASE,
+)
+_DYNAMIC_SQL_PROCS = frozenset(
+    {"sp_executesql", "sp_prepare", "sp_prepexec", "sp_execute", "sp_unprepare", "sp_cursoropen"}
+)
+
+
+def _procedure_parts(match: re.Match[str]) -> tuple[str, str] | None:
+    name = match.group("name")
+    parts = [p.strip() for p in re.findall(_PROC_IDENT, name)]
+    plain = ".".join(p[1:-1] if p[:1] in ('"', "`", "[") and len(p) >= 2 else p for p in parts)
+    if plain.rsplit(".", 1)[-1].lower() in _DYNAMIC_SQL_PROCS:
+        return None
+    return ("CALL" if match.group("call") else "EXEC"), plain
+
+
+def _canonical_procedure(match: re.Match[str]) -> str:
+    """``EXEC dbo.proc`` / ``CALL proc``: arguments never split a procedure's group."""
+    parts = _procedure_parts(match)
+    if parts is None:
+        return match.string.strip().rstrip(";").rstrip()
+    return f"{parts[0]} {parts[1]}"
+
+
+@lru_cache(maxsize=4096)
+def procedure_name(sql: str) -> str | None:
+    """The stored procedure a single ``EXEC``/``EXECUTE``/``CALL`` statement runs.
+
+    ``EXEC [dbo].[usp_orders] @id = 1`` and ``CALL orders_for(1)`` give ``dbo.usp_orders``
+    and ``orders_for`` (quotes removed). ``None`` for anything else, for batches of several
+    statements and for dynamic SQL runners (``sp_executesql``).
+    """
+    clean = _TOKEN.sub(lambda m: " " if m.lastgroup in {"lcomment", "bcomment"} else m.group(), sql)
+    clean = _WS.sub(" ", clean).strip()
+    if ";" in clean.rstrip().rstrip(";"):
+        return None
+    match = _PROC_CALL.match(clean)
+    if match is None:
+        return None
+    parts = _procedure_parts(match)
+    return parts[1] if parts else None
+
+
+def query_kind(sql: str) -> str:
+    """``"procedure"`` for stored-procedure calls, else the lower-cased statement kind."""
+    if procedure_name(sql) is not None:
+        return "procedure"
+    return statement_kind(sql).lower()
+
+
+@lru_cache(maxsize=256)
+def _compiled(patterns: tuple[str, ...]) -> tuple[re.Pattern[str], ...]:
+    return tuple(re.compile(p, re.IGNORECASE) for p in patterns)
+
+
+@lru_cache(maxsize=4096)
+def is_ignored(sql: str, patterns: tuple[str, ...]) -> bool:
+    """Whether every statement of ``sql`` matches one of the ``ignore_sql`` ``patterns``.
+
+    Matching is on the normalised statement (comments gone, keywords upper-cased). A batch
+    such as ``SET NOCOUNT ON; SELECT 1`` is only ignored when *all* of it is housekeeping.
+    """
+    if not patterns or not sql:
+        return False
+    compiled = _compiled(tuple(patterns))
+    fp = fingerprint(sql)
+    statements = [p.strip() for p in fp.split(";") if p.strip()]
+    return bool(statements) and all(any(c.match(s) for c in compiled) for s in statements)
+
+
 @lru_cache(maxsize=4096)
 def fingerprint(sql: str) -> str:
     """The literal-free, whitespace-normalised form of ``sql`` (memoised)."""
     out = _TOKEN.sub(_sub_token, sql)
+    proc = _PROC_CALL.match(_WS.sub(" ", out).lstrip())
+    if proc is not None and ";" not in out.rstrip().rstrip(";"):
+        return _canonical_procedure(proc)
     out = _NEG_NUMBER.sub(r"\1\2?", out)
     out = _OPERATOR.sub(r" \1 ", out)
     out = _WS.sub(" ", out).strip()

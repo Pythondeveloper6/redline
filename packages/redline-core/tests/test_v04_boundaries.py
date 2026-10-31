@@ -501,3 +501,22 @@ def test_output_lint_requires_a_real_dml_clause(sql, expected):
     from redline_core.check_sql import lint
 
     assert ("output-without-into" in lint(sql, "mssql")) is expected
+
+
+def test_auto_engine_lookup_for_explain_is_weak():
+    import gc
+
+    from redline_core.contrib.sqlalchemy import auto_engine
+
+    recorder = Recorder(Settings(instrument_engines="all"))
+    engine = create_engine("sqlite://")
+    with recorder.recording(method="GET", path="/auto"):
+        with engine.connect() as conn:
+            conn.exec_driver_sql("SELECT 1")
+    alias = next(s.data["db_alias"] for s in recorder.last_trace.spans if s.kind == "sql")
+    assert auto_engine(alias) is engine
+    assert auto_engine("missing") is None
+    engine.dispose()
+    del engine, conn
+    gc.collect()
+    assert auto_engine(alias) is None

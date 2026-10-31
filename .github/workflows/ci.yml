@@ -231,6 +231,48 @@ jobs:
           uv run --no-sync pytest tests/test_explain.py -k postgres -rs -v | tee "$RUNNER_TEMP/django.log"
           ! grep -qi skipped "$RUNNER_TEMP/django.log"
 
+  # Live MySQL: EXPLAIN, index advice, killed connections and the three MySQL drivers
+  # (pymysql, aiomysql, asyncmy). The tests live with the Compose qualification suite and
+  # only run against a disposable database named redline_test_*, with the opt-in below.
+  mysql:
+    name: mysql live tests
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: redline_test_only
+          MYSQL_DATABASE: redline_test_integration
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -predline_test_only"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      REDLINE_TEST_COMPOSE: "1"
+      REDLINE_TEST_MYSQL_DSN: mysql+pymysql://root:redline_test_only@127.0.0.1:3306/redline_test_integration
+      REDLINE_TEST_MYSQL_ASYNC_DSN: mysql+aiomysql://root:redline_test_only@127.0.0.1:3306/redline_test_integration
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.2
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+          python-version: "3.13"
+      - run: uv sync --all-packages --frozen
+      - name: Install the MySQL drivers
+        run: uv pip install "pymysql[rsa]>=1.1,<2" "aiomysql>=0.2,<1" "asyncmy>=0.2.9,<1" "cryptography>=42"
+      # A skipped test is a failure here: the point of this job is that the server is up.
+      - name: Live MySQL tests (pymysql, aiomysql, asyncmy)
+        shell: bash
+        run: |
+          uv run --no-sync pytest examples/testing/tests/test_live_mysql.py \
+            "examples/testing/tests/test_live_databases.py" -k "mysql and not django" \
+            -p no:cacheprovider -rs -v | tee "$RUNNER_TEMP/mysql.log"
+          ! grep -qi skipped "$RUNNER_TEMP/mysql.log"
+
   frontend:
     name: frontend bundle
     runs-on: ubuntu-latest
