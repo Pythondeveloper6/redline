@@ -163,6 +163,11 @@ def route(api, method, path, params, body):
         warnings = []
         if meta["storage"]["dropped"]:
             warnings.append("The writer dropped traces; retained counts are incomplete.")
+        if meta["operational"]["status"] != "ok":
+            warnings.append(
+                "Profiler runtime health is degraded or unavailable; inspect operational "
+                "counters separately from application readiness."
+            )
         if api.settings.sample_rate < 1:
             warnings.append("Retained counts reflect sampling and keep rules, not total traffic.")
         warnings.extend(integration_warnings(integrations))

@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import logging
 import os
+import re
+import shlex
 import socket
 import sqlite3
 import sys
 import tempfile
+from collections.abc import Mapping
 from pathlib import Path
 
 from ..conf import SettingsError
@@ -151,3 +154,46 @@ def filesystem_type(path: str) -> str | None:
     except OSError:
         return None
     return best_type
+
+
+_WORKER_FLAG = re.compile(r"^(?:-w|--workers)(?:=(.*))?$")
+
+
+def _gunicorn_workers(cmd_args: str) -> int | None:
+    try:
+        parts = shlex.split(cmd_args)
+    except ValueError:
+        return None
+    found = None
+    for i, part in enumerate(parts):
+        if part.startswith("-w") and len(part) > 2 and part[2:].isdigit():  # -w4
+            found = int(part[2:])
+            continue
+        match = _WORKER_FLAG.match(part)
+        if not match:
+            continue
+        value = (
+            match.group(1)
+            if match.group(1) is not None
+            else (parts[i + 1] if i + 1 < len(parts) else "")
+        )
+        if value.strip().isdigit():
+            found = int(value)
+    return found
+
+
+def detect_workers(environ: Mapping[str, str] | None = None) -> tuple[int, str] | None:
+    """The worker-process count a deployment declares in its environment, with the
+    variable it came from: ``WEB_CONCURRENCY`` (gunicorn, uvicorn and most platforms),
+    ``--workers``/``-w`` in ``GUNICORN_CMD_ARGS``, or ``UVICORN_WORKERS``. ``None`` when
+    none of them is set to a number. The largest wins."""
+    environ = os.environ if environ is None else environ
+    found: list[tuple[int, str]] = []
+    for name in ("WEB_CONCURRENCY", "UVICORN_WORKERS"):
+        raw = str(environ.get(name, "")).strip()
+        if raw.isdigit():
+            found.append((int(raw), f"{name}={raw}"))
+    gunicorn = _gunicorn_workers(str(environ.get("GUNICORN_CMD_ARGS", "")))
+    if gunicorn is not None:
+        found.append((gunicorn, f"GUNICORN_CMD_ARGS --workers {gunicorn}"))
+    return max(found, key=lambda f: f[0]) if found else None

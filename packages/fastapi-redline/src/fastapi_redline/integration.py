@@ -21,7 +21,7 @@ from redline_core.contrib.starlette_background import instrument_background_task
 from redline_core.environment import refuse_in_production
 from redline_core.explain import ExplainExecutor
 from redline_core.load.control import run_hooks
-from redline_core.storage import SQLiteStore, Store
+from redline_core.storage import Store, store_from_settings
 
 from ._middleware import RedlineMiddleware
 from ._security import redline_guard, refuse_false, scope_info
@@ -104,6 +104,7 @@ class Redline:
         self.api = RedlineAPI(
             store,
             settings,
+            runtime_health=self.recorder.operational_health,
             framework="fastapi",
             explain_executor=self._executor_for,
             run_launcher=launcher,
@@ -175,7 +176,8 @@ def install(
         Declarative ``Base``/``registry`` (or a list) for fix suggestions; by default every
         registry SQLAlchemy knows about.
     ``store``
-        A custom ``Store``; default is the SQLite file at ``storage_path``.
+        A custom ``Store``; default is the SQLite file at ``storage_path`` (or
+        the shared PostgreSQL store at ``storage_url``).
     """
     if getattr(app.state, "redline", None) is not None:
         raise RuntimeError("Redline is already installed on this app.")
@@ -196,7 +198,7 @@ def install(
         cfg = cfg.replace(ignore_paths=[*cfg.ignore_paths, own])
     access = Access(cfg, access_explicit=resolved.access_explicit, debug=lambda: bool(app.debug))
 
-    store = store if store is not None else SQLiteStore.from_settings(cfg)
+    store = store if store is not None else store_from_settings(cfg)
     suggester = SQLAlchemyFixSuggester(models, project_root=cfg.project_root)
     recorder = configure(cfg, store, [suggester])
     auto_instrument(cfg)
