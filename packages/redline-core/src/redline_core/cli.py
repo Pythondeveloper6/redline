@@ -745,11 +745,40 @@ def _doctor_checks(resolved: Any) -> list[tuple[str, str, str]]:
 
 
 def _cmd_doctor(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
-    resolved = _resolve(args, err)
+    if args.json:
+        import io
+
+        # Suppress parser detail in JSON mode; a malformed config can contain arbitrary
+        # values, while the output schema must remain valid JSON and secret-free.
+        resolved = _resolve(args, io.StringIO())
+    else:
+        resolved = _resolve(args, err)
     if resolved is None:
-        out.write("FAIL  config      the configuration does not load (see above)\n")
+        if args.json:
+            import json
+
+            out.write(
+                json.dumps(
+                    [
+                        {
+                            "status": "fail",
+                            "check": "config",
+                            "detail": "configuration does not load",
+                        }
+                    ],
+                    indent=2,
+                )
+                + "\n"
+            )
+            err.write("redline: invalid configuration; details omitted in JSON mode\n")
+        else:
+            out.write("FAIL  config      the configuration does not load (see above)\n")
         return EXIT_FAIL
     checks = _doctor_checks(resolved)
+    if args.production:
+        from .production_checks import production_checks
+
+        checks.extend(production_checks(resolved))
     if args.json:
         import json
 
@@ -761,7 +790,26 @@ def _cmd_doctor(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
         out.write(f"preset {resolved.settings.preset}, config file {resolved.file or '(none)'}\n")
         for status, check, detail in checks:
             out.write(f"{status.upper():<5} {check:<11} {detail}\n")
-    return EXIT_FAIL if any(c[0] == "fail" for c in checks) else EXIT_OK
+    return (
+        EXIT_FAIL
+        if any(c[0] == "fail" for c in checks)
+        or (args.strict and any(c[0] == "warn" for c in checks))
+        else EXIT_OK
+    )
+
+
+def _configure_doctor(p: argparse.ArgumentParser) -> None:
+    _configure_config(p)
+    p.add_argument(
+        "--production",
+        action="store_true",
+        help="also check production recording-only policy settings",
+    )
+    p.add_argument(
+        "--strict",
+        action="store_true",
+        help="return failure when any check warns",
+    )
 
 
 def _configure_hash(p: argparse.ArgumentParser) -> None:
@@ -1511,7 +1559,7 @@ COMMANDS: dict[str, tuple[str, Callable[[argparse.ArgumentParser], None], Handle
     ),
     "doctor": (
         "check storage, the UI bundle and the access settings",
-        _configure_config,
+        _configure_doctor,
         _cmd_doctor,
         {},
     ),

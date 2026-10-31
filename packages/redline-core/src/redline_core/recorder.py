@@ -36,10 +36,12 @@ import inspect
 import json
 import linecache
 import logging
+import os
 import re
 import threading
 import time
 import traceback
+import weakref
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
@@ -73,6 +75,18 @@ __all__ = [
 ]
 
 logger = logging.getLogger("redline")
+_RECORDERS: weakref.WeakSet[Recorder] = weakref.WeakSet()
+
+
+def _reset_recorder_counters_after_fork() -> None:
+    global _default_lock
+    _default_lock = threading.Lock()
+    for recorder in list(_RECORDERS):
+        recorder._reset_counter_after_fork()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_recorder_counters_after_fork)
 
 
 F = TypeVar("F", bound=Callable[..., Any])
@@ -381,6 +395,9 @@ class Recorder:
         self.settings = settings or Settings()
         self.store = store
         self.dropped_capture = 0
+        self._counter_pid = os.getpid()
+        self._counter_lock = threading.Lock()
+        _RECORDERS.add(self)
         self.sampler = Sampler(self.settings, rng) if rng else Sampler(self.settings)
         self.redactor = Redactor(self.settings)
         self.detector = Detector(self.settings, suggesters)
@@ -397,6 +414,33 @@ class Recorder:
             from .contrib.sqlalchemy import instrument_all_engines
 
             instrument_all_engines()
+
+    def _reset_counter_after_fork(self) -> None:
+        self._counter_lock = threading.Lock()
+        self.dropped_capture = 0
+        self._counter_pid = os.getpid()
+
+    def _check_counter_pid(self) -> None:
+        if self._counter_pid != os.getpid():
+            self._reset_counter_after_fork()
+
+    def _note_capture_loss(self) -> None:
+        self._check_counter_pid()
+        with self._counter_lock:
+            self.dropped_capture += 1
+
+    def operational_health(self) -> dict[str, Any]:
+        self._check_counter_pid()
+        with self._counter_lock:
+            failures = self.dropped_capture
+        status = "disabled" if not self.settings.enabled else "degraded" if failures else "ok"
+        return {
+            "status": status,
+            "scope": "process",
+            "pid": self._counter_pid,
+            "enabled": self.settings.enabled,
+            "capture_failures": failures,
+        }
 
     # lifecycle -------------------------------------------------------------
     def should_record(self, path: str) -> bool:
@@ -512,7 +556,7 @@ class Recorder:
                 if getattr(builder, key)
             }
             trace = minimal_trace(seed, "capture_failure")
-            self.dropped_capture += 1
+            self._note_capture_loss()
             if builder.active:
                 from .testing import active_capture
 
@@ -730,7 +774,7 @@ class Recorder:
         safe = enforce_trace_limits(trace, self.settings)
         if safe is None:
             safe = minimal_trace(trace, "capture_failure")
-            self.dropped_capture += 1
+            self._note_capture_loss()
             if capture is not None:
                 capture[1].append(safe)
             return safe
@@ -741,7 +785,7 @@ class Recorder:
             try:
                 self.store.save(trace)
             except Exception:
-                self.dropped_capture += 1
+                self._note_capture_loss()
                 _capture_failure("Redline failed to enqueue recording")
         return trace
 

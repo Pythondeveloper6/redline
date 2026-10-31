@@ -21,7 +21,7 @@ from .background import add_background_task
 from .integration import Redline, install
 from .suggest import SQLAlchemyFixSuggester
 
-__version__ = "0.5.0a1"
+__version__ = "0.5.0a2"
 
 __all__ = [
     "Redline",
