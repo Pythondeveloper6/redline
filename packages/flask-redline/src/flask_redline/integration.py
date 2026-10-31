@@ -21,7 +21,7 @@ from redline_core.config import ResolvedConfig, resolve_settings
 from redline_core.environment import refuse_in_production
 from redline_core.explain import ExplainExecutor
 from redline_core.load.control import run_hooks
-from redline_core.storage import SQLiteStore, Store
+from redline_core.storage import Store, store_from_settings
 
 from ._hooks import install_hooks
 from ._middleware import RedlineMiddleware
@@ -178,7 +178,8 @@ class Redline:
         ``werkzeug.exceptions.HTTPException`` (``abort(401)``) to answer with another
         status; it is rendered in the API's error shape.
     ``store``
-        A custom ``Store``; default is the SQLite file at ``storage_path``.
+        A custom ``Store``; default is the SQLite file at ``storage_path`` (or
+        the shared PostgreSQL store at ``storage_url``).
     """
 
     def __init__(
@@ -282,7 +283,7 @@ class Redline:
             if self._shared_recorder
             else self._store
             if self._store is not None
-            else SQLiteStore.from_settings(cfg)
+            else store_from_settings(cfg)
         )
         suggester = SQLAlchemyFixSuggester(None, project_root=cfg.project_root)
         recorder = self._shared_recorder or configure(cfg, store, [suggester])

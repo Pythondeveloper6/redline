@@ -22,7 +22,7 @@ from redline_core.config import resolve_settings
 from redline_core.environment import refuse_in_production
 from redline_core.explain import ExplainExecutor
 from redline_core.load.control import run_hooks
-from redline_core.storage import SQLiteStore, Store
+from redline_core.storage import Store, store_from_settings
 
 from ._middleware import EXCEPTION_KEY, RedlineMiddleware
 from ._security import redline_guard, scope_info
@@ -93,7 +93,8 @@ class RedlinePlugin(InitPluginProtocol):
         loopback clients addressing ``localhost``/``127.0.0.1``/``[::1]``).
         ``HTTPException`` raised by guards is answered in the API's error shape.
     ``store``
-        A custom ``Store``; default is the SQLite file at ``storage_path``.
+        A custom ``Store``; default is the SQLite file at ``storage_path`` (or
+        the shared PostgreSQL store at ``storage_url``).
 
     The plugin object is also the handle: ``plugin.recorder``, ``plugin.store``,
     ``plugin.settings``, ``plugin.add_engine(...)``, ``plugin.close()``.
@@ -130,7 +131,7 @@ class RedlinePlugin(InitPluginProtocol):
         self._engine_arg = engine
         self.engines: dict[str, EngineLike] = {}
         self.loop: asyncio.AbstractEventLoop | None = None
-        self.store: Store = store if store is not None else SQLiteStore.from_settings(cfg)
+        self.store: Store = store if store is not None else store_from_settings(cfg)
         self.suggester = SQLAlchemyFixSuggester(project_root=cfg.project_root)
         self.recorder: Recorder = configure(cfg, self.store, [self.suggester])
         auto_instrument(cfg)
