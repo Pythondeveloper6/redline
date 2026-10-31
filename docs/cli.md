@@ -14,7 +14,7 @@ Redline has two kinds of commands:
 ```text
 redline load SCENARIO [options]       run a load test against a running app
 redline load init ...                 write a scenario file
-redline check record|compare|run|init|show   refactor check: prove a refactor is safe
+redline check record|compare|run|init|show|comment   refactor check: prove a refactor is safe
 redline config                        print the effective configuration
 redline doctor                        check the setup
 redline hash-password                 make a password hash for access = "basic"
@@ -58,6 +58,7 @@ redline check compare SUITE [options]   run it again and compare with a baseline
 redline check run     SUITE [options]   record if there is no baseline file yet, else compare
 redline check init --from-traces [...]  write a suite from recorded read-only traffic
 redline check show    REPORT.json       print a saved report again
+redline check comment REPORT            post a report as the sticky PR comment (GitHub Actions)
 ```
 
 `SUITE` is a `.toml` or `.json` [suite file](refactor-check.md#the-suite-file).
