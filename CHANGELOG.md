@@ -63,8 +63,8 @@ version is below `1.0` the public API may change between minor versions.
   by the current code (`scripts/check_store_upgrade.py`).
 - `scripts/run_tests.py` runs every package suite from the repository root;
   `benchmarks/real_app.py` measures p50/p95 overhead on a running application over HTTP.
-- Documentation: [API stability and deprecation policy](docs/api-stability.md),
-  [threat model](docs/threat-model.md) and [operating Redline](docs/operating.md).
+- Documentation pages: API stability and deprecation policy (`docs/api-stability.md`),
+  threat model (`docs/threat-model.md`) and operating Redline (`docs/operating.md`).
 
 ### Changed (production readiness)
 
