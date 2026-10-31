@@ -15,10 +15,13 @@ from fastapi.params import Depends as DependsParam
 from redline_core import Recorder, Settings, configure
 from redline_core.access import Access
 from redline_core.api import RedlineAPI
+from redline_core.auto_instrument import auto_instrument
 from redline_core.config import ResolvedConfig, resolve_settings
+from redline_core.contrib.starlette_background import instrument_background_tasks
+from redline_core.environment import refuse_in_production
 from redline_core.explain import ExplainExecutor
 from redline_core.load.control import run_hooks
-from redline_core.storage import SQLiteStore, Store
+from redline_core.storage import Store, store_from_settings
 
 from ._middleware import RedlineMiddleware
 from ._security import redline_guard, refuse_false, scope_info
@@ -26,6 +29,7 @@ from ._serialize import instrument_serialization
 from ._sqlalchemy import (
     EngineLike,
     alias_for,
+    auto_engine,
     build_executor,
     instrument_engine,
     name_engines,
@@ -119,7 +123,7 @@ class Redline:
         return alias
 
     def _executor_for(self, alias: str, vendor: str) -> ExplainExecutor | None:
-        engine = self.engines.get(alias)
+        engine = self.engines.get(alias) or auto_engine(alias)
         if engine is None:
             return None
         return build_executor(engine, vendor_of(engine), lambda: self.loop)
@@ -135,6 +139,7 @@ def install(
     app: FastAPI,
     *,
     engine: Any = None,
+    engines: str | None = None,
     settings: Mapping[str, Any] | Settings | None = None,
     prefix: str | None = None,
     dependencies: Sequence[Callable[..., Any] | DependsParam] | None = None,
@@ -146,6 +151,11 @@ def install(
     ``engine``
         A sync ``Engine``, an ``AsyncEngine``, a list of them, or ``{alias: engine}``.
         The first of a list is the ``"default"`` db alias (used by EXPLAIN).
+    ``engines``
+        ``"auto"`` instruments every SQLAlchemy engine created after install (per-user or
+        per-request engines) without registering it, by setting
+        ``instrument_engines="all"``. Engines are held weakly. Default: only the engines
+        passed as ``engine``.
     ``settings``
         A ``Settings`` or a dict of settings (case-insensitive keys). They are the top
         layer over ``redline.toml`` / ``[tool.redline]`` and ``REDLINE_*`` variables
@@ -166,7 +176,8 @@ def install(
         Declarative ``Base``/``registry`` (or a list) for fix suggestions; by default every
         registry SQLAlchemy knows about.
     ``store``
-        A custom ``Store``; default is the SQLite file at ``storage_path``.
+        A custom ``Store``; default is the SQLite file at ``storage_path`` (or
+        the shared PostgreSQL store at ``storage_url``).
     """
     if getattr(app.state, "redline", None) is not None:
         raise RuntimeError("Redline is already installed on this app.")
@@ -174,6 +185,10 @@ def install(
     # with nothing to check.
     resolved = resolve_settings(settings, native_hook=bool(dependencies))
     cfg = resolved.settings
+    if engines not in (None, "auto"):
+        raise ValueError('engines must be "auto" or None')
+    if engines == "auto":
+        cfg = cfg.replace(instrument_engines="all")
     prefix = prefix if prefix is not None else (cfg.mount_path or "/_redline")
     prefix = "/" + prefix.strip("/")
     if prefix == "/":
@@ -183,9 +198,10 @@ def install(
         cfg = cfg.replace(ignore_paths=[*cfg.ignore_paths, own])
     access = Access(cfg, access_explicit=resolved.access_explicit, debug=lambda: bool(app.debug))
 
-    store = store if store is not None else SQLiteStore.from_settings(cfg)
+    store = store if store is not None else store_from_settings(cfg)
     suggester = SQLAlchemyFixSuggester(models, project_root=cfg.project_root)
     recorder = configure(cfg, store, [suggester])
+    auto_instrument(cfg)
     redline = Redline(
         app=app,
         prefix=prefix,
@@ -199,7 +215,7 @@ def install(
     for alias, eng in name_engines(engine).items():
         redline.add_engine(eng, alias)
 
-    deps: list[Any] = [Depends(redline_guard(access, prefix))]
+    deps: list[Any] = [Depends(redline_guard(access, prefix, framework_hook=bool(dependencies)))]
     if dependencies:
         deps.append(refuse_false(dependencies))
     access.log_startup(prefix, "pass install(app, dependencies=[...])")
@@ -221,6 +237,7 @@ def install(
             force_ok=lambda scope: access.may_force(scope_info(scope), debug=bool(app.debug)),
         )
         instrument_serialization()
+        instrument_background_tasks(recorder)
 
     original = app.router.lifespan_context
 
@@ -235,3 +252,15 @@ def install(
     app.router.lifespan_context = lifespan
     app.state.redline = redline
     return redline
+
+
+def install_if_dev(app: FastAPI, **kwargs: Any) -> Redline | None:
+    """:func:`install`, unless the process looks like production.
+
+    Production signals: ``REDLINE_ENV``/``APP_ENV``/``ENV``/``ENVIRONMENT``/``FLASK_ENV``/
+    ``DJANGO_ENV`` set to ``prod`` or ``production``. Then nothing is attached, a warning is
+    logged and ``None`` is returned. ``REDLINE_ALLOW_PRODUCTION=1`` attaches anyway.
+    """
+    if refuse_in_production("fastapi"):
+        return None
+    return install(app, **kwargs)

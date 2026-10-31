@@ -531,6 +531,51 @@ as it is for the app; the check only sends ordinary requests to your routes.
     Baselines are redacted, so committing one is safe to the same extent as committing a
     response fixture.
 
+### The GitHub Action
+
+For the common case the repository root is a composite action. It installs Redline, runs
+`redline check run`, writes the Markdown report to the job summary and keeps **one** sticky
+comment on the pull request up to date (found again through a hidden HTML marker, so reruns
+edit it instead of adding another). Start the app in an earlier step.
+
+```yaml
+permissions:
+  contents: read
+  pull-requests: write
+
+steps:
+  - uses: actions/checkout@v4
+  - run: ./scripts/serve-for-check.sh start        # your app, listening on :8000
+  - uses: Pythondeveloper6/redline@main            # pin a tag or commit in real use
+    with:
+      suite: checks/orders.toml
+      baseline: checks/orders.baseline.json        # compared when it exists, recorded otherwise
+      base-url: http://127.0.0.1:8000
+      fail-on: slower,changed,broken
+```
+
+| Input | Default | Meaning |
+|---|---|---|
+| `suite` | required | Suite file |
+| `baseline` | `<suite>.baseline.json` | Compared with when present, recorded there when absent |
+| `base-url` | the suite's `base_url` | The running app |
+| `fail-on` | `slower,changed,broken` | Verdicts that fail the job, or `none` |
+| `python-version` | `3.12` | Python used to run Redline |
+| `package` | `redline-core[load]` | pip requirement; pin a version or use a git URL |
+| `comment` | `true` | Post the sticky comment (pull request events only) |
+| `github-token` | `github.token` | Needs `pull-requests: write`; without it the comment is skipped |
+| `marker-id` | `redline-check` | Use one per suite when several suites comment on one PR |
+| `extra-args` | | Extra `redline check run` arguments |
+
+The step outputs `exit-code` and `report` (the JSON path). The comment is posted by
+`redline check comment REPORT` (a `--json` report or a `--markdown` file; `--dry-run` prints
+the body, `--no-comment` only writes the job summary). It does nothing outside
+`pull_request` events, and a failed API call (for example the read-only token of a fork PR)
+only prints a warning: the check's own verdict decides the job result. The token is sent
+only to `GITHUB_API_URL` over https (plain http only to a loopback address), redirects are
+never followed, and `extra-args` is split on whitespace but never glob-expanded or
+evaluated; still, do not build it from pull-request-controlled text such as branch names.
+
 A baseline produced in CI can be opened in the UI: `POST api/checks/baselines/import` takes
 the JSON file (see [the HTTP API](http-api.md#checks)) and the run appears on the suite's
 page.

@@ -5,6 +5,7 @@ from __future__ import annotations
 import atexit
 import contextlib
 import logging
+import os
 import re
 import threading
 from collections.abc import Callable, Mapping
@@ -15,10 +16,12 @@ from flask import Flask, current_app, has_app_context
 from redline_core import Recorder, Settings, configure, ui
 from redline_core.access import Access
 from redline_core.api import RedlineAPI
+from redline_core.auto_instrument import auto_instrument
 from redline_core.config import ResolvedConfig, resolve_settings
+from redline_core.environment import refuse_in_production
 from redline_core.explain import ExplainExecutor
 from redline_core.load.control import run_hooks
-from redline_core.storage import SQLiteStore, Store
+from redline_core.storage import Store, store_from_settings
 
 from ._hooks import install_hooks
 from ._middleware import RedlineMiddleware
@@ -26,6 +29,7 @@ from ._security import environ_info
 from ._sqlalchemy import (
     EngineLike,
     alias_for,
+    auto_engine,
     build_executor,
     instrument_engine,
     name_engines,
@@ -35,7 +39,7 @@ from .blueprint import build_blueprint
 from .cli import redline_cli
 from .suggest import SQLAlchemyFixSuggester
 
-__all__ = ["Redline"]
+__all__ = ["Redline", "install_if_dev"]
 
 logger = logging.getLogger("redline")
 
@@ -129,7 +133,7 @@ class _Runtime:
 
     def _executor_for(self, alias: str, vendor: str) -> ExplainExecutor | None:
         self.discover_engines()
-        engine = self.engines.get(alias)
+        engine = self.engines.get(alias) or auto_engine(alias)
         if engine is None:
             return None
         return build_executor(engine, vendor_of(engine), lambda: None)
@@ -152,6 +156,11 @@ class Redline:
         A SQLAlchemy ``Engine``, a list of them, or ``{alias: engine}``; the first of a list
         is the ``"default"`` db alias (used by EXPLAIN). When omitted and Flask-SQLAlchemy
         is set up on the app, its engines are instrumented automatically.
+    ``engines``
+        ``"auto"`` instruments every SQLAlchemy engine created after install (per-user or
+        per-request engines) without registering it, by setting
+        ``instrument_engines="all"``. Engines are held weakly. Default: only the engines
+        passed as ``engine``.
     ``settings``
         A ``Settings`` or a dict of settings (case-insensitive keys). ``app.config["REDLINE"]``
         (a dict) is merged underneath a dict given here; a ``Settings`` instance replaces it.
@@ -170,7 +179,8 @@ class Redline:
         ``werkzeug.exceptions.HTTPException`` (``abort(401)``) to answer with another
         status; it is rendered in the API's error shape.
     ``store``
-        A custom ``Store``; default is the SQLite file at ``storage_path``.
+        A custom ``Store``; default is the SQLite file at ``storage_path`` (or
+        the shared PostgreSQL store at ``storage_url``).
     """
 
     def __init__(
@@ -178,6 +188,7 @@ class Redline:
         app: Flask | None = None,
         *,
         engine: Any = None,
+        engines: str | None = None,
         settings: Mapping[str, Any] | Settings | None = None,
         url_prefix: str | None = None,
         permission: Callable[[Any], Any] | None = None,
@@ -201,6 +212,9 @@ class Redline:
         self.url_prefix = url_prefix or "/_redline"
         self.permission = permission
         self._engine = engine
+        if engines not in (None, "auto"):
+            raise ValueError('engines must be "auto" or None')
+        self._auto_engines = engines == "auto"
         self._settings = settings
         self._store = store
         self.app: Flask | None = None
@@ -257,6 +271,8 @@ class Redline:
             settings = {**(app.config.get(CONFIG_KEY) or {}), **(settings or {})}
         resolved = resolve_settings(settings, native_hook=self.permission is not None)
         cfg = resolved.settings
+        if self._auto_engines:
+            cfg = cfg.replace(instrument_engines="all")
         prefix = self._url_prefix or "/" + (cfg.mount_path or "/_redline").strip("/")
         self.url_prefix = prefix
         own = rf"^{re.escape(prefix)}(/|$)"
@@ -268,10 +284,11 @@ class Redline:
             if self._shared_recorder
             else self._store
             if self._store is not None
-            else SQLiteStore.from_settings(cfg)
+            else store_from_settings(cfg)
         )
         suggester = SQLAlchemyFixSuggester(None, project_root=cfg.project_root)
         recorder = self._shared_recorder or configure(cfg, store, [suggester])
+        auto_instrument(cfg)
 
         permission = self.permission
         runtime = _Runtime(
@@ -309,3 +326,20 @@ class Redline:
             runtime.discover_engines()
         if self._shared_recorder is None:
             atexit.register(runtime.close)
+
+
+def install_if_dev(app: Flask, **kwargs: Any) -> Redline | None:
+    """``Redline(app, **kwargs)``, unless the process looks like production.
+
+    Production signals: ``REDLINE_ENV``/``APP_ENV``/``ENV``/``ENVIRONMENT``/``FLASK_ENV``/
+    ``DJANGO_ENV`` set to ``prod`` or ``production`` in the environment or in ``app.config``
+    (``ENV``, ``ENVIRONMENT``, ``APP_ENV``). Then nothing is attached, a warning is logged
+    and ``None`` is returned. ``REDLINE_ALLOW_PRODUCTION=1`` attaches anyway.
+    """
+    environ = dict(os.environ)
+    for key in ("ENV", "ENVIRONMENT", "APP_ENV"):
+        if app.config.get(key):
+            environ[key] = str(app.config[key])
+    if refuse_in_production("flask", environ):
+        return None
+    return Redline(app, **kwargs)

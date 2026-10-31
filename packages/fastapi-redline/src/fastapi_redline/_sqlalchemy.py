@@ -3,6 +3,7 @@
 from redline_core.contrib.sqlalchemy import (
     EngineLike,
     alias_for,
+    auto_engine,
     build_executor,
     instrument_engine,
     name_engines,
@@ -12,6 +13,7 @@ from redline_core.contrib.sqlalchemy import (
 __all__ = [
     "EngineLike",
     "alias_for",
+    "auto_engine",
     "build_executor",
     "instrument_engine",
     "name_engines",

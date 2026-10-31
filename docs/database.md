@@ -130,6 +130,37 @@ Before dropping anything:
 
 Redline only reads statistics. It never runs `DROP INDEX` for you.
 
+MySQL is qualified against live servers with the pymysql, aiomysql and asyncmy drivers:
+EXPLAIN findings, verified index suggestions and the recovery from a killed connection.
+
+## Stored procedures
+
+Calls to stored procedures are a query kind of their own. `EXEC`/`EXECUTE [schema].[proc] ...`
+(SQL Server) and `CALL proc(...)` (MySQL, PostgreSQL, also the ODBC `{CALL proc(?)}` form)
+are recorded with `query_kind: "procedure"` and the procedure name (`dbo.usp_orders`) on the
+span. Their fingerprint is the procedure alone (`EXEC dbo.usp_orders`), so the SQL list and
+the [index advisor](#index-advisor) workload aggregate per procedure whatever arguments it
+was called with. Dynamic-SQL runners such as `sp_executesql` are not named and keep their
+normal fingerprint.
+
+Detectors treat procedure calls with care, because Redline cannot see whether a procedure
+reads or writes:
+
+- **N+1** still groups repeated calls from one line of code (`N+1: 24 queries calling
+  procedure dbo.usp_item_for_order`) and suggests a set-based call.
+- **Duplicate queries** report repeated identical calls as `info` only, never a warning.
+- Procedures are never EXPLAINed.
+
+### Ignoring session housekeeping
+
+Statements that connection setup runs on every checkout (`EXEC sp_set_session_context ...`,
+`SET search_path ...`, `SET NAMES ...`) would otherwise flood every trace and inflate query
+counts. They are skipped by default through the [`ignore_sql`](settings.md) setting, a
+list of regexes; a batch is only ignored when all of its statements match. Replace the
+list to ignore more (`ignore_sql = ["^SET\\s", "^EXEC dbo\\.usp_audit_login"]`) or use `[]` to
+record everything. Failed statements are always recorded, and
+[session-state tracking](settings.md) still observes ignored statements.
+
 ## From the API
 
 ```text
