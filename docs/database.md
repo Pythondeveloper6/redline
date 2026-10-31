@@ -130,6 +130,9 @@ Before dropping anything:
 
 Redline only reads statistics. It never runs `DROP INDEX` for you.
 
+MySQL is qualified against live servers with the pymysql, aiomysql and asyncmy drivers:
+EXPLAIN findings, verified index suggestions and the recovery from a killed connection.
+
 ## Stored procedures
 
 Calls to stored procedures are a query kind of their own. `EXEC`/`EXECUTE [schema].[proc] ...`

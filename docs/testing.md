@@ -16,6 +16,10 @@ request/transaction/privacy cases, plans and compile checks, a real Redis/prefor
 and browser tests of the built UI. It also checks demos, docs, lint, package metadata and
 fresh wheel installation. Integration skips or missing reports fail the run.
 
+The MySQL cases (pymysql, aiomysql and asyncmy drivers, EXPLAIN, index advice, killed
+connections) also run on every push in the lightweight `mysql` CI job against a plain
+`mysql:8.4` service, without the full Compose stack; a skipped test fails that job.
+
 `examples/testing/results/summary.json` must show `qualified: true` for the current run,
 and the Compose command must exit zero. Results are ignored by Git. Each run keeps
 separate logs, JUnit reports and actual dependency versions. Browser screenshots support
