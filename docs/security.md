@@ -346,7 +346,8 @@ Never expose it with a dependency or permission that lets everyone in, or `acces
 
 - The file is **not encrypted**. On POSIX systems the store directory Redline creates is
   `0700`, and the database, its `-wal`/`-shm` files and the load-run files (`runs/`) are
-  `0600`; an older, world-readable database is tightened when it is opened. A directory
+  `0600`, as is a page written by `redline export --html`. These files are never written
+  through a symlink. An older, world-readable database is tightened when it is opened. A directory
   that already existed (for example when `storage_path` is in your project root) keeps its
   permissions. Nothing changes on Windows.
 - **Never commit it.** A store directory Redline creates (and `.redline/`) gets a

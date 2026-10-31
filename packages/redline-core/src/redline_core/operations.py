@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 
@@ -63,7 +64,10 @@ def _export_html(args, out, err):
                 print("No recording or load run with that id", file=err)
                 return 1
             page = report_html.render_run(run, redactor)
-        with open(args.html, "w", encoding="utf-8") as fh:
+        from .storage.private import open_private
+
+        # 0600 and no symlink following: the page holds (redacted) captured data
+        with os.fdopen(open_private(args.html, "w"), "w", encoding="utf-8") as fh:
             fh.write(page)
         print(f"wrote {args.html}", file=out)
         return 0
