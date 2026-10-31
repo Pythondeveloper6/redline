@@ -280,7 +280,7 @@ def query_requirements(
 def _index_name(*parts: str) -> str:
     name = re.sub(r"\W+", "_", "_".join(parts)).strip("_").lower()
     if len(name) > 63:
-        digest = hashlib.sha1(name.encode("utf-8")).hexdigest()[:8]
+        digest = hashlib.sha1(name.encode("utf-8"), usedforsecurity=False).hexdigest()[:8]
         name = f"{name[:54]}_{digest}"
     return name
 

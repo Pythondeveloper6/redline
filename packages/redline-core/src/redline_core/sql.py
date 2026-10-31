@@ -196,7 +196,7 @@ def fingerprint(sql: str) -> str:
 
 def fingerprint_hash(sql: str) -> str:
     """A short stable hash of :func:`fingerprint` (16 hex chars)."""
-    return hashlib.sha1(fingerprint(sql).encode("utf-8")).hexdigest()[:16]
+    return hashlib.sha1(fingerprint(sql).encode("utf-8"), usedforsecurity=False).hexdigest()[:16]
 
 
 def truncate_name(text: str, limit: int = 120) -> str:

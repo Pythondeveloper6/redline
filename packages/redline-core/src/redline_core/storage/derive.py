@@ -74,7 +74,9 @@ def fingerprint_key(fp: str) -> str:
     if key is None:
         if len(_FP_KEYS) > 4_096:
             _FP_KEYS.clear()
-        key = _FP_KEYS[fp] = hashlib.sha1(fp.encode("utf-8")).hexdigest()[:16]
+        key = _FP_KEYS[fp] = hashlib.sha1(fp.encode("utf-8"), usedforsecurity=False).hexdigest()[
+            :16
+        ]
     return key
 
 
