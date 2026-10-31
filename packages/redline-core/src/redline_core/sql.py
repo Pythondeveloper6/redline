@@ -161,6 +161,7 @@ def _compiled(patterns: tuple[str, ...]) -> tuple[re.Pattern[str], ...]:
     return tuple(re.compile(p, re.IGNORECASE) for p in patterns)
 
 
+@lru_cache(maxsize=4096)
 def is_ignored(sql: str, patterns: tuple[str, ...]) -> bool:
     """Whether every statement of ``sql`` matches one of the ``ignore_sql`` ``patterns``.
 
