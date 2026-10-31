@@ -312,7 +312,7 @@ flask_redline.Redline(flask_app, recorder=outer_redline.recorder, mode="nested")
 ```
 
 An active outer recording receives Flask route/view spans and errors rather than a second
-trace. The adapter test uses Starlette WSGIMiddleware and its copied context. It does not
+trace. The adapter test uses the a2wsgi WSGI bridge and its copied context. It does not
 claim equivalent behavior for every WSGI/ASGI bridge.
 
 ## Tests, import checks and explicit export
