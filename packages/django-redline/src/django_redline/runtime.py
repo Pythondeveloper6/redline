@@ -20,6 +20,7 @@ from django.dispatch import receiver
 
 from redline_core.access import Access
 from redline_core.api import RedlineAPI
+from redline_core.auto_instrument import auto_instrument
 from redline_core.conf import Settings, SettingsError
 from redline_core.config import ResolvedConfig
 from redline_core.diagnostics import capture_failure
@@ -77,6 +78,7 @@ def build_runtime(settings: Settings | None = None) -> Runtime:
     store, owned = build_store(options.store, core)
     suggester = DjangoFixSuggester(project_root=core.project_root)
     recorder = configure(core, store, [suggester])
+    auto_instrument(core)
     launcher = stopper = None
     if core.load_from_ui:  # importing the load tester only when it can be used
         from redline_core.load.control import run_hooks

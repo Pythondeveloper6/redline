@@ -15,6 +15,7 @@ from flask import Flask, current_app, has_app_context
 from redline_core import Recorder, Settings, configure, ui
 from redline_core.access import Access
 from redline_core.api import RedlineAPI
+from redline_core.auto_instrument import auto_instrument
 from redline_core.config import ResolvedConfig, resolve_settings
 from redline_core.explain import ExplainExecutor
 from redline_core.load.control import run_hooks
@@ -283,6 +284,7 @@ class Redline:
         )
         suggester = SQLAlchemyFixSuggester(None, project_root=cfg.project_root)
         recorder = self._shared_recorder or configure(cfg, store, [suggester])
+        auto_instrument(cfg)
 
         permission = self.permission
         runtime = _Runtime(

@@ -337,3 +337,14 @@ def test_checks_suites_and_runs(make_app, monkeypatch):
                "pad": "x" * (10 * 1000 * 1000 + 10)}  # fmt: skip
         r = c.post("/_redline/api/checks/baselines/import", json=big)  # > Litestar's 10 MB
         assert r.status_code == 201, r.text
+
+
+def test_plugin_applies_auto_instrument_setting(monkeypatch, tmp_path):
+    from litestar_redline import RedlinePlugin
+
+    seen = []
+    monkeypatch.setattr(
+        "litestar_redline.plugin.auto_instrument", lambda s: seen.append(s.auto_instrument)
+    )
+    RedlinePlugin(settings={"storage_path": str(tmp_path / "r.db"), "auto_instrument": "on"})
+    assert seen == ["on"]
