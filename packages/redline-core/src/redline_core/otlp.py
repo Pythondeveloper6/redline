@@ -36,6 +36,7 @@ def _root_span(trace, root_id, otel_trace_id):
         "endTimeUnixNano": str(start + int(trace.duration_ms * 1_000_000)),
         "attributes": _attributes(
             [
+                ("redline.trace_id", trace.id),
                 ("redline.framework", trace.framework),
                 ("redline.method", trace.method),
                 ("redline.status", str(trace.status)),
@@ -59,6 +60,7 @@ def _sql_span(trace, span, root_id, otel_trace_id, include_sql):
     attributes = [
         ("db.system", span.data.get("vendor") or "other"),
         ("db.operation", operation),
+        ("redline.trace_id", trace.id),
         ("redline.db_alias", span.data.get("db_alias") or "default"),
         ("redline.rows", str(span.data.get("rows", ""))),
     ]

@@ -342,6 +342,9 @@ class SQLiteStore(CheckStoreMixin):
         self.queue_size = max(1, queue_size)
         self.dropped = 0
         self.written = 0
+        #: ``dropped`` split by reason (they always add up), plus failed write batches.
+        self.dropped_by_reason = {"queue_full": 0, "write_failed": 0, "closed": 0}
+        self.write_failures = 0
         self._since_prune = 0
         self._closed = False
         self._runs_cache: tuple[float, set[str]] | None = None
@@ -409,6 +412,8 @@ class SQLiteStore(CheckStoreMixin):
         self._thread = None
         self.dropped = 0
         self.written = 0
+        self.dropped_by_reason = dict.fromkeys(self.dropped_by_reason, 0)
+        self.write_failures = 0
         self._since_prune = 0
         _INHERITED.append(self._conn)
         if self._closed:
@@ -464,19 +469,36 @@ class SQLiteStore(CheckStoreMixin):
         """Enqueue ``trace`` (never blocks); dropped and counted when the queue is full."""
         self._check_pid()
         if self._closed:
-            self.dropped += 1
+            self._drop("closed")
             return
         if not self.background:
             try:
                 self._write([trace])
             except Exception:
-                self.dropped += 1
+                self.write_failures += 1
+                self._drop("write_failed")
                 raise
             return
         try:
             self._ensure_writer().put_nowait(trace)
         except queue.Full:
-            self.dropped += 1
+            self._drop("queue_full")
+
+    def _drop(self, reason: str, count: int = 1) -> None:
+        self.dropped += count
+        self.dropped_by_reason[reason] += count
+
+    def health(self) -> dict[str, Any]:
+        """Writer counters for ``api/metrics``: queue depth and capacity, traces written,
+        drops by reason and failed write batches."""
+        q = self._queue
+        return {
+            "queue_depth": q.qsize() if q is not None else 0,
+            "queue_capacity": self.queue_size,
+            "written": self.written,
+            "dropped": dict(self.dropped_by_reason),
+            "write_failures": self.write_failures,
+        }
 
     def flush(self, timeout: float | None = 5.0) -> bool:
         """Wait until everything enqueued so far is written. ``False`` on timeout."""
@@ -516,7 +538,8 @@ class SQLiteStore(CheckStoreMixin):
                 try:
                     self._write(batch)
                 except Exception as exc:  # keep the writer alive whatever happens
-                    self.dropped += len(batch)
+                    self.write_failures += 1
+                    self._drop("write_failed", len(batch))
                     logger.error(
                         "Redline writer dropped %d trace(s) (%s)", len(batch), type(exc).__name__
                     )
@@ -1212,7 +1235,7 @@ class SQLiteStore(CheckStoreMixin):
             try:
                 self._ensure_writer().put_nowait(("lifecycle", rows, now))
             except queue.Full:
-                self.dropped += 1
+                self._drop("queue_full")
             return
         self._write_lifecycle(rows, now)
 

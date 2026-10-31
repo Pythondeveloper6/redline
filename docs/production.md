@@ -102,6 +102,31 @@ privacy audit and does not prove an existing store is clean. With
 codes without formatting exception messages or tracebacks; project exception locals
 are also disabled. This preserves failure counts while reducing free-text exposure.
 
+## Refuse to attach in production
+
+Each adapter has an `install_if_dev` entry point that attaches Redline only when the process
+does not look like production. It returns `None` (and logs a warning on the `redline`
+logger) when `REDLINE_ENV`, `APP_ENV`, `ENV`, `ENVIRONMENT`, `FLASK_ENV` or `DJANGO_ENV` is
+`prod` or `production`, and, for Django, when `DEBUG` is false. `REDLINE_ALLOW_PRODUCTION=1`
+overrides it (also logged).
+
+```python
+from fastapi_redline import install_if_dev   # flask_redline: install_if_dev(app, ...)
+install_if_dev(app, engine=engine)
+
+from litestar_redline import install_if_dev  # returns the plugin, or None
+plugin = install_if_dev(engine=engine)
+app = Litestar([...], plugins=[plugin] if plugin else [])
+
+# Django: settings.py, then urls.py
+from django_redline import install_if_dev, urls_if_dev
+install_if_dev(globals())                    # adds the app and middleware
+urlpatterns += urls_if_dev("redline/")       # [] when refused
+```
+
+This is a safety net, not access control: it does not replace the `access` settings, and
+production recording is still configured with the [production presets](#start-with-recording-and-stored-data-inspection).
+
 ## Network and operator access
 
 Expose the application normally, but place the Redline mount behind the intended operator
