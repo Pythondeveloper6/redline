@@ -8,7 +8,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). While the
 version is below `1.0` the public API may change between minor versions.
 
-## Unreleased: 0.5.0a1
+## Unreleased: 0.5.0a2
+
+### Added
+
+- `redline doctor --production --strict --json` checks a recording-only deployment
+  policy without changing configuration. Warnings fail strict checks; JSON remains
+  machine-readable when configuration cannot load.
+- Authenticated `GET api/health` exposes process-local recorder/storage health without
+  querying the trace database. Meta/Recording health also show queue pressure, capture
+  failures, write/flush/shutdown failures and reason-specific dropped-item counters.
+
+### Fixed
+
+- Serialize save admission with shutdown so accepted traces cannot land behind a stop
+  marker. Bounded close returns a completion result and reports discarded queued work.
+- A timed-out shutdown leaves an active writer's connection alone; the writer closes it
+  after draining/stopping. Flush no longer reports success for abandoned queued work.
+- Writer startup can retry after thread-start failure. Writer/logging failures preserve
+  later recording attempts, and counters are protected and reset for a forked process.
+- Internal API exception messages are withheld when error-detail capture is disabled.
 
 ### Added (production readiness)
 
@@ -78,12 +97,14 @@ version is below `1.0` the public API may change between minor versions.
 - Adapters build their default store with `redline_core.storage.store_from_settings`;
   `SQLiteStore.from_settings` returns the PostgreSQL store when `storage_url` is set.
 - `REDLINE_ENV` and `REDLINE_ALLOW_PRODUCTION` are no longer reported as unknown settings.
-- `CONTRACT.md` is now a historical design record; public API is defined in
-  `docs/api-stability.md`. Internal planning files left the public tree.
+- Public API is defined in `docs/api-stability.md`; the internal design contract and
+  planning files left the public tree.
 
 ### Fixed (production readiness)
 
 - Tests no longer use the deprecated `starlette.middleware.wsgi` (now `a2wsgi`).
+
+## 0.5.0a1 development baseline
 
 ### Added
 

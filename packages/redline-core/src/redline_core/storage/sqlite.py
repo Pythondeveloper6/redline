@@ -346,9 +346,6 @@ class SQLStore(CheckStoreMixin):
         self.queue_size = max(1, queue_size)
         self.dropped = 0
         self.written = 0
-        #: ``dropped`` split by reason (they always add up), plus failed write batches.
-        self.dropped_by_reason = {"queue_full": 0, "write_failed": 0, "closed": 0}
-        self.write_failures = 0
         self._since_prune = 0
         self._closed = False
         self._runs_cache: tuple[float, set[str]] | None = None
@@ -357,6 +354,8 @@ class SQLStore(CheckStoreMixin):
         self._last_lifecycle_at = 0.0
         self._lock = threading.RLock()
         self._start_lock = threading.Lock()
+        self._admission_lock = threading.Lock()
+        self._reset_health()
         self._queue: queue.Queue[Any] | None = None
         self._thread: threading.Thread | None = None
         self._pid = os.getpid()
@@ -380,15 +379,16 @@ class SQLStore(CheckStoreMixin):
         self._pid = os.getpid()
         self._lock = threading.RLock()
         self._start_lock = threading.Lock()
+        self._admission_lock = threading.Lock()
+        self._reset_health()
         self._queue = None
         self._thread = None
         self.dropped = 0
         self.written = 0
-        self.dropped_by_reason = dict.fromkeys(self.dropped_by_reason, 0)
-        self.write_failures = 0
         self._since_prune = 0
         self._park_inherited(self._conn)
         if self._closed:
+            self._connection_closed = True
             return
         try:
             self._conn = self._connect()
@@ -412,32 +412,105 @@ class SQLStore(CheckStoreMixin):
                 self._thread = threading.Thread(
                     target=self._run, args=(self._queue,), name="redline-writer", daemon=True
                 )
-                self._thread.start()
+                try:
+                    self._thread.start()
+                except Exception:
+                    self._queue = self._thread = None
+                    raise
             return self._queue
+
+    def _reset_health(self) -> None:
+        self._health_lock = threading.Lock()
+        self._connection_closed = False
+        self._health = {
+            "dropped_by_reason": {},
+            "write_failures": 0,
+            "flush_failures": 0,
+            "last_write_error_type": None,
+            "last_flush_succeeded": None,
+            "shutdown_complete": None,
+            "shutdown_failures": 0,
+        }
+
+    def _drop(self, reason: str, count: int = 1, error: Exception | None = None) -> None:
+        with self._health_lock:
+            self.dropped += count
+            reasons = self._health["dropped_by_reason"]
+            reasons[reason] = reasons.get(reason, 0) + count
+            if error is not None:
+                self._health["write_failures"] += 1
+                self._health["last_write_error_type"] = type(error).__name__[:64]
+
+    def operational_health(self) -> dict[str, Any]:
+        """Process-local counters; never query SQLite or return exception messages."""
+        self._check_pid()
+        with self._health_lock:
+            metrics = {**self._health, "dropped_by_reason": dict(self._health["dropped_by_reason"])}
+            metrics.update(dropped=self.dropped, written=self.written)
+        q, thread = self._queue, self._thread
+        depth = q.qsize() if q is not None else 0
+        alive = thread.is_alive() if thread is not None else False
+        degraded = bool(
+            metrics["dropped"]
+            or metrics["flush_failures"]
+            or metrics["shutdown_complete"] is False
+            or metrics["shutdown_failures"]
+            or (depth and not alive)
+        )
+        return {
+            **metrics,
+            "scope": "process",
+            "pid": self._pid,
+            "status": "degraded" if degraded else "closed" if self._closed else "ok",
+            "background": self.background,
+            "closed": self._closed,
+            "queue_depth": depth,
+            "queue_capacity": self.queue_size,
+            "writer_started": thread is not None,
+            "writer_alive": alive,
+        }
+
+    def _enqueue(self, item: Any) -> None:
+        with self._admission_lock:
+            if self._closed:
+                self._drop("closed")
+                return
+            try:
+                self._ensure_writer().put_nowait(item)
+            except queue.Full:
+                self._drop("queue_full")
+            except Exception:
+                self._drop("enqueue_failure")
+                raise
 
     # writing ---------------------------------------------------------------
     def save(self, trace: Trace) -> None:
         """Enqueue ``trace`` (never blocks); dropped and counted when the queue is full."""
         self._check_pid()
-        if self._closed:
-            self._drop("closed")
-            return
-        if not self.background:
-            try:
-                self._write([trace])
-            except Exception:
-                self.write_failures += 1
-                self._drop("write_failed")
-                raise
-            return
-        try:
-            self._ensure_writer().put_nowait(trace)
-        except queue.Full:
-            self._drop("queue_full")
+        if self.background:
+            self._enqueue(trace)
+        else:
+            with self._admission_lock:
+                if self._closed:
+                    self._drop("closed")
+                    return
+                try:
+                    self._write([trace])
+                except Exception as exc:
+                    self._drop("write_failure", error=exc)
+                    raise
 
-    def _drop(self, reason: str, count: int = 1) -> None:
-        self.dropped += count
-        self.dropped_by_reason[reason] += count
+    @property
+    def dropped_by_reason(self) -> dict[str, int]:
+        """``dropped`` split by reason (they always add up)."""
+        with self._health_lock:
+            return dict(self._health["dropped_by_reason"])
+
+    @property
+    def write_failures(self) -> int:
+        """Failed write batches (each may drop several traces)."""
+        with self._health_lock:
+            return int(self._health["write_failures"])
 
     def health(self) -> dict[str, Any]:
         """Writer counters for ``api/metrics``: queue depth and capacity, traces written,
@@ -447,21 +520,49 @@ class SQLStore(CheckStoreMixin):
             "queue_depth": q.qsize() if q is not None else 0,
             "queue_capacity": self.queue_size,
             "written": self.written,
-            "dropped": dict(self.dropped_by_reason),
+            # The usual reasons are always present (zero) so dashboards see the series.
+            "dropped": {"queue_full": 0, "write_failure": 0, "closed": 0, **self.dropped_by_reason},
             "write_failures": self.write_failures,
         }
 
     def flush(self, timeout: float | None = 5.0) -> bool:
         """Wait until everything enqueued so far is written. ``False`` on timeout."""
         self._check_pid()
-        if self._queue is None or self._thread is None or not self._thread.is_alive():
-            return True
+        if timeout is not None and timeout < 0:
+            raise ValueError("timeout must not be negative")
+        deadline = None if timeout is None else time.monotonic() + timeout
         marker = threading.Event()
-        try:
-            self._queue.put(marker, timeout=timeout)
-        except queue.Full:
-            return False
-        return marker.wait(timeout)
+        while True:
+            remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+            with self._admission_lock:
+                q, thread = self._queue, self._thread
+                if q is None:
+                    return self._flush_result(True)
+                alive = thread is not None and thread.is_alive()
+                if not alive:
+                    return self._flush_result(q.empty())
+                if not self._closed:
+                    try:
+                        q.put_nowait(marker)
+                    except queue.Full:
+                        pass
+                    else:
+                        break
+            if self._closed and thread is not None:
+                thread.join(remaining)
+                return self._flush_result(not thread.is_alive() and q.empty())
+            if remaining is not None and remaining <= 0:
+                return self._flush_result(False)
+            time.sleep(0.01 if remaining is None else min(0.01, remaining))
+        remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+        return self._flush_result(marker.wait(remaining))
+
+    def _flush_result(self, success: bool) -> bool:
+        with self._health_lock:
+            self._health["last_flush_succeeded"] = success
+            if not success:
+                self._health["flush_failures"] += 1
+        return success
 
     def _run(self, q: queue.Queue[Any]) -> None:
         while True:
@@ -489,19 +590,23 @@ class SQLStore(CheckStoreMixin):
                 try:
                     self._write(batch)
                 except Exception as exc:  # keep the writer alive whatever happens
-                    self.write_failures += 1
-                    self._drop("write_failed", len(batch))
-                    logger.error(
-                        "Redline writer dropped %d trace(s) (%s)", len(batch), type(exc).__name__
-                    )
+                    self._drop("write_failure", len(batch), exc)
+                    capture_failure("Redline writer dropped %d trace(s)", len(batch))
             for _kind, rows, now in lifecycle:
                 try:
                     self._write_lifecycle(rows, now)
                 except Exception as exc:
-                    logger.error("Redline writer dropped lifecycle gauges (%s)", type(exc).__name__)
+                    self._drop("lifecycle_write_failure", error=exc)
+                    capture_failure("Redline writer dropped lifecycle gauges")
             for m in markers:
                 m.set()
             if stop:
+                if self._closed:
+                    with self._lock:
+                        self._conn.close()
+                        self._connection_closed = True
+                    with self._health_lock:
+                        self._health["shutdown_complete"] = True
                 return
 
     def _known_runs(self) -> set[str]:
@@ -632,7 +737,8 @@ class SQLStore(CheckStoreMixin):
             except BaseException:
                 c.execute("ROLLBACK")
                 raise
-        self.written += len(traces)
+        with self._health_lock:
+            self.written += len(traces)
         self._since_prune += len(traces)
         if self._since_prune >= self.prune_every:
             self._since_prune = 0
@@ -1175,12 +1281,11 @@ class SQLStore(CheckStoreMixin):
             return
         self._last_lifecycle, self._last_lifecycle_at = signature, now
         if self.background:
-            try:
-                self._ensure_writer().put_nowait(("lifecycle", rows, now))
-            except queue.Full:
-                self._drop("queue_full")
+            self._enqueue(("lifecycle", rows, now))
             return
-        self._write_lifecycle(rows, now)
+        with self._admission_lock:
+            if not self._closed:
+                self._write_lifecycle(rows, now)
 
     def _write_lifecycle(self, rows, now):
         self._check_pid()
@@ -1695,20 +1800,78 @@ class SQLStore(CheckStoreMixin):
             out.append(d)
         return out
 
-    def close(self) -> None:
-        """Flush pending writes, stop the writer and close the connection."""
+    def close(self, *, timeout: float = 10.0) -> bool:
+        """Stop admission and drain within a deadline; False means shutdown is incomplete.
+
+        A live writer owns its connection until it exits. Pending work discarded when
+        the deadline expires is counted; an in-flight batch may still complete later.
+        """
         self._check_pid()
-        if self._closed:
-            return
-        self._closed = True
-        if self._queue is not None and self._thread is not None:
+        if timeout < 0:
+            raise ValueError("timeout must not be negative")
+        deadline = time.monotonic() + timeout
+        if not self._admission_lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
+            with self._health_lock:
+                self._health["shutdown_complete"] = False
+                self._health["shutdown_failures"] += 1
+            return False
+        try:
+            if self._connection_closed:
+                return True
+            already_closed = self._closed
+            self._closed = True
+        finally:
+            self._admission_lock.release()
+        q, thread = self._queue, self._thread
+        if q is not None and thread is not None and thread.is_alive():
+            if not already_closed:
+                try:
+                    q.put(None, timeout=max(0.0, deadline - time.monotonic()))
+                except queue.Full:
+                    # No new producers can enter. Make room for the stop marker without
+                    # claiming that queued traces were persisted.
+                    discarded = 0
+                    while True:
+                        try:
+                            item = q.get_nowait()
+                        except queue.Empty:
+                            break
+                        if item is not None and not isinstance(item, threading.Event):
+                            discarded += 1
+                    if discarded:
+                        self._drop("shutdown_timeout", discarded)
+                    q.put_nowait(None)
+            thread.join(max(0.0, deadline - time.monotonic()))
+            if thread.is_alive():
+                with self._health_lock:
+                    self._health["shutdown_complete"] = False
+                    self._health["shutdown_failures"] += 1
+                return False  # Do not invoke application logging handlers on the close path.
+        elif q is not None:
+            discarded = 0
+            while True:
+                try:
+                    item = q.get_nowait()
+                except queue.Empty:
+                    break
+                if item is not None and not isinstance(item, threading.Event):
+                    discarded += 1
+            if discarded:
+                self._drop("writer_unavailable", discarded)
+        if not self._connection_closed:
+            if not self._lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
+                with self._health_lock:
+                    self._health["shutdown_complete"] = False
+                    self._health["shutdown_failures"] += 1
+                return False
             try:
-                self._queue.put(None, timeout=5.0)
-            except queue.Full:  # pragma: no cover - writer wedged
-                pass
-            self._thread.join(timeout=10.0)
-        with self._lock:
-            self._conn.close()
+                self._conn.close()
+                self._connection_closed = True
+            finally:
+                self._lock.release()
+        with self._health_lock:
+            self._health["shutdown_complete"] = True
+        return True
 
     def __enter__(self) -> Self:
         return self

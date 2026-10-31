@@ -18,7 +18,7 @@ def test_metrics_text(make_env):
     assert r.status_code == 200
     assert r.headers["content-type"].startswith("text/plain; version=0.0.4")
     assert "# TYPE redline_traces_saved_total counter" in r.text
-    assert 'redline_traces_dropped_total{reason="write_failed"} 0' in r.text
+    assert 'redline_traces_dropped_total{reason="write_failure"} 0' in r.text
 
 
 def test_metrics_follow_the_access_policy(make_env):

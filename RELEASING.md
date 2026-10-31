@@ -39,7 +39,7 @@ the wheels. **The default ends with verified build artifacts. It does not publis
 
 Publication additionally requires repository Actions variable
 `REDLINE_RELEASE_VERSION` to equal the built package version exactly, without `v`
-(for example, `0.5.0a1`). An unset, empty or different value skips publication. The
+(for example, `0.5.0a2`). An unset, empty or different value skips publication. The
 workflow also refuses a version with an existing GitHub release, existing version
 tag, or any existing PyPI distribution at that version. It uploads to TestPyPI,
 waits for the existing `pypi-*` environment approvals, uploads to PyPI and creates
@@ -95,7 +95,7 @@ checks. Confirm their current remote configuration before authorizing publicatio
 
    ```bash
    uv lock
-   python3 scripts/check_versions.py --expect 0.5.0a1
+   python3 scripts/check_versions.py --expect 0.5.0a2
    ```
 
 2. Rebuild the committed UI with `scripts/build_ui.sh` when frontend sources change.
@@ -117,7 +117,7 @@ checks. Confirm their current remote configuration before authorizing publicatio
    Inspect the successful run's tested SHA, package version and `dist` artifact.
 
 4. Obtain explicit authorization to publish that exact version and commit. Set repository
-   Actions variable `REDLINE_RELEASE_VERSION` to that version, for example `0.5.0a1`, only
+   Actions variable `REDLINE_RELEASE_VERSION` to that version, for example `0.5.0a2`, only
    after that approval. Setting the variable does not start a workflow.
 
 5. For the same tested commit, re-run its original **CI** run. Its successful completion
@@ -143,8 +143,8 @@ checks. Confirm their current remote configuration before authorizing publicatio
    ```bash
    uv venv /tmp/redline-release-smoke
    VIRTUAL_ENV=/tmp/redline-release-smoke uv pip install --prerelease=allow \
-     django-redline==0.5.0a1 fastapi-redline==0.5.0a1 \
-     flask-redline==0.5.0a1 litestar-redline==0.5.0a1
+     django-redline==0.5.0a2 fastapi-redline==0.5.0a2 \
+     flask-redline==0.5.0a2 litestar-redline==0.5.0a2
    /tmp/redline-release-smoke/bin/python -c \
      'import redline_core, django_redline; print(redline_core.__version__)'
    ```

@@ -799,7 +799,7 @@ credentials or the framework permission your `access` setting requires) and is r
 | `redline_writer_queue_depth` | gauge | Recordings waiting for the background writer |
 | `redline_writer_queue_capacity` | gauge | Queue bound (`writer_queue_size`) |
 | `redline_traces_saved_total` | counter | Recordings written since the process started |
-| `redline_traces_dropped_total{reason}` | counter | Not stored: `queue_full`, `write_failed`, `closed`, `capture_failed` (a recording that could not be captured safely) |
+| `redline_traces_dropped_total{reason}` | counter | Not stored: `queue_full`, `write_failure`, `closed`, `capture_failed` (a recording that could not be captured safely) |
 | `redline_write_failures_total` | counter | Failed write batches |
 
 Counters are per process (and reset in a forked worker); with several workers scrape each one
@@ -832,7 +832,7 @@ setting and the feature and not `read_only`) and `access: {policy, login, read_o
 
 ## Things to know
 
-- **The API is not versioned.** The development release is `0.5.0a1`: the shape may change between alpha
+- **The API is not versioned.** The development release is `0.5.0a2`: the shape may change between alpha
   releases. The frontend and the core ship together, so they never disagree.
 - **Redacted values are redacted in the API too.** There is no way to ask for the
   original.
@@ -1010,3 +1010,16 @@ absent; observed failure counters can appear as `truncated.sql_errors` and
 `truncated.connection_errors` instead of tags. `capture_failure`/`invalid_capture`
 identify other safe fallback paths. A capture that cannot fit a valid minimal payload
 is refused rather than saved as complete evidence.
+
+
+### GET api/health
+
+Authenticated profiler operational health: HTTP 200 when the bound recorder and store
+report healthy, otherwise 503. The response includes `status`, `storage`, `recorder` and
+an interpretation `note`. Store counters include queue depth/capacity, writer state,
+written/dropped items, reason-specific loss and write/flush/shutdown failures. Recorder
+counters include completed-recording capture/sink failures. Providers without this
+capability are unknown; no provider is imported or inferred from a global recorder.
+The endpoint does not query the initialized trace database or return trace values/paths.
+Counters are per process and cumulative. This is not an application readiness endpoint.
+`api/meta` adds the same snapshot under `operational`.

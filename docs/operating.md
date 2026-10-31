@@ -47,10 +47,10 @@ the rest of the API (so scrape it with the Redline token, or from an allowed net
 |---|---|
 | `redline_writer_queue_depth` / `redline_writer_queue_capacity` | traces waiting for the writer thread, and the bound |
 | `redline_traces_saved_total` | traces persisted |
-| `redline_traces_dropped_total{reason=...}` | traces lost: `queue_full`, `write_failed`, `closed`, `capture_failed` |
+| `redline_traces_dropped_total{reason=...}` | traces lost: `queue_full`, `write_failure`, `closed`, `capture_failed`, plus rarer reasons (`enqueue_failure`, `lifecycle_write_failure`, `shutdown_timeout`, `writer_unavailable`) when they occur |
 | `redline_write_failures_total` | writer batches that failed |
 
-Suggested alerts: any increase of `redline_traces_dropped_total{reason="write_failed"}` or
+Suggested alerts: any increase of `redline_traces_dropped_total{reason="write_failure"}` or
 `redline_write_failures_total` (disk full, permissions, store locked); a sustained queue depth
 near capacity (the app produces traces faster than the store absorbs them: lower the sample
 rate). See [HTTP API](http-api.md) for the exact format.

@@ -533,7 +533,7 @@ wheels = [
 
 [[package]]
 name = "django-redline"
-version = "0.5.0a1"
+version = "0.5.0a2"
 source = { editable = "packages/django-redline" }
 dependencies = [
     { name = "django" },
@@ -640,7 +640,7 @@ wheels = [
 
 [[package]]
 name = "fastapi-redline"
-version = "0.5.0a1"
+version = "0.5.0a2"
 source = { editable = "packages/fastapi-redline" }
 dependencies = [
     { name = "fastapi" },
@@ -707,7 +707,7 @@ wheels = [
 
 [[package]]
 name = "flask-redline"
-version = "0.5.0a1"
+version = "0.5.0a2"
 source = { editable = "packages/flask-redline" }
 dependencies = [
     { name = "flask" },
@@ -986,7 +986,7 @@ wheels = [
 
 [[package]]
 name = "litestar-redline"
-version = "0.5.0a1"
+version = "0.5.0a2"
 source = { editable = "packages/litestar-redline" }
 dependencies = [
     { name = "litestar" },
@@ -1952,7 +1952,7 @@ wheels = [
 
 [[package]]
 name = "redline-core"
-version = "0.5.0a1"
+version = "0.5.0a2"
 source = { editable = "packages/redline-core" }
 
 [package.optional-dependencies]
