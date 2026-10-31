@@ -17,6 +17,7 @@ production canary, make active tools unavailable explicitly:
 ```toml
 preset = "production"
 access = "token"
+cookie_secure = true
 token_file = "/run/secrets/redline-token"
 # Supply REDLINE_SECRET_KEY separately through the deployment secret provider.
 storage_path = "/var/lib/redline/myapp-production/{role}.db"
@@ -63,7 +64,9 @@ locals = false
 ```
 
 Supply `secret_key` through `REDLINE_SECRET_KEY` or the application's secret provider
-instead of committing it to a file. Use a strong token of at least 24 characters. Different codebases and
+instead of committing it to a file. Use a randomly generated signing key of at least
+32 characters and a strong token of at least 24 characters. Length checks do not verify
+randomness. Different codebases and
 environments should have different tokens/signing keys and storage access permissions.
 A signing key is shared only among workers intentionally serving the same Redline UI.
 
@@ -246,3 +249,75 @@ qualification. Validate deployment-specific conditions as well.
 Once these pass, expand one codebase at a time. Keep active tools disabled on production even
 when the development demo exercises them. See [Real-world workflows](real-world-workflows.md)
 for individual feature setup and [Performance](performance.md) for measurement limitations.
+
+
+## Enforce the recording-only configuration before deployment
+
+From **inside the deployment container**, with the same config/environment/working
+location as the app, run:
+
+```bash
+redline doctor --production --strict --json
+```
+
+`--production` validates the configuration you supplied; it does not switch presets or
+make an unsafe configuration safe. `--strict` returns nonzero for warnings as well as
+failures. This gate checks recording-only settings, private persistent storage and
+retention, authenticated operator access, explicit secure cookies and restricted proxy
+trust. It keeps provider/auth/storage probes from ordinary `doctor`. Application-defined
+access hooks remain warnings because a CLI cannot prove their authorization behavior.
+Use a token-backed configuration for an automated strict gate, or review the hook and its
+warning explicitly. Never print real token/signing values in deployment logs.
+
+If settings are overridden in application code, this CLI cannot see those overrides.
+Confirm the worker's effective configuration and test its access boundary as well. A
+successful configuration gate does not validate TLS, real database drivers, disk failure
+behavior, concurrency or the contents of actual captured data.
+
+## Monitor profiler health independently
+
+Poll the protected `GET <mount>/api/health` endpoint with your operator credentials.
+A healthy supported process returns HTTP 200. Degraded, closed, disabled or unavailable
+recording health returns 503. It reports:
+
+- queue depth/capacity and writer-started/alive state;
+- completed-recording capture/sink failures separately from storage loss;
+- cumulative dropped items by reason, writer/flush/shutdown failures and written count;
+- shutdown completion and the serving process PID.
+
+Do **not** use this endpoint as the application's load-balancer readiness probe. A profiler
+problem should alert operators without taking a healthy application out of service.
+The snapshot does not query the initialized trace database, so it remains useful while
+SQLite queries are blocked or the connection has closed. It is authenticated, contains
+no trace payload, storage path or exception message, and uses the same access policy as
+the other operator endpoints. The UI's Recording health panel shows the same information.
+
+Counters are process-local and cumulative, including historical failures; a degraded
+status can persist after recovery. Monitor counter increases/rates and individual workers,
+not just the last status response. Unsupported custom health providers are reported as
+unknown. Queue depth includes markers and lifecycle work; written counts describe write
+processing rather than an fsync/durability guarantee. Continue independent application
+monitoring and inspect truncated evidence too.
+
+## Verify graceful shutdown and failure behavior
+
+The SQLite writer stops admission before its stop marker. `close(timeout=10)` reports
+whether shutdown completed. If the deadline expires, queued items may be discarded and
+counted, while an in-flight batch may still finish later. A live writer retains ownership
+of its connection until it stops. This improves isolation; it does not make forced kills
+lossless. Adapters still perform their normal flush/close lifecycle, so size the server's
+grace period to include both and test it in the actual process topology.
+
+Deterministic tests cover full queues, dead writers, injected write failure/recovery,
+thread-start failure, failed logging and concurrent save/close accounting. Validate actual
+volume permissions, disk exhaustion, worker restarts and intended concurrency in staging.
+Read `flush()` success together with loss counters: barrier completion is not proof that
+every trace persisted. Emergency rollback remains `enabled = false`, followed by normal
+application restart/reconfiguration; no production traffic generator is enabled by this work.
+
+The close timeout bounds admission/queue/join/lock waits. It is not a hard real-time
+bound on operating-system filesystem calls. Let the process manager enforce the final
+grace deadline and document the acceptable loss on forced termination. Worker processes
+without a web endpoint can expose `recorder.operational_health()` and
+`store.operational_health()` through their existing private metrics/logging integration;
+the library does not start a monitoring server or aggregate those counters automatically.
