@@ -23,3 +23,16 @@ frontend/screenshots/
 
 # Disposable Compose test reports and locally exported recordings
 examples/testing/results/
+
+# Local tooling and internal handoff notes (never committed)
+.serena/
+HANDOFF.md
+CONTRACT.md
+PLAN.md
+FEATURE_CANDIDATES.md
+IMPLEMENTATION_STATUS.md
+RELEASE_*_PLAN.md
+docs/feature-backlog.md
+reports/
+*-ASSESSMENT.md
+PACKAGES-*.md
