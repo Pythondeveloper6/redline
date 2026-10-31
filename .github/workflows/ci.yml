@@ -3,7 +3,7 @@
 # The distributions live here and ship in lockstep, so one workflow tests them all:
 #
 #   lint      ruff (check + format --check) and the lockstep-version check.
-#   core      redline-core on every interpreter it claims (3.10 - 3.14).
+#   core      redline-core on every interpreter it claims (3.10 - 3.14), coverage gated.
 #   django    django-redline across Python x Django.
 #   fastapi   fastapi-redline across Python.
 #   flask     flask-redline across Python.
@@ -72,9 +72,13 @@ jobs:
         run: |
           uv venv --python "${{ matrix.python-version }}" "$RUNNER_TEMP/venv"
           VIRTUAL_ENV="$RUNNER_TEMP/venv" uv pip install -e ".[profile]" --group dev
-      - name: Test
+      # Coverage is gated (measured ~86% locally with every optional integration installed);
+      # the floor leaves room for interpreter cells that skip a few optional imports.
+      - name: Test (coverage gated)
         working-directory: packages/redline-core
-        run: $RUNNER_TEMP/venv/bin/python -m pytest
+        run: >-
+          $RUNNER_TEMP/venv/bin/python -m pytest --cov=redline_core
+          --cov-report=term:skip-covered --cov-fail-under=80
 
   django:
     name: django / py${{ matrix.python-version }} / Django ${{ matrix.django }}
