@@ -8,6 +8,16 @@ import sys
 
 
 def configure_export(parser):
+    parser.add_argument(
+        "target",
+        nargs="?",
+        help="recording id or load run id to summarise (with --html)",
+    )
+    parser.add_argument(
+        "--html",
+        metavar="OUT",
+        help="write one self-contained, redacted HTML summary of TARGET instead of OTLP",
+    )
     parser.add_argument("--store", required=True)
     parser.add_argument("--endpoint")
     parser.add_argument(
@@ -27,9 +37,52 @@ def configure_export(parser):
     parser.add_argument("--limit", type=int, default=100)
 
 
+def _export_html(args, out, err):
+    from . import report_html
+    from .storage.multiple import TraceReader
+
+    if args.send or args.endpoint or args.logs_endpoint:
+        print("--html cannot be combined with --send or the OTLP endpoints", file=err)
+        return 2
+    if not args.target:
+        print("--html needs a recording id or load run id", file=err)
+        return 2
+    try:
+        reader = TraceReader(args.store)
+    except (OSError, ValueError):
+        print("Cannot open the store read-only", file=err)
+        return 1
+    try:
+        redactor = report_html.project_redactor()
+        trace = reader.get(args.target, include_profile=False)
+        if trace is not None:
+            page = report_html.render_trace(trace, redactor, include_sql=args.include_sql)
+        else:
+            run = report_html.load_run(reader, args.target)
+            if run is None:
+                print("No recording or load run with that id", file=err)
+                return 1
+            page = report_html.render_run(run, redactor)
+        with open(args.html, "w", encoding="utf-8") as fh:
+            fh.write(page)
+        print(f"wrote {args.html}", file=out)
+        return 0
+    except OSError as exc:
+        print(f"Cannot write {args.html}: {exc.strerror or exc}", file=err)
+        return 1
+    finally:
+        reader.close()
+
+
 def export_command(args, out, err):
     from .otlp import export
     from .storage.multiple import TraceReader
+
+    if args.html:
+        return _export_html(args, out, err)
+    if args.target:
+        print("A target id needs --html", file=err)
+        return 2
 
     if not 1 <= args.limit <= 500 or (args.send and not args.endpoint):
         print("Use limit 1..500 and an explicit traces endpoint for --send", file=err)
