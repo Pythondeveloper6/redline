@@ -23,3 +23,22 @@ frontend/screenshots/
 
 # Disposable Compose test reports and locally exported recordings
 examples/testing/results/
+
+# Internal planning and assessment documents (not part of the public tree)
+VALUE-ASSESSMENT.md
+PACKAGES-GAPS-AND-FEATURES.md
+*-ASSESSMENT.md
+plan.md
+PLAN.md
+PLAN*.md
+FEATURE_CANDIDATES.md
+IMPLEMENTATION_STATUS.md
+RELEASE_SCOPE.md
+RELEASE_*_PLAN.md
+ROADMAP-INTERNAL*.md
+NOTES*.md
+docs/superpowers/
+docs/feature-backlog.md
+reports/
+.planning/
+.claude/
