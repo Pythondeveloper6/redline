@@ -56,12 +56,12 @@ conn.execute(other_sql("widgets"))
 
 def test_helper_call_uses_only_callsite_literals_and_no_local_shadowing():
     source = """
-def make_sql(table):
+def make_sql():
     return f"SELECT * FROM {table}"
 
 def run(conn):
     table = "widgets"
-    conn.execute(make_sql(table))
+    conn.execute(make_sql())
 """
     statements, skipped = extract(source)
     assert not statements

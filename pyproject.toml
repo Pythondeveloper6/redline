@@ -27,13 +27,17 @@ dev = [
     "aiosqlite>=0.20",
     "greenlet>=3.0",
     "pyinstrument>=5.0",
+    "a2wsgi>=1.10",
+    "rq>=1.16",
+    "fakeredis>=2.20",
+    "dramatiq>=1.16",
 ]
 docs = ["mkdocs-material>=9.5"]
 
 [tool.ruff]
 line-length = 100
 target-version = "py310"
-extend-exclude = ["site", "frontend", "examples/**/migrations", "*.md"]
+extend-exclude = ["site", "frontend", "packages/redline-core/tests/fixtures/static_precision", "examples/**/migrations", "*.md"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "C4", "RUF", "DJ"]

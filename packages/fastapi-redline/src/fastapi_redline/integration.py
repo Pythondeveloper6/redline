@@ -15,7 +15,9 @@ from fastapi.params import Depends as DependsParam
 from redline_core import Recorder, Settings, configure
 from redline_core.access import Access
 from redline_core.api import RedlineAPI
+from redline_core.auto_instrument import auto_instrument
 from redline_core.config import ResolvedConfig, resolve_settings
+from redline_core.contrib.starlette_background import instrument_background_tasks
 from redline_core.explain import ExplainExecutor
 from redline_core.load.control import run_hooks
 from redline_core.storage import SQLiteStore, Store
@@ -196,6 +198,7 @@ def install(
     store = store if store is not None else SQLiteStore.from_settings(cfg)
     suggester = SQLAlchemyFixSuggester(models, project_root=cfg.project_root)
     recorder = configure(cfg, store, [suggester])
+    auto_instrument(cfg)
     redline = Redline(
         app=app,
         prefix=prefix,
@@ -231,6 +234,7 @@ def install(
             force_ok=lambda scope: access.may_force(scope_info(scope), debug=bool(app.debug)),
         )
         instrument_serialization()
+        instrument_background_tasks(recorder)
 
     original = app.router.lifespan_context
 
