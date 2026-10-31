@@ -108,3 +108,14 @@ def test_read_only_features_and_ui_disabled(make_env):
 def test_bad_access_config_fails_at_construction(make_env):
     with pytest.raises(SettingsError):
         make_env(guards=None, settings={"access": "basic"})
+
+
+def test_framework_policy_without_guards_fails_closed(make_env):
+    # `access="framework"` delegates the decision to the app's guards. With none
+    # attached there is nothing to delegate to, so every route must refuse.
+    env = make_env(guards=None, settings={"access": "framework"})
+    assert env.redline.access.policy == "framework"
+    with client(env) as c:
+        assert c.get("/_redline/api/meta").status_code == 403
+        assert c.get("/_redline/api/traces").status_code == 403
+        assert c.delete("/_redline/api/traces").status_code == 403

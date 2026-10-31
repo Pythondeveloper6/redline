@@ -17,16 +17,19 @@ from litestar.plugins import InitPluginProtocol
 from redline_core import Recorder, Settings, configure
 from redline_core.access import Access
 from redline_core.api import RedlineAPI
+from redline_core.auto_instrument import auto_instrument
 from redline_core.config import resolve_settings
+from redline_core.environment import refuse_in_production
 from redline_core.explain import ExplainExecutor
 from redline_core.load.control import run_hooks
-from redline_core.storage import SQLiteStore, Store
+from redline_core.storage import Store, store_from_settings
 
 from ._middleware import EXCEPTION_KEY, RedlineMiddleware
 from ._security import redline_guard, scope_info
 from ._sqlalchemy import (
     EngineLike,
     alias_for,
+    auto_engine,
     build_executor,
     instrument_engine,
     name_engines,
@@ -35,7 +38,7 @@ from ._sqlalchemy import (
 from .router import build_router
 from .suggest import SQLAlchemyFixSuggester
 
-__all__ = ["RedlinePlugin"]
+__all__ = ["RedlinePlugin", "install_if_dev"]
 
 logger = logging.getLogger("redline")
 
@@ -75,6 +78,10 @@ class RedlinePlugin(InitPluginProtocol):
         A sync ``Engine``, an ``AsyncEngine``, a list of them, or ``{alias: engine}``.
         The first of a list is the ``"default"`` db alias (used by EXPLAIN). When omitted
         and the app has Litestar's ``SQLAlchemyPlugin``, its engine(s) are instrumented.
+    ``engines``
+        ``"auto"`` instruments every SQLAlchemy engine created after install (per-user or
+        per-request engines) without registering it, by setting
+        ``instrument_engines="all"``. Engines are held weakly.
     ``path``
         Where the UI and API live (default: the ``mount_path`` setting, else
         ``/_redline``). Never recorded.
@@ -86,7 +93,8 @@ class RedlinePlugin(InitPluginProtocol):
         loopback clients addressing ``localhost``/``127.0.0.1``/``[::1]``).
         ``HTTPException`` raised by guards is answered in the API's error shape.
     ``store``
-        A custom ``Store``; default is the SQLite file at ``storage_path``.
+        A custom ``Store``; default is the SQLite file at ``storage_path`` (or
+        the shared PostgreSQL store at ``storage_url``).
 
     The plugin object is also the handle: ``plugin.recorder``, ``plugin.store``,
     ``plugin.settings``, ``plugin.add_engine(...)``, ``plugin.close()``.
@@ -99,11 +107,16 @@ class RedlinePlugin(InitPluginProtocol):
         path: str | None = None,
         guards: Sequence[Any] | None = None,
         store: Store | None = None,
+        engines: str | None = None,
     ) -> None:
+        if engines not in (None, "auto"):
+            raise ValueError('engines must be "auto" or None')
         # An empty list is no hook: the normal default rules apply, not "framework" with
         # nothing to check.
         self.config = resolve_settings(settings, native_hook=bool(guards))
         cfg = self.config.settings
+        if engines == "auto":
+            cfg = cfg.replace(instrument_engines="all")
         path = path if path is not None else (cfg.mount_path or "/_redline")
         path = "/" + path.strip("/")
         if path == "/":
@@ -118,14 +131,16 @@ class RedlinePlugin(InitPluginProtocol):
         self._engine_arg = engine
         self.engines: dict[str, EngineLike] = {}
         self.loop: asyncio.AbstractEventLoop | None = None
-        self.store: Store = store if store is not None else SQLiteStore.from_settings(cfg)
+        self.store: Store = store if store is not None else store_from_settings(cfg)
         self.suggester = SQLAlchemyFixSuggester(project_root=cfg.project_root)
         self.recorder: Recorder = configure(cfg, self.store, [self.suggester])
+        auto_instrument(cfg)
         # POST api/runs: only with load_from_ui and a file-backed SQLiteStore (else 501)
         launcher, stopper = run_hooks(self.store, cfg)
         self.api = RedlineAPI(
             self.store,
             cfg,
+            runtime_health=self.recorder.operational_health,
             framework="litestar",
             explain_executor=self._executor_for,
             run_launcher=launcher,
@@ -146,7 +161,7 @@ class RedlinePlugin(InitPluginProtocol):
         return alias
 
     def _executor_for(self, alias: str, vendor: str) -> ExplainExecutor | None:
-        engine = self.engines.get(alias)
+        engine = self.engines.get(alias) or auto_engine(alias)
         if engine is None:
             return None
         return build_executor(engine, vendor_of(engine), lambda: self.loop)
@@ -177,7 +192,10 @@ class RedlinePlugin(InitPluginProtocol):
         for alias, eng in name_engines(engine).items():
             self.add_engine(eng, alias)
 
-        guards = [redline_guard(self.access, self.path), *(self.guards or [])]
+        guards = [
+            redline_guard(self.access, self.path, framework_hook=bool(self.guards)),
+            *(self.guards or []),
+        ]
         self.access.debug = lambda: bool(app_config.debug)
         self.access.log_startup(self.path, "pass RedlinePlugin(guards=[...])")
         app_config.route_handlers.append(build_router(self, self.path, guards))
@@ -198,3 +216,21 @@ class RedlinePlugin(InitPluginProtocol):
             app_config.after_exception.append(self._after_exception)
         app_config.on_shutdown.append(self._on_shutdown)
         return app_config
+
+
+def install_if_dev(**kwargs: Any) -> RedlinePlugin | None:
+    """``RedlinePlugin(**kwargs)``, unless the process looks like production.
+
+    Litestar plugins are given to the constructor, so this returns the plugin (or ``None``)
+    instead of taking the app::
+
+        plugin = install_if_dev(engine=engine)
+        app = Litestar([...], plugins=[plugin] if plugin else [])
+
+    Production signals: ``REDLINE_ENV``/``APP_ENV``/``ENV``/``ENVIRONMENT``/``FLASK_ENV``/
+    ``DJANGO_ENV`` set to ``prod`` or ``production``. ``REDLINE_ALLOW_PRODUCTION=1`` attaches
+    anyway.
+    """
+    if refuse_in_production("litestar"):
+        return None
+    return RedlinePlugin(**kwargs)

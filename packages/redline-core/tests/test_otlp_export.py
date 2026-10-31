@@ -105,3 +105,20 @@ def test_incoming_traceparent_fills_otel_ids_and_outgoing_header():
         parsed = parse_traceparent(headers["traceparent"])
         assert parsed and len(parsed["trace_id"]) == 32
         assert headers["traceparent"] == propagation_headers()["traceparent"]
+
+
+def test_spans_carry_the_redline_trace_id_attribute():
+    spans = export([_trace()], None)["spans"]["resourceSpans"][0]["scopeSpans"][0]["spans"]
+    for span in spans:
+        attrs = {item["key"]: item["value"] for item in span["attributes"]}
+        assert attrs["redline.trace_id"] == {"stringValue": "recording-1"}
+
+
+def test_exported_issue_titles_and_raw_sql_are_redacted():
+    trace = _trace()
+    trace.spans[0].data["sql"] = "SELECT * FROM users WHERE password = 'hunter2'"
+    trace.issues[0].title = "Slow call to https://bob:hunter2@api.example.com/x?token=abc"
+    preview = export([trace], None, include_sql=True)
+    text = json.dumps(preview)
+    assert "hunter2" not in text and "token=abc" not in text
+    assert "shop_order" not in text and "FROM users" in text

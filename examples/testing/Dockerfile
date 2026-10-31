@@ -28,5 +28,5 @@ COPY examples/ examples/
 COPY scripts/ scripts/
 COPY docs/ docs/
 COPY .github/ .github/
-COPY README.md CHANGELOG.md CONTRACT.md RELEASING.md SECURITY.md CONTRIBUTING.md mkdocs.yml ./
+COPY README.md CHANGELOG.md RELEASING.md SECURITY.md CONTRIBUTING.md mkdocs.yml ./
 CMD ["python", "examples/testing/run.py"]

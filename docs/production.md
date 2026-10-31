@@ -17,6 +17,7 @@ production canary, make active tools unavailable explicitly:
 ```toml
 preset = "production"
 access = "token"
+cookie_secure = true
 token_file = "/run/secrets/redline-token"
 # Supply REDLINE_SECRET_KEY separately through the deployment secret provider.
 storage_path = "/var/lib/redline/myapp-production/{role}.db"
@@ -63,7 +64,9 @@ locals = false
 ```
 
 Supply `secret_key` through `REDLINE_SECRET_KEY` or the application's secret provider
-instead of committing it to a file. Use a strong token of at least 24 characters. Different codebases and
+instead of committing it to a file. Use a randomly generated signing key of at least
+32 characters and a strong token of at least 24 characters. Length checks do not verify
+randomness. Different codebases and
 environments should have different tokens/signing keys and storage access permissions.
 A signing key is shared only among workers intentionally serving the same Redline UI.
 
@@ -101,6 +104,31 @@ privacy audit and does not prove an existing store is clean. With
 `capture_error_details = false`, Redline retains error types and structured database
 codes without formatting exception messages or tracebacks; project exception locals
 are also disabled. This preserves failure counts while reducing free-text exposure.
+
+## Refuse to attach in production
+
+Each adapter has an `install_if_dev` entry point that attaches Redline only when the process
+does not look like production. It returns `None` (and logs a warning on the `redline`
+logger) when `REDLINE_ENV`, `APP_ENV`, `ENV`, `ENVIRONMENT`, `FLASK_ENV` or `DJANGO_ENV` is
+`prod` or `production`, and, for Django, when `DEBUG` is false. `REDLINE_ALLOW_PRODUCTION=1`
+overrides it (also logged).
+
+```python
+from fastapi_redline import install_if_dev   # flask_redline: install_if_dev(app, ...)
+install_if_dev(app, engine=engine)
+
+from litestar_redline import install_if_dev  # returns the plugin, or None
+plugin = install_if_dev(engine=engine)
+app = Litestar([...], plugins=[plugin] if plugin else [])
+
+# Django: settings.py, then urls.py
+from django_redline import install_if_dev, urls_if_dev
+install_if_dev(globals())                    # adds the app and middleware
+urlpatterns += urls_if_dev("redline/")       # [] when refused
+```
+
+This is a safety net, not access control: it does not replace the `access` settings, and
+production recording is still configured with the [production presets](#start-with-recording-and-stored-data-inspection).
 
 ## Network and operator access
 
@@ -143,9 +171,9 @@ prefix yourself. Files from unrelated codebases must not be mixed accidentally.
 | Deployment | Intended storage arrangement | Validation needed |
 |---|---|---|
 | One application, one process | One private local file | Retention, shutdown, disk errors and normal traffic |
-| Several workers on one host | Local shared file only after a concurrent-writer test, or per-worker files | Contention, busy timeout, pruning, loss and shutdown |
-| Web and task workers | Explicit web/worker roles, preferably separate files | Worker initialization, fork behavior and correlation |
-| Several replicas/hosts | A private local file per replica | Replica-local inspection and lifecycle; no network-file sharing |
+| Several workers on one host | The shared PostgreSQL store, or a local shared file only after a concurrent-writer test, or per-worker files | Contention, busy timeout, pruning, loss and shutdown |
+| Web and task workers | The shared PostgreSQL store, or explicit web/worker roles with separate files | Worker initialization, fork behavior and correlation |
+| Several replicas/hosts | The shared PostgreSQL store (`storage_url`), or a private local file per replica | Database reachability and credentials; with files, replica-local inspection and no network-file sharing |
 | Several independent codebases | Separate processes, settings, credentials and store paths | No cross-application traces or operator access |
 
 The SQLite writer starts lazily and has fork/PID handling, but validate the actual gunicorn,
@@ -166,6 +194,34 @@ inspection, profiles and single-ID deletion are refused rather than choosing ano
 store's evidence. Cross-file reads are not an atomic distributed snapshot. Secondary
 EXPLAIN/catalog requests are refused because a web process cannot establish the worker's
 database binding. This is not a distributed store.
+
+### Multi-worker deployments
+
+A SQLite file is a single-host store. Several gunicorn/uvicorn workers can write one local
+file (WAL plus a busy timeout), but their writes queue on one file lock, and as soon as there
+is more than one host or container each keeps its own traces. For any of these, set
+`storage_url` to a PostgreSQL database ([Storage: a shared PostgreSQL
+store](storage.md#a-shared-postgresql-store)):
+
+```bash
+pip install "redline-core[postgres]"
+REDLINE_STORAGE_URL=postgresql://redline:...@db.internal:5432/redline
+```
+
+Every worker and host then writes the same store, and the UI of any of them shows all
+traffic. The store opens its connection lazily per process, so gunicorn `--preload` and
+forked task workers are safe; give it its own database or schema and a role that owns only
+that.
+
+`redline doctor` flags the risky shapes. It reads the worker count from `WEB_CONCURRENCY`,
+`--workers`/`-w` in `GUNICORN_CMD_ARGS` and `UVICORN_WORKERS` (or `--workers N` when the
+count lives elsewhere, such as a process manager's command line) and warns when more than one
+worker would share a SQLite file; it also warns for a SQLite store on a network filesystem.
+In a deployment pipeline run it with `--strict`, which turns both warnings into failures:
+
+```bash
+redline doctor --strict --workers 4
+```
 
 <a id="sampling"></a>
 
@@ -210,8 +266,7 @@ A forced kill can lose queued traces; state the acceptable loss window before ro
 
 The complete Compose baseline passed on 2026-10-29 (run
 `20261029T052447Z-caaef5f7`): 2,120 Python tests, zero failures/errors/skips, plus frontend,
-demo, docs and packaging checks. The committed validation record is
-`IMPLEMENTATION_STATUS.md` in the repository. Main CI and the actual production topology
+demo, docs and packaging checks. Main CI and the actual production topology
 still require their own evidence; an environment restriction is never a passing assertion.
 
 | Area | Confirmed baseline | Still required for the target deployment |
@@ -235,7 +290,8 @@ A production recommendation requires evidence for each target deployment:
 3. Live driver tests for failed statements, reconnects, parameter styles and session cleanup;
    SQL Server plan/compile tests only against an isolated database with appropriate permissions.
 4. Broker-worker success/failure/retry, prefork/restart, correlation and graceful shutdown tests.
-5. Concurrent writers, retention, backpressure and fault-injection tests under expected traffic.
+5. Concurrent writers, retention, backpressure and fault-injection tests under expected traffic
+   (`redline doctor --strict` passing for the storage topology).
 6. Sentinel privacy checks across stored traces, issues, callsites, logs and exports.
 7. A low-traffic canary with an immediate `enabled = false` rollback and independent monitoring.
 
@@ -246,3 +302,75 @@ qualification. Validate deployment-specific conditions as well.
 Once these pass, expand one codebase at a time. Keep active tools disabled on production even
 when the development demo exercises them. See [Real-world workflows](real-world-workflows.md)
 for individual feature setup and [Performance](performance.md) for measurement limitations.
+
+
+## Enforce the recording-only configuration before deployment
+
+From **inside the deployment container**, with the same config/environment/working
+location as the app, run:
+
+```bash
+redline doctor --production --strict --json
+```
+
+`--production` validates the configuration you supplied; it does not switch presets or
+make an unsafe configuration safe. `--strict` returns nonzero for warnings as well as
+failures. This gate checks recording-only settings, private persistent storage and
+retention, authenticated operator access, explicit secure cookies and restricted proxy
+trust. It keeps provider/auth/storage probes from ordinary `doctor`. Application-defined
+access hooks remain warnings because a CLI cannot prove their authorization behavior.
+Use a token-backed configuration for an automated strict gate, or review the hook and its
+warning explicitly. Never print real token/signing values in deployment logs.
+
+If settings are overridden in application code, this CLI cannot see those overrides.
+Confirm the worker's effective configuration and test its access boundary as well. A
+successful configuration gate does not validate TLS, real database drivers, disk failure
+behavior, concurrency or the contents of actual captured data.
+
+## Monitor profiler health independently
+
+Poll the protected `GET <mount>/api/health` endpoint with your operator credentials.
+A healthy supported process returns HTTP 200. Degraded, closed, disabled or unavailable
+recording health returns 503. It reports:
+
+- queue depth/capacity and writer-started/alive state;
+- completed-recording capture/sink failures separately from storage loss;
+- cumulative dropped items by reason, writer/flush/shutdown failures and written count;
+- shutdown completion and the serving process PID.
+
+Do **not** use this endpoint as the application's load-balancer readiness probe. A profiler
+problem should alert operators without taking a healthy application out of service.
+The snapshot does not query the initialized trace database, so it remains useful while
+SQLite queries are blocked or the connection has closed. It is authenticated, contains
+no trace payload, storage path or exception message, and uses the same access policy as
+the other operator endpoints. The UI's Recording health panel shows the same information.
+
+Counters are process-local and cumulative, including historical failures; a degraded
+status can persist after recovery. Monitor counter increases/rates and individual workers,
+not just the last status response. Unsupported custom health providers are reported as
+unknown. Queue depth includes markers and lifecycle work; written counts describe write
+processing rather than an fsync/durability guarantee. Continue independent application
+monitoring and inspect truncated evidence too.
+
+## Verify graceful shutdown and failure behavior
+
+The SQLite writer stops admission before its stop marker. `close(timeout=10)` reports
+whether shutdown completed. If the deadline expires, queued items may be discarded and
+counted, while an in-flight batch may still finish later. A live writer retains ownership
+of its connection until it stops. This improves isolation; it does not make forced kills
+lossless. Adapters still perform their normal flush/close lifecycle, so size the server's
+grace period to include both and test it in the actual process topology.
+
+Deterministic tests cover full queues, dead writers, injected write failure/recovery,
+thread-start failure, failed logging and concurrent save/close accounting. Validate actual
+volume permissions, disk exhaustion, worker restarts and intended concurrency in staging.
+Read `flush()` success together with loss counters: barrier completion is not proof that
+every trace persisted. Emergency rollback remains `enabled = false`, followed by normal
+application restart/reconfiguration; no production traffic generator is enabled by this work.
+
+The close timeout bounds admission/queue/join/lock waits. It is not a hard real-time
+bound on operating-system filesystem calls. Let the process manager enforce the final
+grace deadline and document the acceptable loss on forced termination. Worker processes
+without a web endpoint can expose `recorder.operational_health()` and
+`store.operational_health()` through their existing private metrics/logging integration;
+the library does not start a monitoring server or aggregate those counters automatically.

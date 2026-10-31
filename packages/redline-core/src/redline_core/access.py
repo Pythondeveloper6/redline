@@ -393,14 +393,43 @@ class _RateLimiter:
         with self._lock:
             now = self.clock()
             if key not in self._hits and len(self._hits) >= self.MAX_KEYS:
-                for k in list(self._hits)[: self.MAX_KEYS // 10]:  # drop the oldest keys
-                    self._trim(k, now)
-                    self._hits.pop(k, None)
+                self._make_room(now)
             self._hits.setdefault(key, deque()).append(now)
+
+    def _make_room(self, now: float) -> None:
+        """Free slots without forgetting a blocked client: expired keys go first, then
+        the oldest keys still below the limit, and blocked keys only as a last resort."""
+        for k in list(self._hits):
+            self._trim(k, now)
+        if len(self._hits) < self.MAX_KEYS:
+            return
+        excess = len(self._hits) - self.MAX_KEYS + max(1, self.MAX_KEYS // 10)
+        unblocked = [k for k, hits in self._hits.items() if len(hits) < self.limit]
+        for k in unblocked[:excess]:
+            del self._hits[k]
+        excess -= min(excess, len(unblocked))
+        for k in list(self._hits)[:excess]:
+            del self._hits[k]
 
     def reset(self, key: str) -> None:
         with self._lock:
             self._hits.pop(key, None)
+
+
+def _limit_key(ip: str | None) -> str:
+    """The rate-limit bucket of a client: its IPv4 address, or its IPv6 /64 (one host
+    normally owns a whole /64, so per-address counting would not limit it)."""
+    if not ip:
+        return "-"
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return ip
+    if isinstance(addr, ipaddress.IPv6Address):
+        if addr.ipv4_mapped is not None:
+            return str(addr.ipv4_mapped)
+        return str(ipaddress.IPv6Network((addr, 64), strict=False))
+    return ip
 
 
 # ── route policy ──────────────────────────────────────────────────────────────────────
@@ -824,7 +853,7 @@ class Access:
         )
 
     def _rate_limited(self, client: _Client) -> Decision | None:
-        wait = self._limiter.blocked(client.ip or "-")
+        wait = self._limiter.blocked(_limit_key(client.ip))
         if wait:
             return _deny(
                 429,
@@ -851,7 +880,7 @@ class Access:
             ok, who = self._basic_header_ok(value.strip())
         if ok:
             return Decision(True, principal=who)
-        self._limiter.fail(client.ip or "-")
+        self._limiter.fail(_limit_key(client.ip))
         refused = self._login_required(info, "Invalid credentials.")
         return _deny(
             401,
@@ -889,7 +918,11 @@ class Access:
                 return True
         if encoded is None:  # same cost as a real check: no user-name oracle
             if self._dummy_hash is None:
-                self._dummy_hash = hash_password(secrets.token_urlsafe(16))
+                # the iterations of a real user's hash, so the timing matches theirs
+                known = [_parse_hash(h)[0] for h in self._users.values()]
+                self._dummy_hash = hash_password(
+                    secrets.token_urlsafe(16), iterations=max(known, default=PBKDF2_ITERATIONS)
+                )
             verify_password(password, self._dummy_hash)
             return False
         if not verify_password(password, encoded):
@@ -1021,11 +1054,11 @@ class Access:
                 return _deny(400, "invalid_body", 'Expected {"username": ..., "password": ...}.')
             ok, subject = self._password_ok(user, password), user
         if not ok:
-            self._limiter.fail(client.ip or "-")
+            self._limiter.fail(_limit_key(client.ip))
             return _deny(
                 401, "invalid_credentials", "Invalid credentials.", extra={"login": self.policy}
             )
-        self._limiter.reset(client.ip or "-")
+        self._limiter.reset(_limit_key(client.ip))
         now = self.clock()
         value = self.make_session(subject, now)
         ttl = self.settings.session_ttl_s

@@ -67,7 +67,15 @@ ENV_PREFIX = "REDLINE_"
 #: Path of a config file that replaces the ``project_root`` lookup.
 CONFIG_ENV = "REDLINE_CONFIG"
 #: ``REDLINE_*`` variables that are not settings (never reported as unknown).
-IGNORED_ENV = frozenset({"REDLINE_CONFIG", "REDLINE_ALLOW_OPEN", "REDLINE_RELEASE"})
+IGNORED_ENV = frozenset(
+    {
+        "REDLINE_CONFIG",
+        "REDLINE_ALLOW_OPEN",
+        "REDLINE_RELEASE",
+        "REDLINE_ALLOW_PRODUCTION",
+        "REDLINE_ENV",
+    }
+)
 _IGNORED_ENV_PREFIXES = ("REDLINE_TEST_",)
 _ENV_NAME = re.compile(r"^REDLINE_[A-Z][A-Z0-9_]*$")
 
@@ -83,6 +91,7 @@ GROUPS: dict[str, tuple[str, ...]] = {
         "redact_routes",
         "capture_loggers",
         "ignore_loggers",
+        "ignore_sql",
         "request_id_headers",
         "capture_request_body",
         "capture_response_body",
@@ -95,6 +104,7 @@ GROUPS: dict[str, tuple[str, ...]] = {
         "max_logs_per_trace",
         "capture_locals",
         "capture_error_details",
+        "auto_instrument",
         "max_spans_per_trace",
         "max_sql_bytes",
         "max_span_data_bytes",
@@ -133,6 +143,7 @@ GROUPS: dict[str, tuple[str, ...]] = {
     ),
     "storage": (
         "storage_path",
+        "storage_url",
         "max_rows",
         "max_age_days",
         "history_retention_days",
@@ -214,6 +225,10 @@ def mask_secrets(values: Mapping[str, Any]) -> dict[str, Any]:
             out[name] = "***"
     if isinstance(out.get("base_url"), str):
         out["base_url"] = mask_url_userinfo(out["base_url"])
+    if isinstance(out.get("storage_url"), str):
+        from .storage.postgres import mask_url
+
+        out["storage_url"] = mask_url(out["storage_url"])
     return out
 
 

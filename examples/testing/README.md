@@ -26,6 +26,13 @@ The command builds the current checkout, waits for service health, creates the f
 - Flask and FastAPI sync, FastAPI async, and Django backend HTTP flows against all
   three database services: success, caught SQL failure with HTTP 200, parameter privacy,
   rollback and subsequent transaction behavior.
+- MySQL drivers: pymysql (sync), aiomysql and asyncmy (async) recording through FastAPI;
+  `test_live_mysql.py` adds live EXPLAIN, index advice, a killed connection (recorded, then
+  the pool recovers), pool pre-ping replacing a killed idle connection and engines
+  created at runtime found by `engines="auto"` discovery.
+- SQL Server engines built per request (`connect_args={"attrs_before": ...}` and
+  `creator=`), all captured through auto-discovery (`test_live_mssql_engines.py`; runs only
+  where the SQL Server service and ODBC driver exist, i.e. in Compose).
 - Estimated plans, explicit SQL compilation, proof that compile checks do not persist
   an INSERT, schema snapshots and connection-setting cleanup. SQL Server also has
   explicit actual-plan and catalog checks.

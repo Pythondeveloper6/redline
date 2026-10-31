@@ -107,6 +107,7 @@ nav:
   - Get started:
       - Getting started: getting-started.md
       - How it works: how-it-works.md
+      - Example projects: examples.md
       - The UI: the-ui.md
       - Server-Timing and the badge: server-timing-badge.md
   - Guide:
@@ -148,8 +149,11 @@ nav:
       - Configuration: configuration.md
       - Access control: access-control.md
       - Production: production.md
+      - Upgrading: upgrading.md
+      - Operating Redline: operating.md
       - Full-stack testing: testing.md
       - Security: security.md
+      - Threat model: threat-model.md
       - Storage: storage.md
       - Performance and overhead: performance.md
   - Reference:
@@ -158,7 +162,7 @@ nav:
       - Command line: cli.md
       - Project:
           - Roadmap: roadmap.md
-          - Feature backlog: feature-backlog.md
+          - API stability: api-stability.md
           - FAQ: faq.md
           - Changelog: changelog.md
           - Contributing: contributing.md

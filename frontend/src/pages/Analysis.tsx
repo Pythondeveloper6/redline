@@ -11,7 +11,41 @@ import { CopyButton, ErrorBox, Pill, Spinner, useAsync } from '../components/ui'
 registerRoute({ path: '/analysis', label: 'Analysis tools', keywords: 'static analyze health coverage suppressions pytest', hint: 'Source analysis and recording quality' })
 
 type Finding = { id: string; kind: string; file: string; line: number; detail: string; suggestion: string; limitation: string }
-type SourceReport = { findings: Finding[]; errors: { file: string; line?: number; message: string }[]; files_analyzed?: number; skipped?: number; limited?: boolean }
+type ProjectInference = { mode?: string; passes?: number; resolved_imports?: number; helper_exports?: number; limited?: boolean; limitations?: string[] }
+type SourceReport = { findings: Finding[]; errors: { file: string; line?: number; message: string }[]; files_analyzed?: number; skipped?: number; limited?: boolean; project_inference?: ProjectInference }
+type IntegrationStatus = { name: string; installed: boolean; module_loaded: boolean; instrumented: boolean }
+type OperationalHealth = {
+  status?: string
+  storage?: {
+    status?: string
+    available?: boolean
+    queue_depth?: number
+    queue_capacity?: number
+    writer_alive?: boolean
+    dropped_by_reason?: Record<string, number>
+    write_failures?: number
+    flush_failures?: number
+    shutdown_complete?: boolean | null
+  }
+  recorder?: { status?: string; enabled?: boolean; capture_failures?: number }
+  note?: string
+}
+type HealthResponse = {
+  meta: {
+    framework: string
+    settings: { profile_mode: string; profiler_available: boolean }
+    storage: { rows: number; dropped: number }
+    operational?: OperationalHealth
+  }
+  observed_traces: number
+  profiled_traces: number
+  test_traces: number
+  capture?: Record<string, unknown>
+  integrations?: IntegrationStatus[]
+  test_requests?: { id: string; name: string; method: string; path: string }[]
+  warnings: string[]
+  note: string
+}
 type Coverage = { routes: { method: string; route: string; observed_paths: number; suite_inputs: number; status: string }[]; note: string; unmatched_suite_requests: string[] }
 type Rule = { id: string; kind: string; route?: string; fingerprint?: string; location?: string; reason: string; expires_at?: number }
 const SAMPLE = SOURCE_EXAMPLE
@@ -50,7 +84,13 @@ function Source() {
     {!!error && <ErrorBox error={error instanceof Error ? error : new Error(String(error))} />}
     {report && <div className="space-y-3" aria-live="polite">
       <p>{report.findings.length} candidates · {report.errors.length} source errors{report.files_analyzed != null ? ` · ${report.files_analyzed} files analyzed · ${report.skipped ?? 0} skipped` : ''}</p>
-      {report.limited && <p className="text-warn">Scan reached its file or byte limit. Coverage is incomplete.</p>}
+      {report.limited && <p className="text-warn" role="status">Project scanning or helper inference reached a safety limit. Coverage may be incomplete.</p>}
+      {report.project_inference && <section className="card p-3 space-y-2" aria-labelledby="project-inference-title">
+        <h2 id="project-inference-title" className="font-medium">Cross-file helper analysis</h2>
+        <p className="text-muted">{report.project_inference.resolved_imports ?? 0} imports resolved · {report.project_inference.helper_exports ?? 0} helper summaries · {report.project_inference.passes ?? 0} of 8 analysis passes</p>
+        {report.project_inference.limited && <p className="text-warn" role="status">Helper inference reached its pass limit; cross-file query coverage may be incomplete.</p>}
+        {!!report.project_inference.limitations?.length && <ul className="list-disc pl-5 text-muted space-y-1">{report.project_inference.limitations.map((limitation, i) => <li key={i}>{limitation}</li>)}</ul>}
+      </section>}
       {report.errors.map((e, i) => <p key={i} className="text-bad">{e.file}{e.line ? `:${e.line}` : ''}: {e.message}</p>)}
       {!report.findings.length && !report.errors.length && <div className="card p-4">No supported patterns found. This does not prove the code is free of performance problems.</div>}
       {report.findings.map(f => <article key={f.id} className="card p-4 space-y-2"><div className="flex flex-wrap gap-2"><Pill>{f.kind.replaceAll('_', ' ')}</Pill><code>{f.file}:{f.line}</code></div><p className="font-medium">{f.detail}</p><p>{f.suggestion}</p><p className="text-muted">{f.limitation}</p><Link className="text-info hover:underline" to="/checks/new">Build a check to verify the fix</Link></article>)}
@@ -59,12 +99,44 @@ function Source() {
 }
 
 function Health() {
-  const d = useAsync(() => call<{ meta: { framework: string; settings: { profile_mode: string; profiler_available: boolean }; storage: { rows: number; dropped: number } }; observed_traces: number; profiled_traces: number; test_traces: number; capture?: Record<string, unknown>; test_requests?: { id: string; name: string; method: string; path: string }[]; warnings: string[]; note: string }>('GET', './api/analysis/health'), [])
+  const d = useAsync(() => call<HealthResponse>('GET', './api/analysis/health'), [])
   if (d.error) return <ErrorBox error={d.error} onRetry={d.reload} />
   if (!d.data) return <Spinner />
   const h = d.data
+  const operational = h.meta.operational
+  const operationalStatus = operational?.status ?? 'unknown'
+  const operationalTone = operationalStatus === 'ok' ? 'ok' : operationalStatus === 'closed' ? 'bad' : operationalStatus === 'unknown' ? 'neutral' : 'warn'
   return <div className="space-y-3"><button className="btn" onClick={d.reload}>Refresh recording health</button>
+    {operational && <section className="card p-3 space-y-3" aria-labelledby="operational-health-title">
+      <div className="flex flex-wrap items-center gap-2">
+        <h2 id="operational-health-title" className="font-medium">Profiler operational health</h2>
+        <Pill tone={operationalTone}>{operationalStatus}</Pill>
+        {operational.storage?.status && <Pill tone={operational.storage.status === 'ok' ? 'ok' : operational.storage.status === 'unknown' ? 'neutral' : 'warn'}>storage {operational.storage.status}</Pill>}
+        {operational.recorder?.enabled === false && <Pill tone="warn">recording disabled</Pill>}
+      </div>
+      <p className="text-muted">{operational.note ?? 'Process-local cumulative counters; profiler health is not application readiness or a fleet-wide aggregate.'}</p>
+      <dl className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+        <div><dt className="text-muted">Writer queue</dt><dd className="num">{operational.storage?.queue_depth ?? 'unknown'} / {operational.storage?.queue_capacity ?? 'unknown'} items</dd></div>
+        <div><dt className="text-muted">Writer thread</dt><dd>{operational.storage?.writer_alive == null ? 'Unknown' : operational.storage.writer_alive ? 'Alive' : 'Stopped'}</dd></div>
+        <div><dt className="text-muted">Recorder capture failures</dt><dd className="num">{operational.recorder?.capture_failures ?? 'unknown'}</dd></div>
+        <div><dt className="text-muted">Store write failures</dt><dd className="num">{operational.storage?.write_failures ?? 'unknown'}</dd></div>
+        <div><dt className="text-muted">Store flush failures</dt><dd className="num">{operational.storage?.flush_failures ?? 'unknown'}</dd></div>
+      </dl>
+      <details className="border-t border-line pt-2">
+        <summary className="cursor-pointer focus-visible:outline focus-visible:outline-2 focus-visible:outline-info">Storage and recorder diagnostics</summary>
+        <pre className="overflow-x-auto mt-2 text-xs">{JSON.stringify(operational, null, 2)}</pre>
+      </details>
+    </section>}
     {h.capture && <details className="card p-3"><summary>Configured recording coverage</summary><pre className="overflow-x-auto mt-2">{JSON.stringify(h.capture, null, 2)}</pre><p className="text-muted">Configured options are not proof that every engine or worker has been observed. Secondary stores contribute request/job browsing; aggregates use the primary store.</p></details>}
+    {!!h.integrations?.length && <section className="card p-3 space-y-2" aria-labelledby="integration-status-title">
+      <div><h2 id="integration-status-title" className="font-medium">Optional integration hooks</h2><p className="text-muted">Installed means the package is available. A loaded module or active hook does not prove that calls were observed.</p></div>
+      <ul className="divide-y divide-line">{h.integrations.map(integration => <li key={integration.name} className="grid grid-cols-2 sm:grid-cols-4 gap-x-3 gap-y-1 py-2">
+        <strong className="break-all">{integration.name}</strong>
+        <span><span className="text-muted">Package:</span> {integration.installed ? 'Installed' : 'Not installed'}</span>
+        <span><span className="text-muted">Module:</span> {integration.module_loaded ? 'Loaded' : 'Not loaded'}</span>
+        <span><span className="text-muted">Hook:</span> {integration.instrumented ? 'Active' : 'Inactive'}</span>
+      </li>)}</ul>
+    </section>}
     <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-3">{[['Retained traces', h.meta.storage.rows], ['Observed sample', h.observed_traces], ['Profiled in sample', h.profiled_traces], ['Dropped writes', h.meta.storage.dropped]].map(([label, value]) => <div key={label} className="card p-4"><div className="text-muted">{label}</div><div className="text-xl num">{value}</div></div>)}</div>
     {h.warnings.map(w => <p key={w} className="text-warn">{w}</p>)}<p>{h.note}</p>
     <p>Framework: {h.meta.framework} · Profile mode: {h.meta.settings.profile_mode} · Profiler installed: {h.meta.settings.profiler_available ? 'yes' : 'no'} · Test traces in sample: {h.test_traces}</p>

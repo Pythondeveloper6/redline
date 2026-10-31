@@ -315,3 +315,16 @@ def test_checks_suites_and_runs(make_env, monkeypatch):
     assert c.get(f"/_redline/api/checks/runs/{r.json['id']}").json["status"] == "running"
     r = c.get(f"/_redline/api/checks/suites/{sid}/export")
     assert r.status_code == 200 and r.mimetype == "text/plain"
+
+
+def test_install_applies_auto_instrument_setting(monkeypatch, tmp_path):
+    from flask import Flask
+
+    from flask_redline import Redline
+
+    seen = []
+    monkeypatch.setattr(
+        "flask_redline.integration.auto_instrument", lambda s: seen.append(s.auto_instrument)
+    )
+    Redline(Flask(__name__), settings={"storage_path": str(tmp_path / "r.db")})
+    assert seen == ["warn"]

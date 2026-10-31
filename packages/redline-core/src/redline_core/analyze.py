@@ -9,6 +9,19 @@ from pathlib import Path
 MAX_SOURCE_BYTES = 200_000
 MAX_FILES = 200
 MAX_PROJECT_BYTES = 2_000_000
+MAX_SCAN_FILES = 10_000
+MAX_SCAN_BYTES = 64_000_000
+
+
+def validate_scan_limits(max_files, max_project_bytes):
+    for name, value, ceiling in (
+        ("max_files", max_files, MAX_SCAN_FILES),
+        ("max_project_bytes", max_project_bytes, MAX_SCAN_BYTES),
+    ):
+        if type(value) is not int or not 1 <= value <= ceiling:
+            raise ValueError(f"{name} must be an integer between 1 and {ceiling}")
+
+
 EXCLUDED = {".git", ".venv", "venv", "node_modules", "__pycache__", "migrations", "site", "static"}
 
 
@@ -22,7 +35,9 @@ def _name(node: ast.AST) -> str:
     return ""
 
 
-def analyze_source(source: str, file: str = "input.py") -> dict:
+def analyze_source(
+    source: str, file: str = "input.py", *, _imported_helpers=(), _summary=None
+) -> dict:
     if len(source.encode("utf-8")) > MAX_SOURCE_BYTES:
         raise ValueError(f"source exceeds {MAX_SOURCE_BYTES} bytes")
     try:
@@ -73,21 +88,42 @@ def analyze_source(source: str, file: str = "input.py") -> dict:
 
     sessions = set()
     session_types = {"sqlalchemy.orm.Session", "sqlalchemy.ext.asyncio.AsyncSession"}
+    typing_annotated = {"typing.Annotated", "typing_extensions.Annotated"}
+
+    def annotation_is_session(annotation, depth=0):
+        if depth > 6:
+            return False
+        if isinstance(annotation, ast.Constant) and isinstance(annotation.value, str):
+            text = annotation.value
+            if len(text) > 1024:
+                return False
+            try:
+                parsed = ast.parse(text, mode="eval").body
+            except (SyntaxError, ValueError, RecursionError):
+                return False
+            return annotation_is_session(parsed, depth + 1)
+        if isinstance(annotation, ast.BinOp) and isinstance(annotation.op, ast.BitOr):
+            return annotation_is_session(annotation.left, depth + 1) or annotation_is_session(
+                annotation.right, depth + 1
+            )
+        if isinstance(annotation, ast.Subscript):
+            arguments = (
+                annotation.slice.elts
+                if isinstance(annotation.slice, ast.Tuple)
+                else [annotation.slice]
+            )
+            if resolved(annotation.value) in typing_annotated:
+                arguments = arguments[:1]
+            return any(annotation_is_session(arg, depth + 1) for arg in arguments)
+        return resolved(annotation) in session_types
+
     for node in ast.walk(tree):
         if (
             isinstance(node, ast.arg)
             and node.annotation is not None
-            and resolved(node.annotation) in session_types
+            and annotation_is_session(node.annotation)
         ):
             sessions.add((scope(node), node.arg))
-        elif (
-            isinstance(node, ast.Assign)
-            and isinstance(node.value, ast.Call)
-            and resolved(node.value.func) in session_types
-        ):
-            for target in node.targets:
-                for name in assigned(target):
-                    sessions.add((scope(node), name))
     bindings = {}
     for assignment in ast.walk(tree):
         if isinstance(assignment, (ast.Assign, ast.AnnAssign)) and assignment.value is not None:
@@ -108,6 +144,86 @@ def analyze_source(source: str, file: str = "input.py") -> dict:
         ]
         latest = max(candidates, key=lambda b: (b.lineno, b.col_offset), default=None)
         return latest.value if latest is not None else None
+
+    session_factories = {
+        "sqlalchemy.orm.sessionmaker",
+        "sqlalchemy.ext.asyncio.async_sessionmaker",
+    }
+
+    def safe_resolved(node):
+        """Resolve imported names only when the relevant scope has not rebound them."""
+        name = _name(node)
+        head = name.split(".", 1)[0]
+        owner = scope(node)
+        if owner is not tree:
+            if any(
+                arg.arg == head
+                for arg in [
+                    *owner.args.posonlyargs,
+                    *owner.args.args,
+                    *owner.args.kwonlyargs,
+                ]
+            ):
+                return name
+            if bindings.get((owner, head)):
+                return name
+        if bindings.get((tree, head)):
+            return name
+        return resolved(node)
+
+    def factory_call(node):
+        return isinstance(node, ast.Call) and safe_resolved(node.func) in session_factories
+
+    def factory_name(name, node):
+        """Whether a name is bound to a known factory in this lexical scope."""
+        owner = scope(node)
+        if owner is not tree and any(
+            arg.arg == name
+            for arg in [*owner.args.posonlyargs, *owner.args.args, *owner.args.kwonlyargs]
+        ):
+            return False
+        local = bindings.get((owner, name), []) if owner is not tree else []
+        if local:
+            # Any local assignment makes this name local throughout the function.
+            candidates = [
+                item
+                for item in local
+                if (item.lineno, item.col_offset) < (node.lineno, node.col_offset)
+            ]
+            latest = max(candidates, key=lambda item: (item.lineno, item.col_offset), default=None)
+            return latest is not None and factory_call(latest.value)
+        module_bindings = bindings.get((tree, name), [])
+        if not module_bindings:
+            return False
+        latest = max(module_bindings, key=lambda item: (item.lineno, item.col_offset))
+        return factory_call(latest.value)
+
+    def is_session_factory_call(node):
+        return (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and factory_name(node.func.id, node)
+        )
+
+    def bind_session(target, node):
+        for name in assigned(target):
+            sessions.add((scope(node), name))
+
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
+            value = node.value
+            if isinstance(value, ast.Call) and safe_resolved(value.func) in session_types:
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                for target in targets:
+                    bind_session(target, node)
+            elif is_session_factory_call(value):
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                for target in targets:
+                    bind_session(target, node)
+        elif isinstance(node, (ast.With, ast.AsyncWith)):
+            for item in node.items:
+                if is_session_factory_call(item.context_expr) and item.optional_vars is not None:
+                    bind_session(item.optional_vars, node)
 
     def list_input(node):
         value = bound_value(node)
@@ -140,13 +256,76 @@ def analyze_source(source: str, file: str = "input.py") -> dict:
             if (
                 isinstance(node.func.value, ast.Name)
                 and (scope(node), node.func.value.id) in sessions
-                and node.func.attr in {"query", "execute", "scalars"}
+                and node.func.attr in {"query", "execute", "scalars", "scalar", "get"}
             ):
                 return True
             return node.func.attr in query_methods and (
                 _name(node.func.value).endswith(".objects") or queryset(node.func.value)
             )
         return False
+
+    # Summaries only follow unshadowed module-level helpers, with bounded depth.
+    functions = {
+        n.name: n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+
+    shadowed_helpers = set(bindings)
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                names = (
+                    functions if alias.name == "*" else [alias.asname or alias.name.split(".")[0]]
+                )
+                shadowed_helpers.update((scope(node), name) for name in names)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if scope(node) is not tree:
+                shadowed_helpers.add((scope(node), node.name))
+
+    def local_helper(call):
+        if not isinstance(call.func, ast.Name) or call.func.id not in functions:
+            return None
+        owner = scope(call)
+        if isinstance(owner, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            args = [*owner.args.posonlyargs, *owner.args.args, *owner.args.kwonlyargs]
+            if any(a.arg == call.func.id for a in args):
+                return None
+        if (owner, call.func.id) in shadowed_helpers or (tree, call.func.id) in shadowed_helpers:
+            return None
+        return functions[call.func.id]
+
+    def imported_helper(call):
+        name = _name(call.func)
+        if name not in _imported_helpers:
+            return False
+        head = name.split(".")[0]
+        owner = scope(call)
+        if owner is not tree and (owner, head) in shadowed_helpers:
+            return False
+        if isinstance(owner, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            args = [*owner.args.posonlyargs, *owner.args.args, *owner.args.kwonlyargs]
+            if any(arg.arg == head for arg in args):
+                return False
+        return True
+
+    calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)]
+    query_helpers = {
+        scope(n)
+        for n in calls
+        if isinstance(n.func, ast.Attribute)
+        and isinstance(n.func.value, ast.Name)
+        and (scope(n), n.func.value.id) in sessions
+        and n.func.attr in {"query", "execute", "scalars", "scalar", "get"}
+    }
+    for _ in range(8):
+        expanded = query_helpers | {
+            scope(n) for n in calls if local_helper(n) in query_helpers or imported_helper(n)
+        }
+        if expanded == query_helpers:
+            break
+        query_helpers = expanded
+
+    if _summary is not None:
+        _summary.update(name for name, function in functions.items() if function in query_helpers)
 
     findings = []
     seen = set()
@@ -191,12 +370,22 @@ def analyze_source(source: str, file: str = "input.py") -> dict:
                     ast.DictComp,
                 ),
             ):
+                # A loop's first iterable is evaluated once, before its body.
+                # Later comprehension iterables repeat for preceding generators.
+                iterable = None
+                if isinstance(parent, (ast.For, ast.AsyncFor)):
+                    iterable = parent.iter
+                elif isinstance(
+                    parent, (ast.ListComp, ast.GeneratorExp, ast.SetComp, ast.DictComp)
+                ):
+                    iterable = parent.generators[0].iter
+                if iterable is node or iterable in outer:
+                    continue
                 loops.append(parent)
         if isinstance(node, ast.Call):
             name = resolved(node.func)
-            if (
-                loops
-                and isinstance(node.func, ast.Attribute)
+            query_call = (
+                isinstance(node.func, ast.Attribute)
                 and (
                     _name(node.func.value).endswith(".objects")
                     or queryset(node.func.value)
@@ -206,20 +395,26 @@ def analyze_source(source: str, file: str = "input.py") -> dict:
                 in {
                     *query_methods,
                     "get",
+                    "scalar",
                     "count",
                     "exists",
                     "aggregate",
                     "first",
                     "execute",
                     "query",
-                    "scalars",
                 }
-            ):
+            )
+            helper_call = local_helper(node) in query_helpers or imported_helper(node)
+            if loops and (query_call or helper_call):
                 emit(
                     "query_in_loop",
                     node,
-                    "A queryset operation appears inside a loop.",
-                    "Review query evaluation and batching with prefetch_related/select_related.",
+                    "A query-capable helper is called inside a loop."
+                    if helper_call
+                    else "A queryset operation appears inside a loop.",
+                    "Batch reads with IN queries or eager loading (SQLAlchemy: "
+                    "selectinload/joinedload; Django: prefetch_related/select_related). "
+                    "Check identity-map hits, conditional queries and intentional batching.",
                 )
             if (
                 name == "sum"
@@ -385,13 +580,29 @@ def analyze_source(source: str, file: str = "input.py") -> dict:
     return {"findings": sorted(findings, key=lambda f: (f["line"], f["kind"])), "errors": []}
 
 
-def analyze_project(root: str | Path) -> dict:
+def analyze_project(
+    root: str | Path, *, max_files: int = MAX_FILES, max_project_bytes: int = MAX_PROJECT_BYTES
+) -> dict:
+    validate_scan_limits(max_files, max_project_bytes)
     root = Path(root).resolve()
     if not root.is_dir():
         raise ValueError("project root must be an existing directory")
     result = {"findings": [], "errors": [], "files_analyzed": 0, "skipped": 0, "limited": False}
     total = 0
     visited = 0
+    sources = {}
+
+    def finish():
+        from .project_analysis import analyze_imports
+
+        reports, inference = analyze_imports(sources, root)
+        result["findings"] = [
+            finding for report in reports.values() for finding in report["findings"]
+        ]
+        result["project_inference"] = inference
+        result["limited"] = result["limited"] or inference["limited"]
+        return result
+
     # os.walk prunes directories before traversal; never follow links outside the project.
     import os
 
@@ -399,7 +610,7 @@ def analyze_project(root: str | Path) -> dict:
         visited += len(dirs) + len(files)
         if visited > 20000:
             result["limited"] = True
-            return result
+            return finish()
         dirs[:] = sorted(
             d
             for d in dirs
@@ -409,9 +620,9 @@ def analyze_project(root: str | Path) -> dict:
             path = Path(directory, name)
             if path.suffix != ".py" or path.is_symlink():
                 continue
-            if result["files_analyzed"] >= MAX_FILES or total >= MAX_PROJECT_BYTES:
+            if result["files_analyzed"] >= max_files or total >= max_project_bytes:
                 result["limited"] = True
-                return result
+                return finish()
             try:
                 if path.stat().st_size > MAX_SOURCE_BYTES:
                     result["skipped"] += 1
@@ -422,10 +633,12 @@ def analyze_project(root: str | Path) -> dict:
                     result["skipped"] += 1
                     continue
                 total += len(source.encode("utf-8"))
-                if total > MAX_PROJECT_BYTES:
+                if total > max_project_bytes:
                     result["limited"] = True
-                    return result
-                report = analyze_source(source, str(path.relative_to(root)))
+                    return finish()
+                relative = str(path.relative_to(root))
+                sources[relative] = source
+                report = analyze_source(source, relative)
                 result["files_analyzed"] += 1
                 result["findings"].extend(report["findings"])
                 result["errors"].extend(report["errors"])
@@ -433,4 +646,4 @@ def analyze_project(root: str | Path) -> dict:
                 result["errors"].append(
                     {"file": str(path.relative_to(root)), "message": "Source could not be read"}
                 )
-    return result
+    return finish()

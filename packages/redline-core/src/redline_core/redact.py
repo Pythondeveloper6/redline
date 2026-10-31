@@ -56,13 +56,17 @@ _TEXT_PAIR = re.compile(
 )
 _SECRET_TAIL = re.compile(r"""[^\s,;&)}\]"']*""")
 #: ``scheme://…`` inside free text (run through :meth:`Redactor.url` for userinfo/query).
-_URL_TOKEN = re.compile(r"""\b[A-Za-z][A-Za-z0-9+.\-]*://[^\s"'<>`]+""")
+#: The scheme is bounded so a long run of scheme characters with no ``://`` (``a.a.a…``,
+#: attacker-controlled) costs linear time instead of a rescan from every dot.
+_URL_TOKEN = re.compile(r"""\b[A-Za-z][A-Za-z0-9+.\-]{0,31}://[^\s"'<>`]+""")
 #: The password of ``scheme://user:password@host``, percent-encoded so the URL still parses.
 _USERINFO_MASK = "%5Bredacted%5D"
 #: ``<password>x</password>`` (XML bodies, SOAP faults quoted in exception messages).
 _XML_ELEMENT = re.compile(r"<(?P<tag>[A-Za-z_][\w:.\-]*)(?:\s[^<>]*)?>(?P<val>[^<]*)</(?P=tag)\s*>")
 #: A JSON Web Token (``header.payload.signature``; both JSON parts start with ``{"``).
-_JWT = re.compile(r"\beyJ[\w-]{4,}\.eyJ[\w-]{4,}\.[\w-]*")
+#: It starts only where a ``[\w-]`` run starts, so ``eyJ-eyJ-…`` is scanned once, not once
+#: per ``-eyJ``.
+_JWT = re.compile(r"(?<![\w-])eyJ[\w-]{4,}\.eyJ[\w-]{4,}\.[\w-]*")
 #: 13–19 digits, optionally grouped by single spaces or dashes; kept when not Luhn-valid.
 _CARD = re.compile(r"(?<![\w.\-])\d(?:[ \-]?\d){12,18}(?![\w])")
 
@@ -316,6 +320,10 @@ class Redactor:
             user, colon, password = userinfo.partition(":")
             if colon and password != _USERINFO_MASK:
                 netloc = f"{user}:{_USERINFO_MASK}@{host}"
+                changed = True
+            elif not colon and _looks_like_token(unquote(user)):
+                # ``https://<token>@host``: git and HTTP clients take a bare token as the user.
+                netloc = f"{_USERINFO_MASK}@{host}"
                 changed = True
         if query:
             pairs = parse_qsl(query, keep_blank_values=True)
