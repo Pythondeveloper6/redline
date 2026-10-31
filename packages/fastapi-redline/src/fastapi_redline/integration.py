@@ -16,6 +16,7 @@ from redline_core import Recorder, Settings, configure
 from redline_core.access import Access
 from redline_core.api import RedlineAPI
 from redline_core.config import ResolvedConfig, resolve_settings
+from redline_core.environment import refuse_in_production
 from redline_core.explain import ExplainExecutor
 from redline_core.load.control import run_hooks
 from redline_core.storage import SQLiteStore, Store
@@ -234,3 +235,15 @@ def install(
     app.router.lifespan_context = lifespan
     app.state.redline = redline
     return redline
+
+
+def install_if_dev(app: FastAPI, **kwargs: Any) -> Redline | None:
+    """:func:`install`, unless the process looks like production.
+
+    Production signals: ``REDLINE_ENV``/``APP_ENV``/``ENV``/``ENVIRONMENT``/``FLASK_ENV``/
+    ``DJANGO_ENV`` set to ``prod`` or ``production``. Then nothing is attached, a warning is
+    logged and ``None`` is returned. ``REDLINE_ALLOW_PRODUCTION=1`` attaches anyway.
+    """
+    if refuse_in_production("fastapi"):
+        return None
+    return install(app, **kwargs)

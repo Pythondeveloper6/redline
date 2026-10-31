@@ -67,7 +67,15 @@ ENV_PREFIX = "REDLINE_"
 #: Path of a config file that replaces the ``project_root`` lookup.
 CONFIG_ENV = "REDLINE_CONFIG"
 #: ``REDLINE_*`` variables that are not settings (never reported as unknown).
-IGNORED_ENV = frozenset({"REDLINE_CONFIG", "REDLINE_ALLOW_OPEN", "REDLINE_RELEASE"})
+IGNORED_ENV = frozenset(
+    {
+        "REDLINE_CONFIG",
+        "REDLINE_ALLOW_OPEN",
+        "REDLINE_RELEASE",
+        "REDLINE_ALLOW_PRODUCTION",
+        "REDLINE_ENV",
+    }
+)
 _IGNORED_ENV_PREFIXES = ("REDLINE_TEST_",)
 _ENV_NAME = re.compile(r"^REDLINE_[A-Z][A-Z0-9_]*$")
 
