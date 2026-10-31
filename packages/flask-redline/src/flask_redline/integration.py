@@ -83,6 +83,7 @@ class _Runtime:
         self.api = RedlineAPI(
             store,
             settings,
+            runtime_health=self.recorder.operational_health,
             framework="flask",
             explain_executor=self._executor_for,
             run_launcher=launcher,

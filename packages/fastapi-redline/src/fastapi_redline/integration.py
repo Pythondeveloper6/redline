@@ -104,6 +104,7 @@ class Redline:
         self.api = RedlineAPI(
             store,
             settings,
+            runtime_health=self.recorder.operational_health,
             framework="fastapi",
             explain_executor=self._executor_for,
             run_launcher=launcher,
