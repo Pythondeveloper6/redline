@@ -909,7 +909,7 @@ def _configure_check_show(p: argparse.ArgumentParser) -> None:
 
 def _cmd_check(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
     err.write(
-        "usage: redline check {record,compare,run,init,show,comment} …\n\n"
+        "usage: redline check {record,compare,run,init,show,ratchet,comment} …\n\n"
         + "".join(f"  redline check {n:<8} {h}\n" for n, (h, _, _) in CHECK_COMMANDS.items())
     )
     return EXIT_USAGE
@@ -1388,6 +1388,85 @@ def _cmd_check_comment(args: argparse.Namespace, out: TextIO, err: TextIO) -> in
     return EXIT_OK
 
 
+def _configure_check_ratchet(p: argparse.ArgumentParser) -> None:
+    _check_common(p)
+    p.add_argument(
+        "--ratchet-file",
+        metavar="FILE",
+        help="committed ratchet JSON (default <suite>.ratchet.json)",
+    )
+    p.add_argument(
+        "--update",
+        action="store_true",
+        help="when nothing regressed, write the file: improvements tighten it, new endpoints "
+        "are added (required to create the file)",
+    )
+    p.add_argument("--no-latency", action="store_true", help="ratchet query counts only")
+    p.add_argument("--latency-pct", type=float, default=30.0, metavar="X")
+    p.add_argument("--latency-ms", type=float, default=20.0, metavar="Y")
+    p.add_argument("--json", metavar="OUT", help="write the verdict as JSON")
+    p.add_argument("--markdown", metavar="OUT", help="write a Markdown summary")
+
+
+def _cmd_check_ratchet(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
+    from .check import ratchet
+
+    loaded = _load_suite_for(args, err)
+    if loaded is None:
+        return EXIT_USAGE
+    suite, base_url = loaded
+    path = args.ratchet_file or os.path.splitext(args.suite)[0] + ".ratchet.json"
+    try:
+        recorded = ratchet.load(path)
+    except FileNotFoundError:
+        if not args.update:
+            err.write(f"redline check ratchet: {path}: no such file (create it with --update)\n")
+            return EXIT_USAGE
+        recorded = {}
+    except ratchet.RatchetError as exc:
+        err.write(f"redline check ratchet: {exc}\n")
+        return EXIT_USAGE
+    store = _CheckStore(args, err)
+    try:
+        result = _run_check(
+            args,
+            out,
+            err=err,
+            suite=suite,
+            base_url=base_url,
+            kind="baseline",
+            baseline=None,
+            store=store,
+        )
+    finally:
+        store.close()
+    if isinstance(result, int):
+        return result
+    if result.status == "stopped":
+        err.write("redline check ratchet: stopped – ratchet file not touched\n")
+        return EXIT_INTERRUPTED
+    observed = ratchet.observe(result.requests, latency=not args.no_latency)
+    if recorded and not any(o.get("queries") is not None for o in observed.values()):
+        err.write("redline check ratchet: no server-side query counts (use --store)\n")
+    verdict = ratchet.compare(
+        recorded, observed, latency_pct=args.latency_pct, latency_ms=args.latency_ms
+    )
+    out.write("\n" + verdict.to_markdown("Redline ratchet"))
+    for attr, text in (
+        ("json", json.dumps(verdict.to_dict(), indent=2) + "\n"),
+        ("markdown", verdict.to_markdown()),
+    ):
+        if getattr(args, attr):
+            with open(getattr(args, attr), "w", encoding="utf-8") as fh:
+                fh.write(text)
+    if not verdict.ok:
+        return EXIT_FAIL
+    if args.update and verdict.updated != recorded:
+        ratchet.write(path, verdict.updated)
+        out.write(f"wrote {path}\n")
+    return EXIT_OK
+
+
 def _cmd_check_init(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
     from .check.generate import from_traces
     from .check.suite import Suite
@@ -1481,6 +1560,12 @@ CHECK_COMMANDS: dict[str, tuple[str, Callable[[argparse.ArgumentParser], None], 
         _cmd_check_init,
     ),
     "show": ("print a saved report (JSON) again", _configure_check_show, _cmd_check_show),
+    "ratchet": (
+        "fail on new query-count/latency regressions against a committed file; "
+        "--update tightens it",
+        _configure_check_ratchet,
+        _cmd_check_ratchet,
+    ),
     "comment": (
         "post a saved report as the sticky PR comment and job summary (GitHub Actions)",
         _configure_check_comment,
