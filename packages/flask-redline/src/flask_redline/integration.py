@@ -26,6 +26,7 @@ from ._security import environ_info
 from ._sqlalchemy import (
     EngineLike,
     alias_for,
+    auto_engine,
     build_executor,
     instrument_engine,
     name_engines,
@@ -128,7 +129,7 @@ class _Runtime:
 
     def _executor_for(self, alias: str, vendor: str) -> ExplainExecutor | None:
         self.discover_engines()
-        engine = self.engines.get(alias)
+        engine = self.engines.get(alias) or auto_engine(alias)
         if engine is None:
             return None
         return build_executor(engine, vendor_of(engine), lambda: None)
@@ -151,6 +152,11 @@ class Redline:
         A SQLAlchemy ``Engine``, a list of them, or ``{alias: engine}``; the first of a list
         is the ``"default"`` db alias (used by EXPLAIN). When omitted and Flask-SQLAlchemy
         is set up on the app, its engines are instrumented automatically.
+    ``engines``
+        ``"auto"`` instruments every SQLAlchemy engine created after install (per-user or
+        per-request engines) without registering it, by setting
+        ``instrument_engines="all"``. Engines are held weakly. Default: only the engines
+        passed as ``engine``.
     ``settings``
         A ``Settings`` or a dict of settings (case-insensitive keys). ``app.config["REDLINE"]``
         (a dict) is merged underneath a dict given here; a ``Settings`` instance replaces it.
@@ -177,6 +183,7 @@ class Redline:
         app: Flask | None = None,
         *,
         engine: Any = None,
+        engines: str | None = None,
         settings: Mapping[str, Any] | Settings | None = None,
         url_prefix: str | None = None,
         permission: Callable[[Any], Any] | None = None,
@@ -200,6 +207,9 @@ class Redline:
         self.url_prefix = url_prefix or "/_redline"
         self.permission = permission
         self._engine = engine
+        if engines not in (None, "auto"):
+            raise ValueError('engines must be "auto" or None')
+        self._auto_engines = engines == "auto"
         self._settings = settings
         self._store = store
         self.app: Flask | None = None
@@ -256,6 +266,8 @@ class Redline:
             settings = {**(app.config.get(CONFIG_KEY) or {}), **(settings or {})}
         resolved = resolve_settings(settings, native_hook=self.permission is not None)
         cfg = resolved.settings
+        if self._auto_engines:
+            cfg = cfg.replace(instrument_engines="all")
         prefix = self._url_prefix or "/" + (cfg.mount_path or "/_redline").strip("/")
         self.url_prefix = prefix
         own = rf"^{re.escape(prefix)}(/|$)"

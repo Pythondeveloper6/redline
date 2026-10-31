@@ -84,6 +84,9 @@ def _where(callsite: Callsite | None) -> str:
 
 
 def _on(fp: str) -> str:
+    proc = sqlmod.procedure_name(fp)
+    if proc:
+        return f" calling procedure {proc}"
     table = sqlmod.primary_table(fp)
     return f" on {table}" if table else ""
 
@@ -272,7 +275,8 @@ class Detector:
                     "read_query",
                     data.get("explainable", sqlmod.is_explainable(data.get("sql", ""))),
                 )
-                or sqlmod.statement_kind(data.get("sql", "")) in {"EXEC", "EXECUTE"}
+                or data.get("procedure")
+                or sqlmod.statement_kind(data.get("sql", "")) in {"EXEC", "EXECUTE", "CALL"}
             ):
                 continue
             fp = data.get("fingerprint") or sqlmod.fingerprint(data.get("sql", ""))
@@ -300,9 +304,15 @@ class Detector:
                     severity="critical" if critical else "warning",
                     title=f"N+1: {n} queries{_on(fp)}{_where(callsite)}",
                     detail=(
-                        f"The same query ran {_plural(n, 'time')} from one line of code, "
-                        f"taking {total:.1f} ms in total. Fetch the related rows once "
-                        "instead of once per item."
+                        f"The same {'procedure call' if sqlmod.procedure_name(fp) else 'query'} "
+                        f"ran {_plural(n, 'time')} from one line of code, "
+                        f"taking {total:.1f} ms in total. "
+                        + (
+                            "Pass the whole set to one call (a table-valued parameter or a "
+                            "set-based procedure) instead of calling once per item."
+                            if sqlmod.procedure_name(fp)
+                            else "Fetch the related rows once instead of once per item."
+                        )
                     ),
                     span_ids=[s.id for s in group],
                     fingerprint=fp,
@@ -333,6 +343,8 @@ class Detector:
             severity: Severity = (
                 "warning" if n >= 5 or total >= self.settings.slow_query_ms else "info"
             )
+            if group[0].data.get("procedure"):  # a procedure's side effects are unknown
+                severity = "info"
             issues.append(
                 Issue(
                     id=issue_id("duplicate_query", fp, loc),
