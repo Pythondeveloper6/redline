@@ -190,7 +190,8 @@ sections below describe the defaults and the threats.
     A loopback peer that sends `X-Forwarded-For`, `X-Real-IP` or `Forwarded` without being
     in `trusted_proxies` is refused too (it is almost certainly a reverse proxy on the same
     host). Pass your own hook (it implies `access = "framework"`; an empty list is no hook),
-    or set `access`, for anything else. A FastAPI dependency should raise
+    or set `access`, for anything else. `access = "framework"` with no hook attached
+    refuses every request (`403`) in all four adapters: there is nothing to delegate to. A FastAPI dependency should raise
     `HTTPException` to refuse; one that returns `False` is refused with `403` as well. A refusal is `403` JSON `{"error": {"code": "forbidden", ...}}`. See
     [FastAPI](fastapi.md#access-control), [Flask](flask.md#access-control) and
     [Litestar](litestar.md#access-control).
@@ -219,9 +220,10 @@ Reads are `GET`. Every other method (`DELETE` on traces and runs, `POST api/expl
 
 `?_redline=profile` and `X-Redline-Profile: 1` start the profiler and make Redline keep the
 trace whatever `sample_rate` says. They are honoured only in framework debug mode or when
-the request itself carries valid Redline credentials (a login cookie, a Bearer token or
-Basic credentials, a client the `local` policy lets in, or `access_check`); anyone else
-could make you profile and store their requests at will. With `access = "framework"` (a
+the request itself carries valid Redline credentials (a Bearer token or Basic
+credentials, a client the `local` policy lets in, or `access_check`); anyone else
+could make you profile and store their requests at will. The login cookie is scoped to
+the mount, so the browser never sends it to application URLs. With `access = "framework"` (a
 hook that only runs inside Redline's own routes) only debug mode honours them. The
 `production` preset turns profiling off. `X-Redline-Run` (the load tester's header) and `X-Redline-Check` (the refactor check's) tag a
 trace only when that run exists in the store and is running (a check also for a minute after it ends).

@@ -125,11 +125,18 @@ def request_info(request: Request, mount: str) -> RequestInfo:
     )
 
 
-def redline_guard(access: Access, mount: str) -> Callable[[Request], Awaitable[None]]:
-    """The dependency every Redline route runs first: the core access check."""
+def redline_guard(
+    access: Access, mount: str, *, framework_hook: bool = True
+) -> Callable[[Request], Awaitable[None]]:
+    """The dependency every Redline route runs first: the core access check.
+
+    ``framework_hook`` says whether the app attached its own dependencies after this one.
+    Under ``access="framework"`` they make the decision; without them the gate refuses.
+    """
+    framework_ok = (lambda: True) if framework_hook else None
 
     async def guard(request: Request) -> None:
-        decision = access.check(request_info(request, mount), framework_ok=lambda: True)
+        decision = access.check(request_info(request, mount), framework_ok=framework_ok)
         if not decision.allowed:
             raise RedlineHTTPError.from_decision(decision)
 

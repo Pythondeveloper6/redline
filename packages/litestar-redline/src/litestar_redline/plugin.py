@@ -190,7 +190,10 @@ class RedlinePlugin(InitPluginProtocol):
         for alias, eng in name_engines(engine).items():
             self.add_engine(eng, alias)
 
-        guards = [redline_guard(self.access, self.path), *(self.guards or [])]
+        guards = [
+            redline_guard(self.access, self.path, framework_hook=bool(self.guards)),
+            *(self.guards or []),
+        ]
         self.access.debug = lambda: bool(app_config.debug)
         self.access.log_startup(self.path, "pass RedlinePlugin(guards=[...])")
         app_config.route_handlers.append(build_router(self, self.path, guards))
