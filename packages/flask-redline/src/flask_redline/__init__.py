@@ -24,7 +24,7 @@ from ._sqlalchemy import instrument_engine
 from .integration import Redline
 from .suggest import SQLAlchemyFixSuggester
 
-__version__ = "0.5.0a1"
+__version__ = "0.5.0a2"
 
 __all__ = [
     "Redline",

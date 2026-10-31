@@ -126,6 +126,7 @@ class RedlinePlugin(InitPluginProtocol):
         self.api = RedlineAPI(
             self.store,
             cfg,
+            runtime_health=self.recorder.operational_health,
             framework="litestar",
             explain_executor=self._executor_for,
             run_launcher=launcher,

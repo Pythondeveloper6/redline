@@ -85,6 +85,7 @@ def build_runtime(settings: Settings | None = None) -> Runtime:
     api = RedlineAPI(
         store,
         core,
+        runtime_health=recorder.operational_health,
         framework="django",
         explain_executor=executor_factory,
         run_launcher=launcher,
