@@ -182,6 +182,24 @@ Flamegraphs are opt-in per request: add `?_redline=profile` or the header
 from a request with valid Redline credentials (a client `local` lets in, a token…); see
 [Forcing capture](security.md#forcing-capture) and [Flamegraphs](flamegraphs.md).
 
+## Endpoints per blueprint
+
+Every request served by a blueprint carries the trace tag `blueprint` (the dotted name for
+nested blueprints, such as `admin.audit`). Apps with many blueprints can read per-blueprint
+totals instead of one row per route:
+
+```text
+GET /_redline/api/endpoints?window=24h&group_by=blueprint
+```
+
+```bash
+flask redline endpoints --group-by blueprint --window 24h   # add --json for machine output
+```
+
+Each row sums the blueprint's requests (count, p50/p95/p99, average queries, issues) and
+reports how many routes it spans (`routes`). Requests on routes registered directly on the
+app are grouped as `(none)`. You can also filter traces by the tag in the UI search.
+
 ## Fix suggestions
 
 For an N+1, `SQLAlchemyFixSuggester` maps the repeated query to your models and writes a
