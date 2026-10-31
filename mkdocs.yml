@@ -150,6 +150,7 @@ nav:
       - Production: production.md
       - Full-stack testing: testing.md
       - Security: security.md
+      - Threat model: threat-model.md
       - Storage: storage.md
       - Performance and overhead: performance.md
   - Reference:
@@ -158,6 +159,7 @@ nav:
       - Command line: cli.md
       - Project:
           - Roadmap: roadmap.md
+          - API stability: api-stability.md
           - FAQ: faq.md
           - Changelog: changelog.md
           - Contributing: contributing.md

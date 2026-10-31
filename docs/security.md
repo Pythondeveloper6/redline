@@ -386,6 +386,9 @@ provenance rather than relying only on a similar package name.
 
 ## A short threat model
 
+The full, structured version (assets, trust boundaries, STRIDE table and a checklist for an
+independent reviewer) is on [Threat model](threat-model.md).
+
 | Attacker | Wants | Stopped by |
 |---|---|---|
 | Anonymous internet user | Read traces | Django: login and superuser check. Others: `404` until `access` is set (outside debug mode), the loopback policy, a token or your own hook. **Not stopped** if you expose it open |
