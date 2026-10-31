@@ -15,6 +15,11 @@ ASYNC_DRIVERS = {
     "mssql": "mssql+aioodbc",
     "postgres": "postgresql+asyncpg",
 }
+#: Extra drivers accepted per (vendor, kind); the DSN is the vendor's own with the driver swapped.
+ALT_DRIVERS = {
+    ("mysql", True): ("aiomysql", "asyncmy"),
+    ("mysql", False): ("pymysql",),
+}
 IDENTITY_SQL = {
     "mysql": "SELECT DATABASE()",
     "mssql": "SELECT DB_NAME()",
@@ -27,7 +32,7 @@ def require_compose():
         raise RuntimeError("Disposable Compose integration consent is required")
 
 
-def database_url(vendor, *, asynchronous=False):
+def database_url(vendor, *, asynchronous=False, driver=None):
     from sqlalchemy.engine import make_url
 
     require_compose()
@@ -40,6 +45,11 @@ def database_url(vendor, *, asynchronous=False):
         raise RuntimeError("Required disposable test DSN is missing: " + name)
     url = make_url(raw)
     expected = ASYNC_DRIVERS[vendor] if asynchronous else DRIVERS[vendor]
+    if driver is not None:
+        if driver not in ALT_DRIVERS.get((vendor, asynchronous), ()):
+            raise RuntimeError("Unsupported driver override")
+        url = url.set(drivername=f"{vendor}+{driver}")
+        expected = url.drivername
     if url.drivername != expected or not (url.database or "").startswith("redline_test_"):
         raise RuntimeError("Refusing unexpected driver or non-disposable database")
     return url
@@ -91,10 +101,13 @@ def assert_recordings(store, path, sentinel):
 
 
 @contextmanager
-def isolated_engine(vendor):
+def isolated_engine(vendor, *, driver=None, **engine_kwargs):
     from sqlalchemy import Column, Integer, MetaData, Table, create_engine
 
-    engine = create_engine(database_url(vendor), hide_parameters=True, pool_pre_ping=True)
+    engine_kwargs.setdefault("pool_pre_ping", True)
+    engine = create_engine(
+        database_url(vendor, driver=driver), hide_parameters=True, **engine_kwargs
+    )
     table = Table(
         "redline_probe_" + uuid.uuid4().hex[:16],
         MetaData(),

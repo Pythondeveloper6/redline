@@ -41,6 +41,7 @@ Traces go to their own SQLite file (`.redline/redline.db`), never to your databa
 RedlinePlugin(
     settings=None,      # dict | redline_core.Settings
     engine=None,        # Engine | AsyncEngine | [engines] | {"alias": engine}
+    engines=None,       # "auto": instrument engines created at runtime
     path=None,          # default: the mount_path setting, else "/_redline"; never recorded
     guards=None,        # Litestar guards for the UI and API
     store=None,         # a custom Store; default is the SQLite file
@@ -90,6 +91,12 @@ by EXPLAIN; others are named after their database file, or pass a dict:
 RedlinePlugin(engine=[async_engine, sync_engine])
 RedlinePlugin(engine={"main": main_engine, "analytics": analytics_engine})
 ```
+
+Engines created at runtime (per-user or per-request) are picked up with
+`RedlinePlugin(engines="auto")`, which sets `instrument_engines="all"`: each engine is
+hooked on its first use inside a recorded request, under a unique `auto_<id>` alias, and
+held weakly so disposed engines are collected. Sync engines found this way can be
+EXPLAINed. See [FastAPI: engines created at runtime](fastapi.md#engines-created-at-runtime-per-user-or-per-request).
 
 ## What is recorded
 

@@ -39,6 +39,7 @@ __all__ = [
     "EngineLike",
     "SQLAlchemyFixSuggester",
     "alias_for",
+    "auto_engine",
     "build_executor",
     "explain_executor_factory",
     "instrument_engine",
@@ -55,6 +56,8 @@ _registration_lock = threading.RLock()
 _legacy_aliases: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
 _owners: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
 _auto_aliases: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+#: alias -> sync engine for auto-discovered engines (weak: disposed engines vanish).
+_auto_engines: weakref.WeakValueDictionary = weakref.WeakValueDictionary()
 _ATTR = "_redline_start"
 _VENDORS = {"postgresql": "postgresql", "mysql": "mysql", "mariadb": "mysql", "sqlite": "sqlite"}
 
@@ -196,8 +199,23 @@ def _auto_alias(engine):
         if engine not in _auto_aliases:
             from redline_core.model import new_id
 
-            _auto_aliases[engine] = "auto_" + new_id()[:16]
+            alias = "auto_" + new_id()[:16]
+            _auto_aliases[engine] = alias
+            _auto_engines[alias] = engine
         return _auto_aliases[engine]
+
+
+def auto_engine(alias: str) -> Engine | None:
+    """The live, auto-discovered *sync* engine behind ``alias`` (``None`` once collected).
+
+    Lets EXPLAIN run against engines created at runtime (``instrument_engines="all"``).
+    Async engines are not listed: only their inner sync engine is seen, which cannot run
+    queries outside the greenlet bridge.
+    """
+    engine = _auto_engines.get(alias)
+    if engine is None or getattr(engine.dialect, "is_async", False):
+        return None
+    return engine
 
 
 def _binding(engine, builder=None):
@@ -284,6 +302,8 @@ def _install_engine(sync_engine, alias, *, _auto=False):
             many=bool(many),
             capture_callsite=False,
         )
+        if span is None:
+            _observe_ignored(conn, statement, vendor, builder)
         if span is not None:
             span.callsite = _callsite(builder.recorder)
             span.data["auto_engine"] = bool(context._redline_auto)
@@ -315,6 +335,7 @@ def _install_engine(sync_engine, alias, *, _auto=False):
                 vendor=vendor,
                 capture_callsite=False,
                 many=bool(getattr(context, "executemany", False)),
+                honor_ignore=False,
             )
             if span is not None:
                 span.data["auto_engine"] = bool(context._redline_auto)
@@ -563,6 +584,22 @@ def _note_loaded_instance(session, instance):
     from redline_core.orm import note_instance
 
     note_instance()
+
+
+def _observe_ignored(conn, statement, vendor, builder):
+    """Session-state tracking still sees statements ``ignore_sql`` keeps out of the trace."""
+    from types import SimpleNamespace
+
+    from redline_core.session_state import observe
+    from redline_core.sql import is_ignored
+
+    if not is_ignored(statement, builder.recorder.settings.ignore_sql):
+        return
+    try:
+        stub = SimpleNamespace(id="", callsite=_callsite(builder.recorder), data={"vendor": vendor})
+        observe(conn.info, statement, stub)
+    except Exception:
+        _observer_failed()
 
 
 def _query_evidence(conn, span, statement):

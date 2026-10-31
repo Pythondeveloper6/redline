@@ -410,7 +410,16 @@ class RedlineAPI:
             window = parse_window(_str_param(params, "window"))
         except FilterError as exc:
             return error(400, "invalid_window", str(exc))
-        return 200, {"items": [e.to_dict() for e in self.store.endpoints(window)]}
+        group_by = _str_param(params, "group_by")
+        if not group_by:
+            return 200, {"items": [e.to_dict() for e in self.store.endpoints(window)]}
+        try:
+            stats = self.store.endpoints(window, group_by=group_by)  # type: ignore[call-arg]
+        except ValueError as exc:
+            return error(400, "invalid_group_by", str(exc))
+        except TypeError:  # a custom store without grouping
+            return error(501, "not_supported", "This store cannot group endpoints.")
+        return 200, {"group_by": group_by, "items": [e.to_dict() for e in stats]}
 
     def suppression_routes(self, method, path, body):
         from .suppressions import validate

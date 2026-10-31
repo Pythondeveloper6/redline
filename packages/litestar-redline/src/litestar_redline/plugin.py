@@ -27,6 +27,7 @@ from ._security import redline_guard, scope_info
 from ._sqlalchemy import (
     EngineLike,
     alias_for,
+    auto_engine,
     build_executor,
     instrument_engine,
     name_engines,
@@ -75,6 +76,10 @@ class RedlinePlugin(InitPluginProtocol):
         A sync ``Engine``, an ``AsyncEngine``, a list of them, or ``{alias: engine}``.
         The first of a list is the ``"default"`` db alias (used by EXPLAIN). When omitted
         and the app has Litestar's ``SQLAlchemyPlugin``, its engine(s) are instrumented.
+    ``engines``
+        ``"auto"`` instruments every SQLAlchemy engine created after install (per-user or
+        per-request engines) without registering it, by setting
+        ``instrument_engines="all"``. Engines are held weakly.
     ``path``
         Where the UI and API live (default: the ``mount_path`` setting, else
         ``/_redline``). Never recorded.
@@ -99,11 +104,16 @@ class RedlinePlugin(InitPluginProtocol):
         path: str | None = None,
         guards: Sequence[Any] | None = None,
         store: Store | None = None,
+        engines: str | None = None,
     ) -> None:
+        if engines not in (None, "auto"):
+            raise ValueError('engines must be "auto" or None')
         # An empty list is no hook: the normal default rules apply, not "framework" with
         # nothing to check.
         self.config = resolve_settings(settings, native_hook=bool(guards))
         cfg = self.config.settings
+        if engines == "auto":
+            cfg = cfg.replace(instrument_engines="all")
         path = path if path is not None else (cfg.mount_path or "/_redline")
         path = "/" + path.strip("/")
         if path == "/":
@@ -146,7 +156,7 @@ class RedlinePlugin(InitPluginProtocol):
         return alias
 
     def _executor_for(self, alias: str, vendor: str) -> ExplainExecutor | None:
-        engine = self.engines.get(alias)
+        engine = self.engines.get(alias) or auto_engine(alias)
         if engine is None:
             return None
         return build_executor(engine, vendor_of(engine), lambda: self.loop)
