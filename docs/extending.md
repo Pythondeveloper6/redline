@@ -14,7 +14,7 @@ Both are **alpha** surfaces: signatures may change before 1.0.
 ## The data you will touch
 
 All of it is plain dataclasses in `redline_core.model` (and re-exported from
-`redline_core`). The full contract is in the repository's `CONTRACT.md`.
+`redline_core`). The public surface and its stability rules are in [API stability](api-stability.md).
 
 ```python
 @dataclass

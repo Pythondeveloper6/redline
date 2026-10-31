@@ -64,10 +64,12 @@ def detect(trace: Trace, settings: Settings) -> list[Issue]:
     calls = [s for s in trace.spans if s.kind == "http_out"]
     if not calls:
         return []
-    issues = _retry_storms(calls)
+    # SDK operation labels deliberately omit resource identity and retry attempts.
+    identified = [s for s in calls if not s.data.get("sdk")]
+    issues = _retry_storms(identified)
     stormed = {sid for issue in issues for sid in issue.span_ids}
     issues.extend(_slow(calls, settings))
-    issues.extend(_duplicates(calls, settings, stormed))
+    issues.extend(_duplicates(identified, settings, stormed))
     return issues
 
 

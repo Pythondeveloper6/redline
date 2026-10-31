@@ -17,10 +17,11 @@ from ._httpx import instrument_httpx, uninstrument_httpx
 from ._middleware import RedlineMiddleware
 from ._security import RedlineHTTPError, csrf_guard, local_only, loopback_guard
 from ._sqlalchemy import instrument_engine
-from .integration import Redline, install
+from .background import add_background_task
+from .integration import Redline, install, install_if_dev
 from .suggest import SQLAlchemyFixSuggester
 
-__version__ = "0.4.0a1"
+__version__ = "0.5.0a2"
 
 __all__ = [
     "Redline",
@@ -28,8 +29,10 @@ __all__ = [
     "RedlineMiddleware",
     "SQLAlchemyFixSuggester",
     "__version__",
+    "add_background_task",
     "csrf_guard",
     "install",
+    "install_if_dev",
     "instrument_engine",
     "instrument_httpx",
     "local_only",

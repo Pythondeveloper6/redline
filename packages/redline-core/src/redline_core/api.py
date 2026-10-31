@@ -160,8 +160,10 @@ class RedlineAPI:
         check_launcher: Callable[..., str] | None = None,
         check_stopper: RunStopper | None = None,
         debug: Callable[[], Any] | None = None,
+        runtime_health: Callable[[], dict[str, Any]] | None = None,
     ) -> None:
         self.store = store
+        self.runtime_health = runtime_health
         self.settings = settings or Settings()
         #: :class:`~redline_core.config.ResolvedConfig` behind ``GET api/config``.
         self.config = config
@@ -220,7 +222,15 @@ class RedlineAPI:
             return error(501, "not_supported", str(exc) or "This store does not support it.")
         except Exception as exc:  # the profiler UI must never take the app down
             capture_failure("Redline API processing failed")
-            return error(500, "internal_error", f"{type(exc).__name__}: {exc}")
+            if self.settings.capture_error_details:
+                from .redact import Redactor
+
+                # driver errors can quote a DSN or a secret value
+                detail = Redactor(self.settings).text(str(exc)[:2000])[:500]
+                message = f"{type(exc).__name__}: {detail}"
+            else:
+                message = "Redline could not process this request; details are withheld."
+            return error(500, "internal_error", message)
 
     def _route(
         self,
@@ -236,6 +246,8 @@ class RedlineAPI:
             return route(self, method, path, params, body)
         if path == "api/suppressions" or path.startswith("api/suppressions/"):
             return self.suppression_routes(method, path, body)
+        if path == "api/metrics":
+            return self.metrics() if method == "GET" else _not_allowed()
         get_routes: dict[str, Callable[[Mapping[str, Any]], Response]] = {
             "api/compare": self.compare,
             "api/sql": self.sql,
@@ -297,6 +309,13 @@ class RedlineAPI:
             if method == "DELETE":
                 return self.delete_trace(m.group(1))
             return _not_allowed()
+        if path == "api/health":
+            if method != "GET":
+                return _not_allowed()
+            from .operational import health_snapshot
+
+            health = health_snapshot(self.store, self.runtime_health)
+            return (200 if health["status"] == "ok" else 503), health
         if path == "api/endpoints":
             return self.endpoints(params) if method == "GET" else _not_allowed()
         if path == "api/issues":
@@ -319,12 +338,38 @@ class RedlineAPI:
             "features": self._features(),
             "access": self._access_meta(),
             "settings": settings,
+            "operational": self.operational_health(),
             "storage": {
                 "rows": self.store.count(),
                 "path": getattr(self.store, "path", None),
                 "dropped": getattr(self.store, "dropped", 0),
             },
         }
+
+    def metrics(self) -> RawResponse:
+        """``GET api/metrics``: recorder health in the Prometheus text exposition format."""
+        from .metrics import render_metrics
+
+        return RawResponse(
+            200,
+            "text/plain; version=0.0.4; charset=utf-8",
+            render_metrics(self.store, self._recorder()).encode("utf-8"),
+            {"Cache-Control": "no-store"},
+        )
+
+    def _recorder(self) -> Any:
+        from .recorder import get_recorder
+
+        try:
+            recorder = get_recorder()
+        except Exception:
+            return None
+        return recorder if recorder.store is self.store else None
+
+    def operational_health(self) -> dict[str, Any]:
+        from .operational import health_snapshot
+
+        return health_snapshot(self.store, self.runtime_health)
 
     def _features(self) -> dict[str, bool]:
         s = self.settings
@@ -410,7 +455,16 @@ class RedlineAPI:
             window = parse_window(_str_param(params, "window"))
         except FilterError as exc:
             return error(400, "invalid_window", str(exc))
-        return 200, {"items": [e.to_dict() for e in self.store.endpoints(window)]}
+        group_by = _str_param(params, "group_by")
+        if not group_by:
+            return 200, {"items": [e.to_dict() for e in self.store.endpoints(window)]}
+        try:
+            stats = self.store.endpoints(window, group_by=group_by)  # type: ignore[call-arg]
+        except ValueError as exc:
+            return error(400, "invalid_group_by", str(exc))
+        except TypeError:  # a custom store without grouping
+            return error(501, "not_supported", "This store cannot group endpoints.")
+        return 200, {"group_by": group_by, "items": [e.to_dict() for e in stats]}
 
     def suppression_routes(self, method, path, body):
         from .suppressions import validate

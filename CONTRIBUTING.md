@@ -46,13 +46,26 @@ tools. Prefix commands with `uv run`; there is no need to activate anything.
 ## Run the tests
 
 Each package has its own pytest configuration (pytest-django needs a settings module that
-the other two must not see), so run each from its directory:
+the others must not see), so the suites run one per package. From the repository root:
+
+```bash
+uv run python scripts/run_tests.py                  # all five packages, one summary
+uv run python scripts/run_tests.py core flask       # a subset
+uv run python scripts/run_tests.py core -- -x -k n_plus_one   # extra pytest arguments
+uv run python scripts/run_tests.py --cov            # with coverage
+```
+
+or one package directly, from its directory:
 
 ```bash
 (cd packages/redline-core && uv run pytest)
 (cd packages/django-redline && uv run pytest)
-(cd packages/fastapi-redline && uv run pytest)
 ```
+
+Release checks that need the network: `scripts/check_clean_install.py` (fresh-venv install
+from PyPI or built wheels) and `scripts/check_store_upgrade.py` (a store written by an
+older release opens with this one); the *Compatibility* workflow runs both weekly.
+To measure overhead on your own app over HTTP, see `benchmarks/real_app.py`.
 
 Postgres-only tests (EXPLAIN against a real server) skip cleanly when no Postgres server
 is available, and they say so in the output.

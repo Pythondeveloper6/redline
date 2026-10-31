@@ -69,6 +69,7 @@ Redline(
     app=None,
     *,
     engine=None,          # Engine | [engines] | {"alias": engine}
+    engines=None,         # "auto": instrument engines created at runtime
     settings=None,        # dict | redline_core.Settings
     url_prefix=None,      # default: the mount_path setting, else "/_redline"
     permission=None,      # callable(request) -> bool; implies access="framework"
@@ -104,6 +105,23 @@ redline.add_engine(late_engine)            # an engine created later
 ```
 
 The alias is stored on every query so that EXPLAIN runs on the right database.
+
+### Engines created at runtime (per-user or per-request)
+
+Apps that build engines on the fly (for example one per user, with token authentication
+through `connect_args` or `creator=`) cannot register each one. Opt in to automatic
+discovery:
+
+```python
+Redline(app, engines="auto")   # or settings={"instrument_engines": "all"}
+```
+
+This sets `instrument_engines="all"`: every SQLAlchemy `Engine` (sync, or the sync engine
+inside an `AsyncEngine`) that runs a statement inside a recorded request is hooked on its
+first use, once, under a unique alias (`auto_<id>`). Engines are held weakly, so a
+disposed per-request engine is garbage collected as usual. Automatically found sync
+engines can be EXPLAINed; async ones are recorded but not EXPLAINed. Engines you pass as
+`engine=` keep their own alias. The default stays explicit registration.
 
 ## What is recorded
 
@@ -163,6 +181,24 @@ Flamegraphs are opt-in per request: add `?_redline=profile` or the header
 `X-Redline-Profile: 1` (needs the `profile` extra). They are honoured with `app.debug` or
 from a request with valid Redline credentials (a client `local` lets in, a token…); see
 [Forcing capture](security.md#forcing-capture) and [Flamegraphs](flamegraphs.md).
+
+## Endpoints per blueprint
+
+Every request served by a blueprint carries the trace tag `blueprint` (the dotted name for
+nested blueprints, such as `admin.audit`). Apps with many blueprints can read per-blueprint
+totals instead of one row per route:
+
+```text
+GET /_redline/api/endpoints?window=24h&group_by=blueprint
+```
+
+```bash
+flask redline endpoints --group-by blueprint --window 24h   # add --json for machine output
+```
+
+Each row sums the blueprint's requests (count, p50/p95/p99, average queries, issues) and
+reports how many routes it spans (`routes`). Requests on routes registered directly on the
+app are grouped as `(none)`. You can also filter traces by the tag in the UI search.
 
 ## Fix suggestions
 

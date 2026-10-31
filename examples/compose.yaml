@@ -81,6 +81,7 @@ services:
       REDLINE_TEST_PG: postgresql://redline:redline_test_only@postgres:5432/redline_test_integration
       REDLINE_TEST_MYSQL_DSN: mysql+pymysql://redline:redline_test_only@mysql:3306/redline_test_integration
       REDLINE_TEST_MYSQL_ASYNC_DSN: mysql+aiomysql://redline:redline_test_only@mysql:3306/redline_test_integration
+      # asyncmy reuses the DSN above with the driver swapped (tests/live_database_helpers.py)
       REDLINE_TEST_MSSQL_DSN: mssql+pyodbc://sa:Redline_local_Test9!@mssql:1433/redline_test_integration?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=yes
       REDLINE_TEST_MSSQL_ASYNC_DSN: mssql+aioodbc://sa:Redline_local_Test9!@mssql:1433/redline_test_integration?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=yes
       REDLINE_TEST_REDIS_URL: redis://redis:6379/1

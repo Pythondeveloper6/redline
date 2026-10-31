@@ -13,8 +13,11 @@ Redline has two kinds of commands:
 
 ```text
 redline load SCENARIO [options]       run a load test against a running app
+redline export --store DB [ID --html OUT]   OTLP preview/send, or one HTML summary
+redline digest --store DB --webhook URL    post newly seen issues to a chat webhook
+redline init                          write a starter redline.toml and update .gitignore
 redline load init ...                 write a scenario file
-redline check record|compare|run|init|show   refactor check: prove a refactor is safe
+redline check record|compare|run|init|show|ratchet|comment   refactor check: prove a refactor is safe
 redline config                        print the effective configuration
 redline doctor                        check the setup
 redline hash-password                 make a password hash for access = "basic"
@@ -23,6 +26,63 @@ redline hash-password                 make a password hash for access = "basic"
 Exit codes: `0` success, `1` a check or threshold failed, `2` a usage, configuration or
 scenario error, `130` interrupted with Ctrl-C. `redline check` adds `3`, the app could not be
 reached.
+
+### `redline init`
+
+Detects the framework (`manage.py`, then dependencies in `pyproject.toml` /
+`requirements*.txt`, then installed packages) and writes a starter `redline.toml`
+(`preset`, `storage_path`, sampling and `ignore_paths`, plus the adapter's install line as a
+comment). It also adds the store directory (`/.redline/`) to `.gitignore`, once.
+
+```bash
+redline init                    # write redline.toml, update .gitignore
+redline init --dry-run          # print what would be written
+redline init --pyproject        # append a [tool.redline] table to pyproject.toml instead
+redline init --framework flask  # skip detection
+```
+
+It never overwrites: an existing `redline.toml` is left alone unless `--force`, and a
+`pyproject.toml` that already has `[tool.redline]` is never edited. `--dir DIR` selects the
+project.
+
+### `redline export`
+
+`redline export --store DB` previews sanitized OTLP spans and issue logs as JSON; `--send
+--endpoint URL` posts them to an explicit collector (see [security](security.md)). It reads
+the store read-only.
+
+`redline export ID --html OUT --store DB` writes **one self-contained HTML file** for a
+recording or a load run, to attach to a ticket or send to a colleague without giving them
+access to the UI. It has inline CSS only (no scripts, fonts or other external assets, and a
+`Content-Security-Policy` that forbids them), every value is HTML-escaped and passed through
+the project's redaction first. A recording shows its issues, a span waterfall, SQL grouped by
+statement and captured logs; a run shows its steps, errors and scenario paths. Request and
+response bodies, headers and SQL parameters are never included, and SQL is the normalized
+statement unless you add `--include-sql` (still redacted). Exit `1` when the id is unknown.
+
+### `redline digest`
+
+Posts the issues that appeared recently to a Slack-compatible incoming webhook, once each.
+
+```bash
+redline digest --store .redline/redline.db --webhook "$SLACK_WEBHOOK" --since 24h
+redline digest --store .redline/redline.db --dry-run        # print the payload
+```
+
+It reads the store read-only and picks the issues **first seen** within `--since` (default
+`24h`; `30m`, `7d`... as in the load tester) that earlier digests have not reported, at or
+above `--min-severity`. The payload is `{"text": "..."}`: a headline, then up to 20 lines
+`[severity] kind: title on route (xN)`, worst first, then `...and N more`; `--ui-url` adds a
+link to the Issues page and `--title` renames the first line. Text is passed through the
+project's redaction and Slack control characters are escaped.
+
+Issues are identified by their stable id (the fingerprint that deduplicates them across
+requests). The ids that were sent are kept in `--state FILE` (default `digest-state.json`
+next to the store) **only after the webhook answered 2xx**, so a failed run is retried by the
+next one, and an issue is never posted twice. Entries older than 30 days are dropped from the
+file. Redirects are not followed and the URL must be `http(s)` without credentials. Exit
+codes: `0` sent or nothing new, `1` store unreadable or delivery failed, `2` usage error.
+Run it from cron or a scheduled CI job on the development or staging environment.
 
 ### `redline load`
 
@@ -58,6 +118,8 @@ redline check compare SUITE [options]   run it again and compare with a baseline
 redline check run     SUITE [options]   record if there is no baseline file yet, else compare
 redline check init --from-traces [...]  write a suite from recorded read-only traffic
 redline check show    REPORT.json       print a saved report again
+redline check ratchet SUITE            fail on new query-count regressions; --update tightens
+redline check comment REPORT            post a report as the sticky PR comment (GitHub Actions)
 ```
 
 `SUITE` is a `.toml` or `.json` [suite file](refactor-check.md#the-suite-file).
@@ -136,13 +198,25 @@ misleading under root or on special/read-only mounts.
 
 Checks that the setup is sound. Each line is `OK`, `WARN` or `FAIL`; the command exits `1`
 if any check fails or the configuration does not load, and `0` otherwise (warnings do not
-fail it). It takes `--json` and `--project-root DIR` like `redline config`.
+fail it). It takes `--json` and `--project-root DIR` like `redline config`, plus:
+
+- `--workers N`: the number of worker processes the deployment runs. Without it the count
+  is read from `WEB_CONCURRENCY`, `--workers`/`-w` in `GUNICORN_CMD_ARGS` and
+  `UVICORN_WORKERS`.
+- `--strict`: any warning makes the command exit `1`, and the `filesystem` and `workers`
+  checks about a SQLite store are reported as `FAIL`. Use it in deployment pipelines.
+- `--production`: also check the recording-only production policy (see
+  [Production doctor gate](#production-doctor-gate)).
+
+With `storage_url` set, the `storage` check verifies the PostgreSQL driver is installed and
+the database answers (password masked in the output); the SQLite file checks are skipped.
 
 | Check | Looks at |
 |---|---|
 | `storage` | a temporary file can actually be created/written in the nearest existing parent; an existing store can be opened for writing without truncation |
 | `storage WAL` | a throwaway SQLite database beside the store really accepts `PRAGMA journal_mode=WAL`; failure is a hard error because a writable store refuses non-WAL |
-| `filesystem` | on Linux, the mount type from `/proc/self/mountinfo`; `nfs`, `cifs`, `9p`, `virtiofs`, `fuse` and similar mounts warn that WAL may not be reliable |
+| `filesystem` | on Linux, the mount type from `/proc/self/mountinfo`; `nfs`, `cifs`, `9p`, `virtiofs`, `fuse` and similar mounts warn that WAL may not be reliable (fail with `--strict`) |
+| `workers` | more than one worker process sharing a SQLite file warns, recommending `storage_url` (fail with `--strict`) |
 | `ui bundle` | the prebuilt UI is present in `redline-core` |
 | `access` | `open` fails (warns when `REDLINE_ALLOW_OPEN=1` is set); `access` not set in the file or environment warns (FastAPI, Flask and Litestar answer `404` outside debug mode unless the app sets it in code); `trust_unix_socket` warns; `local` outside the `dev` preset warns, because behind a proxy nobody can reach Redline |
 | `token` | shorter than 24 characters (warn), an unreadable `token_file` (fail), a `token_file` readable by other users (warn) |
@@ -203,3 +277,12 @@ Scenarios come from the app's OpenAPI document:
 ```bash
 redline load init --from-openapi http://localhost:8000/openapi.json
 ```
+
+
+### Production doctor gate
+
+`redline doctor --production --strict --json` adds the recording-only production policy
+to the ordinary storage/access probes. It validates rather than changes settings.
+Warnings retain their `warn` status in JSON but produce nonzero exit status under
+`--strict`; configuration failures also produce valid JSON. See
+[Production deployment](production.md#enforce-the-recording-only-configuration-before-deployment).

@@ -23,6 +23,7 @@ They share a few rules:
 | SQLAlchemy | `instrument_engine(engine)` | `sql`, `transaction`, `pool_wait` spans | `sqlalchemy` |
 | httpx | `instrument_httpx()` | `http_out` spans | `httpx` |
 | requests | `instrument_requests()` | `http_out` spans | `requests` |
+| boto3 | `instrument_boto3()` | `http_out` spans per SDK operation | `boto3` |
 | redis-py | `instrument_redis()` | `cache` spans | `redis` |
 | asyncpg | `instrument_asyncpg()` | `sql` spans | `asyncpg` |
 | psycopg 3 | `instrument_psycopg()` | `sql` spans | `psycopg` |
@@ -78,6 +79,22 @@ instrument_requests()   # patches requests.Session.send
 
 Same data as httpx. Because `requests` is synchronous, calling it inside an `async def`
 handler also blocks the event loop; see [Blocking in async](async-blocking.md).
+
+## boto3
+
+```python
+from redline_core.contrib.boto3 import instrument_boto3
+
+instrument_boto3()
+```
+
+Records one `http_out` span for each botocore client operation. Span names and synthetic URLs
+contain only the service and operation (for example, `AWS s3 GetObject` and
+`https://s3.amazonaws.com/__sdk__/GetObject`). Status and duration are recorded; API arguments,
+response data, bucket and object keys, credentials, presigned URLs, and error messages are not
+captured. If HTTP-level instrumentation also observes the SDK's network request, both spans may
+appear: the SDK span measures the whole operation, while the HTTP span measures its network call.
+`instrument_boto3()` returns `False` when botocore is unavailable.
 
 ## Redis
 
@@ -167,3 +184,71 @@ record_span("http_out", "POST payments.example/charge", start,
 
 For plain timing of your own code, use `redline_core.span` ([Custom spans](custom-spans.md)).
 For a full integration with its own fix suggestions see [Extending](extending.md).
+
+
+## Zero-config coverage
+
+httpx, requests, Redis and boto3 capture is opt-in, so an installed library can silently go
+unrecorded. The `auto_instrument` setting (all four adapters apply it when Redline installs)
+decides what happens:
+
+| Value | Behaviour |
+|---|---|
+| `"warn"` (default) | Log **one** warning listing installed but uninstrumented integrations and how to enable them. Nothing is patched. |
+| `"on"` | Instrument every installed supported integration at install time. |
+| `"off"` | Do nothing. |
+
+```python
+install(app, settings={"auto_instrument": "on"})   # or REDLINE_AUTO_INSTRUMENT=on
+```
+
+Provider libraries are only imported when being instrumented. A failure to instrument one
+integration is logged and never stops startup. Calling `instrument_httpx()` yourself still
+works and silences the warning for that integration.
+
+## RQ
+
+```python
+from redline_core.contrib.rq import instrument_rq
+
+integration = instrument_rq(recorder)   # web process and worker process
+# integration.uninstall() restores RQ
+```
+
+Install with `pip install "redline-core[rq]"`. Enqueueing inside a traced request stores its
+trace context in `job.meta["redline"]`; `Job.perform` then records the job (name, id, queue,
+outcome, SQL and other spans) linked to that request through `parent_trace_id` and the W3C
+trace id. Arguments and results are not captured. Pass `task_filter=lambda name: ...` to
+limit which jobs are recorded.
+
+## Dramatiq
+
+```python
+from redline_core.contrib.dramatiq import instrument_dramatiq
+
+instrument_dramatiq(broker, recorder)    # in the web process and in the worker process
+```
+
+Install with `pip install "redline-core[dramatiq]"`. A middleware carries the trace context
+in `message.options["redline"]` and records each processed message as a job (the retry count
+is the attempt). Works with any broker; the tests use `StubBroker`.
+
+## FastAPI and Starlette background tasks
+
+`BackgroundTasks.add_task` / `BackgroundTask` run after the response was sent, when the
+request trace has already been stored. `fastapi_redline.install` records each as its own job
+(`job.queue = starlette.background`), linked to the request that created it. Other
+Starlette apps can call `redline_core.contrib.starlette_background.instrument_background_tasks(recorder)`.
+
+## Checking integration coverage
+
+Open **Analysis → Recording health** (or `GET api/analysis/health`) to distinguish whether
+an optional provider is installed, loaded in this process and instrumented. The check
+never imports providers or enables hooks. An inactive hook means those calls may be
+missing; an active hook still does not prove calls occurred or cover other workers.
+HTTPX, requests, Redis and boto3 are explicit opt-ins unless `auto_instrument` is `"on"`; the default `"warn"` logs which ones are installed but inactive.
+
+SDK operation spans use a `SDK:<operation>` method and a synthetic service URL. Because
+resource identity and individual retry attempts are deliberately omitted, these spans
+contribute latency/error/count totals but do not establish duplicate calls or retry
+storms. This avoids treating reads of different object keys as identical requests.
