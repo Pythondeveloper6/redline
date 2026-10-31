@@ -27,6 +27,10 @@ dev = [
     "aiosqlite>=0.20",
     "greenlet>=3.0",
     "pyinstrument>=5.0",
+    "a2wsgi>=1.10",
+    "rq>=1.16",
+    "fakeredis>=2.20",
+    "dramatiq>=1.16",
 ]
 docs = ["mkdocs-material>=9.5"]
 
