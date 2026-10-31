@@ -13,6 +13,7 @@ Redline has two kinds of commands:
 
 ```text
 redline load SCENARIO [options]       run a load test against a running app
+redline export --store DB [ID --html OUT]   OTLP preview/send, or one HTML summary
 redline init                          write a starter redline.toml and update .gitignore
 redline load init ...                 write a scenario file
 redline check record|compare|run|init|show|ratchet|comment   refactor check: prove a refactor is safe
@@ -42,6 +43,21 @@ redline init --framework flask  # skip detection
 It never overwrites: an existing `redline.toml` is left alone unless `--force`, and a
 `pyproject.toml` that already has `[tool.redline]` is never edited. `--dir DIR` selects the
 project.
+
+### `redline export`
+
+`redline export --store DB` previews sanitized OTLP spans and issue logs as JSON; `--send
+--endpoint URL` posts them to an explicit collector (see [security](security.md)). It reads
+the store read-only.
+
+`redline export ID --html OUT --store DB` writes **one self-contained HTML file** for a
+recording or a load run, to attach to a ticket or send to a colleague without giving them
+access to the UI. It has inline CSS only (no scripts, fonts or other external assets, and a
+`Content-Security-Policy` that forbids them), every value is HTML-escaped and passed through
+the project's redaction first. A recording shows its issues, a span waterfall, SQL grouped by
+statement and captured logs; a run shows its steps, errors and scenario paths. Request and
+response bodies, headers and SQL parameters are never included, and SQL is the normalized
+statement unless you add `--include-sql` (still redacted). Exit `1` when the id is unknown.
 
 ### `redline load`
 
