@@ -91,8 +91,13 @@ def test_sync_http_database_recording(vendor, framework, tmp_path):
         prove_session_state(engine, vendor)
 
 
-@pytest.mark.parametrize("vendor", VENDORS)
-def test_async_fastapi_http_database_recording_and_rollback(vendor, tmp_path):
+# The default DSN of each vendor (aiomysql for MySQL), plus the asyncmy driver.
+ASYNC_CASES = [pytest.param(vendor, None, id=vendor) for vendor in VENDORS]
+ASYNC_CASES.append(pytest.param("mysql", "asyncmy", id="mysql-asyncmy"))
+
+
+@pytest.mark.parametrize(("vendor", "driver"), ASYNC_CASES)
+def test_async_fastapi_http_database_recording_and_rollback(vendor, driver, tmp_path):
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
     from sqlalchemy import func, select, text
@@ -104,7 +109,9 @@ def test_async_fastapi_http_database_recording_and_rollback(vendor, tmp_path):
     sentinel = uuid.uuid4().hex
     store_path = tmp_path / "async-capture.db"
     with isolated_engine(vendor) as (_, table):
-        engine = create_async_engine(database_url(vendor, asynchronous=True), hide_parameters=True)
+        engine = create_async_engine(
+            database_url(vendor, asynchronous=True, driver=driver), hide_parameters=True
+        )
 
         @asynccontextmanager
         async def lifespan(app):

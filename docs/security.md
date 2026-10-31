@@ -49,7 +49,7 @@ numbers masked by shape.
 | Log messages, exception messages and tracebacks, non-JSON request bodies | `key=value`, `key: value`, `"key": "value"` pairs and `<key>value</key>` elements whose key matches `redact_keys`; URL passwords and secret query values inside the text; JWTs; Luhn-valid card numbers (13–19 digits, optionally grouped) | `[redacted]` |
 | Exception locals | the value of a variable whose name matches `redact_keys`; secret keys of containers (4 levels deep); and the free-text rule over the whole `repr` | `[redacted]` |
 | Headers | `authorization`, `cookie`, `set-cookie`, `x-api-key`, `proxy-authorization` (case-insensitive), and any header whose name matches `redact_keys` | `[redacted]` |
-| Query strings, form bodies, multipart fields, JSON bodies (any depth, GraphQL `variables` included) | any key matching `(?i)pass(word)?\|secret\|token\|api[_-]?key\|(?<![a-z])auth(orization)?(?![a-z])\|session\|csrf\|card\|cvv\|ssn\|private[_-]?key` | `[redacted]` |
+| Query strings, form bodies, multipart fields, JSON bodies (any depth, GraphQL `variables` included) | any key matching `(?i)pass(word)?\|secret\|token\|api[_-]?key\|(?<![a-z])auth(orization)?(?![a-z])\|session\|csrf\|card\|cvv\|ssn\|private[_-]?key\|access[_-]?key\|signature\|credential` | `[redacted]` |
 | Outbound URLs | the same key rule on the query string, and the password in `user:password@host` | `[redacted]`, or `%5Bredacted%5D` in the userinfo so the URL still parses |
 | SQL parameters | values bound to a column whose name matches the same pattern (`SET "password" = %s`, `INSERT ... ("token") VALUES (%s)`, `password = crypt(%s, ...)`, `ON CONFLICT ... DO UPDATE SET api_key = %s`), or to a table whose name matches it (`"authtoken_token"."key" = %s`, `"django_session"."session_key" = %s`; an unqualified column in a statement on such a table is masked too). Django's `auth_` app prefix is ignored, so `auth_user` stays visible | `[redacted]` |
 | Cache keys (Django cache, redis) | the rest of the key after `django.contrib.sessions.cache`, `django.contrib.sessions.cached_db`, `session:`, `sess:`, or after a word matching the key pattern | `django.contrib.sessions.cache[redacted]` (the prefix is kept, so hit rates still group) |
@@ -70,7 +70,7 @@ REDLINE = {
                        "proxy-authorization", "x-internal-token"],
     "REDACT_KEYS": [
         r"(?i)pass(word)?|secret|token|api[_-]?key|(?<![a-z])auth(orization)?(?![a-z])"
-        r"|session|csrf|card|cvv|ssn|private[_-]?key",
+        r"|session|csrf|card|cvv|ssn|private[_-]?key|access[_-]?key|signature|credential",
         r"(?i)^iban$|national_id",
     ],
 }
@@ -190,7 +190,8 @@ sections below describe the defaults and the threats.
     A loopback peer that sends `X-Forwarded-For`, `X-Real-IP` or `Forwarded` without being
     in `trusted_proxies` is refused too (it is almost certainly a reverse proxy on the same
     host). Pass your own hook (it implies `access = "framework"`; an empty list is no hook),
-    or set `access`, for anything else. A FastAPI dependency should raise
+    or set `access`, for anything else. `access = "framework"` with no hook attached
+    refuses every request (`403`) in all four adapters: there is nothing to delegate to. A FastAPI dependency should raise
     `HTTPException` to refuse; one that returns `False` is refused with `403` as well. A refusal is `403` JSON `{"error": {"code": "forbidden", ...}}`. See
     [FastAPI](fastapi.md#access-control), [Flask](flask.md#access-control) and
     [Litestar](litestar.md#access-control).
@@ -219,9 +220,10 @@ Reads are `GET`. Every other method (`DELETE` on traces and runs, `POST api/expl
 
 `?_redline=profile` and `X-Redline-Profile: 1` start the profiler and make Redline keep the
 trace whatever `sample_rate` says. They are honoured only in framework debug mode or when
-the request itself carries valid Redline credentials (a login cookie, a Bearer token or
-Basic credentials, a client the `local` policy lets in, or `access_check`); anyone else
-could make you profile and store their requests at will. With `access = "framework"` (a
+the request itself carries valid Redline credentials (a Bearer token or Basic
+credentials, a client the `local` policy lets in, or `access_check`); anyone else
+could make you profile and store their requests at will. The login cookie is scoped to
+the mount, so the browser never sends it to application URLs. With `access = "framework"` (a
 hook that only runs inside Redline's own routes) only debug mode honours them. The
 `production` preset turns profiling off. `X-Redline-Run` (the load tester's header) and `X-Redline-Check` (the refactor check's) tag a
 trace only when that run exists in the store and is running (a check also for a minute after it ends).
@@ -344,7 +346,8 @@ Never expose it with a dependency or permission that lets everyone in, or `acces
 
 - The file is **not encrypted**. On POSIX systems the store directory Redline creates is
   `0700`, and the database, its `-wal`/`-shm` files and the load-run files (`runs/`) are
-  `0600`; an older, world-readable database is tightened when it is opened. A directory
+  `0600`, as is a page written by `redline export --html`. These files are never written
+  through a symlink. An older, world-readable database is tightened when it is opened. A directory
   that already existed (for example when `storage_path` is in your project root) keeps its
   permissions. Nothing changes on Windows.
 - **Never commit it.** A store directory Redline creates (and `.redline/`) gets a
@@ -385,6 +388,9 @@ not moving branches or unrelated versions. Verify package/project links and dist
 provenance rather than relying only on a similar package name.
 
 ## A short threat model
+
+The full, structured version (assets, trust boundaries, STRIDE table and a checklist for an
+independent reviewer) is on [Threat model](threat-model.md).
 
 | Attacker | Wants | Stopped by |
 |---|---|---|

@@ -365,6 +365,8 @@ def test_snapshot_inlines_the_real_bundle():
     chunks = {p.name for p in (ui.static_dir() / "assets").glob("*.js")}
     assert {k.removeprefix("@redline/") for k in modules} == chunks  # lazy chunks included
     for text in modules.values():
+        # URL preload maps cannot resolve embedded import-map specifiers from data URLs.
+        assert "__vite__mapDeps" not in text
         assert not re.search(r"""["']\./[\w.-]+\.js["']""", text)  # all rewritten
     entry = re.search(r'<script type="module">import "(@redline/[^"]+)";</script>', page)
     assert entry.group(1) in modules

@@ -36,10 +36,12 @@ import inspect
 import json
 import linecache
 import logging
+import os
 import re
 import threading
 import time
 import traceback
+import weakref
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
@@ -73,6 +75,18 @@ __all__ = [
 ]
 
 logger = logging.getLogger("redline")
+_RECORDERS: weakref.WeakSet[Recorder] = weakref.WeakSet()
+
+
+def _reset_recorder_counters_after_fork() -> None:
+    global _default_lock
+    _default_lock = threading.Lock()
+    for recorder in list(_RECORDERS):
+        recorder._reset_counter_after_fork()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_recorder_counters_after_fork)
 
 
 F = TypeVar("F", bound=Callable[..., Any])
@@ -135,6 +149,7 @@ class TraceBuilder:
         "_parent_token",
         "_token",
         "active",
+        "capture_error_details",
         "capture_errors",
         "capture_limited",
         "client",
@@ -206,6 +221,9 @@ class TraceBuilder:
         self.req_body = body
         self.client = client
         self.capture_errors = 0
+        # Per-recording safety override. This may suppress configured detail capture,
+        # but deliberately cannot opt a recording into capture when settings disable it.
+        self.capture_error_details: bool | None = None
         self.capture_limited = False
         self.retained_bytes = 0
         self.job_outcomes = {}
@@ -377,6 +395,9 @@ class Recorder:
         self.settings = settings or Settings()
         self.store = store
         self.dropped_capture = 0
+        self._counter_pid = os.getpid()
+        self._counter_lock = threading.Lock()
+        _RECORDERS.add(self)
         self.sampler = Sampler(self.settings, rng) if rng else Sampler(self.settings)
         self.redactor = Redactor(self.settings)
         self.detector = Detector(self.settings, suggesters)
@@ -393,6 +414,33 @@ class Recorder:
             from .contrib.sqlalchemy import instrument_all_engines
 
             instrument_all_engines()
+
+    def _reset_counter_after_fork(self) -> None:
+        self._counter_lock = threading.Lock()
+        self.dropped_capture = 0
+        self._counter_pid = os.getpid()
+
+    def _check_counter_pid(self) -> None:
+        if self._counter_pid != os.getpid():
+            self._reset_counter_after_fork()
+
+    def _note_capture_loss(self) -> None:
+        self._check_counter_pid()
+        with self._counter_lock:
+            self.dropped_capture += 1
+
+    def operational_health(self) -> dict[str, Any]:
+        self._check_counter_pid()
+        with self._counter_lock:
+            failures = self.dropped_capture
+        status = "disabled" if not self.settings.enabled else "degraded" if failures else "ok"
+        return {
+            "status": status,
+            "scope": "process",
+            "pid": self._counter_pid,
+            "enabled": self.settings.enabled,
+            "capture_failures": failures,
+        }
 
     # lifecycle -------------------------------------------------------------
     def should_record(self, path: str) -> bool:
@@ -508,7 +556,7 @@ class Recorder:
                 if getattr(builder, key)
             }
             trace = minimal_trace(seed, "capture_failure")
-            self.dropped_capture += 1
+            self._note_capture_loss()
             if builder.active:
                 from .testing import active_capture
 
@@ -591,7 +639,10 @@ class Recorder:
             tags=dict(builder.tags),
             profile=profile,
             error=_error_dict(
-                error, self.redactor, capture_details=self.settings.capture_error_details
+                error,
+                self.redactor,
+                capture_details=self.settings.capture_error_details
+                and builder.capture_error_details is not False,
             ),
             release=self.release,
         )
@@ -601,7 +652,14 @@ class Recorder:
                 trace.tags[key] = str(count)
             else:
                 trace.tags.pop(key, None)
-        if isinstance(error, BaseException) and trace.error:
+        error_details_enabled = (
+            self.settings.capture_error_details and builder.capture_error_details is not False
+        )
+        if (
+            isinstance(error, BaseException)
+            and trace.error
+            and builder.capture_error_details is not False
+        ):
             tb = error.__traceback__
             while tb is not None:
                 file = self.capturer.classify(tb.tb_frame.f_code.co_filename)
@@ -676,7 +734,7 @@ class Recorder:
         if (
             isinstance(error, BaseException)
             and self.settings.capture_locals
-            and self.settings.capture_error_details
+            and error_details_enabled
             and self.settings.feature("locals")
             and trace.error
         ):
@@ -716,7 +774,7 @@ class Recorder:
         safe = enforce_trace_limits(trace, self.settings)
         if safe is None:
             safe = minimal_trace(trace, "capture_failure")
-            self.dropped_capture += 1
+            self._note_capture_loss()
             if capture is not None:
                 capture[1].append(safe)
             return safe
@@ -727,7 +785,7 @@ class Recorder:
             try:
                 self.store.save(trace)
             except Exception:
-                self.dropped_capture += 1
+                self._note_capture_loss()
                 _capture_failure("Redline failed to enqueue recording")
         return trace
 
@@ -1138,17 +1196,23 @@ def record_query(
     rows: int | None = None,
     many: bool = False,
     capture_callsite: bool = True,
+    honor_ignore: bool = True,
 ) -> Span | None:
     """Record one SQL execution (``start``/``duration`` as in :func:`record_span`).
 
     ``params`` are redacted (values bound to secret-looking columns are masked) and made
     JSON-safe; for ``many=True`` pass the parameter rows, of which the first 10 are kept.
+    Statements matching the ``ignore_sql`` setting (session housekeeping) are not recorded
+    and give ``None``, unless ``honor_ignore`` is false (failed statements stay visible).
     """
     builder = _trace.get()
     if builder is None or builder.finished:
         return None
     redactor = builder.recorder.redactor
     settings = builder.recorder.settings
+    if honor_ignore and settings.ignore_sql and type(sql) is str:
+        if sqlmod.is_ignored(sql, settings.ignore_sql):
+            return None
     truncated_sql = type(sql) is not str
     if type(sql) is not str:
         sql = "UNKNOWN"
@@ -1202,6 +1266,12 @@ def record_query(
         "read_query": sqlmod.is_explainable(sql),
         "has_limit": sqlmod.has_limit(sql),
     }
+    procedure = sqlmod.procedure_name(sql)
+    if procedure is not None:
+        data["query_kind"] = "procedure"
+        data["procedure"] = procedure
+    else:
+        data["query_kind"] = sqlmod.statement_kind(sql).lower()
     callsite = builder.recorder.capturer.capture(skip=2) if capture_callsite else None
     if masked and callsite is not None:
         from dataclasses import replace
@@ -1460,8 +1530,15 @@ def _error_dict(
             "traceback": "",
         }
     if isinstance(error, Mapping):
+        # Cut before redacting: the cost of the scan must not grow with the input.
         return {
-            str(k): redactor.text(v) if isinstance(v, str) and k != "type" else v
+            str(k): (
+                redactor.text(v[-40_000:])[-20_000:]
+                if k == "traceback"
+                else redactor.text(v[:4000])[:4000]
+            )
+            if isinstance(v, str) and k != "type"
+            else v
             for k, v in error.items()
         }
     try:

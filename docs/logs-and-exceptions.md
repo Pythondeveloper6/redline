@@ -121,3 +121,45 @@ access-control side.
 Logs: one `ContextVar.get()` per record outside a request; inside, building one small
 object (message formatting, redaction and a callsite lookup). Locals are captured **only
 when a request raises**, from the traceback, so the happy path pays nothing.
+
+## Correlating your own logs and error reports
+
+Redline's recordings, your log files and your error tracker can all point at the same
+request through the Redline trace id.
+
+```python
+import logging
+from redline_core.correlation import TraceIdFilter
+
+handler = logging.StreamHandler()
+handler.addFilter(TraceIdFilter())          # a handler filter sees every record
+handler.setFormatter(logging.Formatter("%(asctime)s [%(redline_trace_id)s] %(message)s"))
+logging.getLogger().addHandler(handler)
+```
+
+`redline_trace_id` is the id of the request or job being recorded, `-` outside one. The
+filter never drops a record. `install_log_filter()` adds it to the root logger's existing
+handlers. Search the id in the UI (`/_redline/#/requests/<id>`).
+
+**Sentry.** Without importing anything from Sentry at module level, Redline can tag events
+that happen inside a recording and add an "Open in Redline" link:
+
+```python
+import sentry_sdk
+from redline_core.correlation import chain_before_send
+
+sentry_sdk.init(
+    dsn=...,
+    before_send=chain_before_send(None, base_url="https://dev.example.com"),
+)
+```
+
+The event gets the tag `redline_trace_id` and a `redline` context with `trace_id` and
+`open_in_redline`. `base_url` defaults to `$REDLINE_PUBLIC_URL`; pass `mount="..."` when the UI
+is not at `/_redline`. Pass your existing hook as the first argument to keep it.
+`tag_sentry_scope()` sets the same tag and context on the current scope instead (a no-op when
+`sentry_sdk` is not installed). Remember that Redline is for development and staging: only
+link to a UI that exists where the event happens.
+
+**OpenTelemetry.** Exported spans (`redline export --send`) carry the attribute
+`redline.trace_id`, next to the W3C trace id, so a collector can link back to the recording.

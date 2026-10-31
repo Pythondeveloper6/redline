@@ -32,6 +32,7 @@ the Flask and Litestar adapters; `fastapi_redline` re-exports them (`instrument_
 install(
     app,
     engine=None,          # Engine | AsyncEngine | [engines] | {"alias": engine}
+    engines=None,         # "auto": instrument engines created at runtime
     settings=None,        # dict | redline_core.Settings
     prefix=None,          # default: the mount_path setting, else "/_redline"
     dependencies=None,    # auth dependencies for the UI and API
@@ -137,6 +138,23 @@ EXPLAIN; any other dialect records SQL (vendor `other`) but cannot be explained.
 
     SQLite `PRAGMA` statements are not recorded. They are connection housekeeping, not
     your queries.
+
+### Engines created at runtime (per-user or per-request)
+
+Apps that build engines on the fly (for example one per user, with token authentication
+through `connect_args` or `creator=`) cannot register each one. Opt in to automatic
+discovery:
+
+```python
+install(app, engines="auto")   # or settings={"instrument_engines": "all"}
+```
+
+This sets `instrument_engines="all"`: every SQLAlchemy `Engine` (sync, or the sync engine
+inside an `AsyncEngine`) that runs a statement inside a recorded request is hooked on its
+first use, once, under a unique alias (`auto_<id>`). Engines are held weakly, so a
+disposed per-request engine is garbage collected as usual. Automatically found sync
+engines can be EXPLAINed; async ones are recorded but not EXPLAINed. Engines you pass as
+`engine=` keep their own alias. The default stays explicit registration.
 
 ## Sync and async endpoints
 
@@ -401,3 +419,61 @@ Or leave Redline out of the app under test, and install it only in your dev entr
 | Callsites are empty | `project_root` is not an ancestor of your code. Set it |
 | `RuntimeError: Redline is already installed` | `install()` was called twice (an auto-reloader importing twice?) |
 | N+1 shown with a hint but no diff | the statement could not be located in source. See [confidence](n-plus-one.md#confidence) |
+
+
+## Wiring an existing application
+
+Pass the engine your application's session factory actually uses, after the routers and
+models are imported and before serving requests. A different engine does not capture
+those sessions. For an external launcher, set `project_root` to the application's root
+so source attribution works. Keep the trace store outside source control.
+
+```python
+from app.main import app
+from app.db.session import get_engine
+from fastapi_redline import install, instrument_httpx
+
+redline = install(app, engine=get_engine(), settings={
+    "access": "local",
+    "project_root": "/absolute/path/to/project",
+})
+instrument_httpx()  # optional: install() alone does not capture outbound HTTP
+# If Redis is used, explicitly enable the redis-py integration too:
+# from redline_core.contrib.redis import instrument_redis
+# instrument_redis()
+```
+
+Use synthetic data and an isolated database for load tests. Missing external/cache spans
+means the integration may be absent, not necessarily that the app made no calls. SDKs
+without integrations and separate jobs require explicit instrumentation. Static source
+analysis complements request capture; its candidates are not measured N+1 defects.
+
+## In-process background tasks
+
+Starlette runs a response's `BackgroundTasks` after sending the response. Redline therefore
+finishes the request trace before those tasks run; their work and latency are not part of
+the request. To record a task explicitly as its own job trace, schedule it with the helper:
+
+```python
+from fastapi import BackgroundTasks
+from fastapi_redline import add_background_task
+
+async def send_receipt(order_id: int) -> None:
+    ...
+
+@app.post("/orders/{order_id}")
+async def create_order(order_id: int, background_tasks: BackgroundTasks):
+    add_background_task(background_tasks, send_receipt, order_id)
+    return {"order_id": order_id}
+```
+
+`add_background_task(background_tasks, func, *args, **kwargs)` passes the original arguments
+to the function unchanged. Sync functions still run in Starlette's thread pool, and async
+functions are awaited. The helper records the function name, job outcome, and safe parent
+request correlation when called during a traced request. It creates a separate job trace;
+it does not extend request latency or include the task's work in the request trace. Task
+arguments and return values are not added to the job recording. Exceptions are recorded as
+failed jobs and re-raised as Starlette normally handles background task failures.
+
+This only covers tasks explicitly scheduled with the helper. It does not instrument task
+queues, brokers, or other work submitted elsewhere.

@@ -45,14 +45,15 @@ Only statements `redline_core.sql.is_explainable` accepts: **a single read-only
 - **more than one statement** (a `;` outside a literal; one trailing `;` is fine);
 - `executemany` spans (`many=True`), whose parameters are a list of rows.
 
-The check reads the statement **twice** and both readings must pass:
+The check reads the statement several times and every reading must pass:
 
 1. **Literal-aware**: over the normalised statement with literals and comments stripped,
    so `WHERE note = 'DELETE me'` or a column named `"update"` does not trip it.
 2. **Dialect-pessimistic**: over the raw text, removing only what every database agrees
    is inert. Databases disagree about quoting: a backslash ends a standard PostgreSQL
    string but escapes the quote in MySQL; MySQL has no `$$` dollar quoting, executes
-   `/*! ... */` "comments", and needs a space after `--`. A statement that hides a `;` or
+   `/*! ... */` "comments", needs a space after `--`, and ends a `#` comment at the
+   newline (so a quote after `#` opens nothing). A statement that hides a `;` or
    a write keyword under one of those readings (`SELECT 'a\' ; DELETE FROM t; --'`,
    `SELECT 1 /*! INTO OUTFILE '/tmp/x' */`) is refused.
 

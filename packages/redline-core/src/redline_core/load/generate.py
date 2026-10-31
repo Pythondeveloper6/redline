@@ -54,13 +54,30 @@ DEFAULT_PROFILE: dict[str, Any] = {
 }
 
 
+#: Upper bound on an OpenAPI document fetched over HTTP.
+MAX_OPENAPI_BYTES = 20 * 1024 * 1024
+
+
+class _HttpRedirectsOnly(urllib.request.HTTPRedirectHandler):
+    """Follow redirects only to http(s); urllib would also follow one to ``ftp:``."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not re.match(r"^https?://", newurl, re.IGNORECASE):
+            raise ValueError(f"refusing to follow a redirect to a non-http URL ({code})")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 # ---------------------------------------------------------------------------- OpenAPI
 def load_openapi(source: str) -> dict[str, Any]:
     """Read an OpenAPI document (JSON; YAML when PyYAML is installed) from a URL or file."""
     if re.match(r"^https?://", source):
         req = urllib.request.Request(source, headers={"Accept": "application/json"})
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            text = resp.read().decode("utf-8")
+        opener = urllib.request.build_opener(_HttpRedirectsOnly)
+        with opener.open(req, timeout=15) as resp:
+            raw = resp.read(MAX_OPENAPI_BYTES + 1)
+        if len(raw) > MAX_OPENAPI_BYTES:
+            raise ValueError(f"{source}: OpenAPI document too large")
+        text = raw.decode("utf-8")
     else:
         text = Path(source).read_text(encoding="utf-8")
     try:

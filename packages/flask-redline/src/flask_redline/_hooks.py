@@ -73,6 +73,8 @@ def install_hooks(app: Flask, on_first_request: Any = None) -> None:
             view_name(sender, rule.endpoint),
             request.view_args or None,
         )
+        if request.blueprint:  # grouping key for `api/endpoints?group_by=blueprint`
+            builder.tag("blueprint", request.blueprint)
 
     @app.after_request
     def resolve_user_id(response):

@@ -12,6 +12,7 @@ not be reached (``redline check``), 130 interrupted (Ctrl-C).
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import os
 import signal
@@ -19,7 +20,7 @@ import sys
 from collections.abc import Callable, Sequence
 from typing import Any, TextIO
 
-from . import operations
+from . import digest, operations, project_init
 from .check_sql import command as _cmd_sql
 from .check_sql import configure_cli as _configure_sql
 from .schema_watch import command as _cmd_schema_watch
@@ -528,8 +529,20 @@ def _cmd_config(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
     return EXIT_OK
 
 
-def _doctor_checks(resolved: Any) -> list[tuple[str, str, str]]:
-    """``[(status, check, detail)]`` with status ``ok`` / ``warn`` / ``fail``."""
+def _doctor_checks(
+    resolved: Any,
+    *,
+    strict: bool = False,
+    workers: int | None = None,
+    environ: Any = None,
+) -> list[tuple[str, str, str]]:
+    """``[(status, check, detail)]`` with status ``ok`` / ``warn`` / ``fail``.
+
+    ``strict`` turns the deployment-shape warnings about a SQLite store (a network
+    filesystem, several worker processes) into failures. ``workers`` is the worker count
+    the deployment runs; without it the environment is read (``WEB_CONCURRENCY``,
+    ``GUNICORN_CMD_ARGS``, ``UVICORN_WORKERS``; ``environ`` defaults to ``os.environ``).
+    """
     import importlib.util
 
     from . import ui
@@ -542,17 +555,22 @@ def _doctor_checks(resolved: Any) -> list[tuple[str, str, str]]:
     # storage
     from .storage.safety import (
         UNRELIABLE_WAL_FILESYSTEMS,
+        detect_workers,
         filesystem_type,
         prepare_path,
         probe_wal,
         probe_writable,
     )
 
-    try:
-        path = prepare_path(s)
-    except SettingsError as exc:
-        checks.append(("fail", "storage", str(exc)))
-        path = None
+    shape = "fail" if strict else "warn"  # deployment-shape problems of a SQLite store
+    path: str | None = None
+    if s.storage_url:
+        checks += _postgres_checks(s.storage_url)
+    else:
+        try:
+            path = prepare_path(s)
+        except SettingsError as exc:
+            checks.append(("fail", "storage", str(exc)))
     if path == ":memory:":
         checks.append(("ok", "storage", "in memory"))
     elif path is not None:
@@ -567,10 +585,10 @@ def _doctor_checks(resolved: Any) -> list[tuple[str, str, str]]:
         if kind in UNRELIABLE_WAL_FILESYSTEMS:
             checks.append(
                 (
-                    "warn",
+                    shape,
                     "filesystem",
                     f"{kind} may not support SQLite WAL reliably; use a Docker named "
-                    "volume or a local disk",
+                    "volume or a local disk, or a shared PostgreSQL store (storage_url)",
                 )
             )
         try:
@@ -590,6 +608,19 @@ def _doctor_checks(resolved: Any) -> list[tuple[str, str, str]]:
                         "filesystem",
                     )
                 )
+
+    if path is not None and path != ":memory:":
+        declared = (workers, "--workers") if workers else detect_workers(environ)
+        if declared is not None and declared[0] > 1:
+            checks.append(
+                (
+                    shape,
+                    "workers",
+                    f"{declared[0]} worker processes ({declared[1]}) share one SQLite file: "
+                    "their writes queue on its lock, and every host or container keeps its "
+                    "own file. Set storage_url to a PostgreSQL database for one shared store",
+                )
+            )
 
     # UI bundle
     if ui.is_built():
@@ -744,12 +775,65 @@ def _doctor_checks(resolved: Any) -> list[tuple[str, str, str]]:
     return checks
 
 
+def _postgres_checks(url: str) -> list[tuple[str, str, str]]:
+    """The doctor's checks of a ``storage_url`` store: the driver, then a connection."""
+    import importlib.util
+
+    from .storage.postgres import mask_url, ping
+
+    where = mask_url(url)
+    if importlib.util.find_spec("psycopg") is None:
+        return [
+            (
+                "fail",
+                "storage",
+                'storage_url needs the PostgreSQL driver: pip install "redline-core[postgres]"',
+            )
+        ]
+    try:
+        version = ping(url)
+    except Exception as exc:
+        return [("fail", "storage", f"cannot connect to {where} ({type(exc).__name__})")]
+    return [("ok", "storage", f"PostgreSQL {version} at {where}, shared by every worker")]
+
+
 def _cmd_doctor(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
-    resolved = _resolve(args, err)
+    if args.json:
+        import io
+
+        # Suppress parser detail in JSON mode; a malformed config can contain arbitrary
+        # values, while the output schema must remain valid JSON and secret-free.
+        resolved = _resolve(args, io.StringIO())
+    else:
+        resolved = _resolve(args, err)
     if resolved is None:
-        out.write("FAIL  config      the configuration does not load (see above)\n")
+        if args.json:
+            import json
+
+            out.write(
+                json.dumps(
+                    [
+                        {
+                            "status": "fail",
+                            "check": "config",
+                            "detail": "configuration does not load",
+                        }
+                    ],
+                    indent=2,
+                )
+                + "\n"
+            )
+            err.write("redline: invalid configuration; details omitted in JSON mode\n")
+        else:
+            out.write("FAIL  config      the configuration does not load (see above)\n")
         return EXIT_FAIL
-    checks = _doctor_checks(resolved)
+    checks = _doctor_checks(
+        resolved, strict=getattr(args, "strict", False), workers=getattr(args, "workers", None)
+    )
+    if args.production:
+        from .production_checks import production_checks
+
+        checks.extend(production_checks(resolved))
     if args.json:
         import json
 
@@ -761,7 +845,35 @@ def _cmd_doctor(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
         out.write(f"preset {resolved.settings.preset}, config file {resolved.file or '(none)'}\n")
         for status, check, detail in checks:
             out.write(f"{status.upper():<5} {check:<11} {detail}\n")
-    return EXIT_FAIL if any(c[0] == "fail" for c in checks) else EXIT_OK
+    return (
+        EXIT_FAIL
+        if any(c[0] == "fail" for c in checks)
+        or (args.strict and any(c[0] == "warn" for c in checks))
+        else EXIT_OK
+    )
+
+
+def _configure_doctor(p: argparse.ArgumentParser) -> None:
+    _configure_config(p)
+    p.add_argument(
+        "--production",
+        action="store_true",
+        help="also check production recording-only policy settings",
+    )
+    p.add_argument(
+        "--strict",
+        action="store_true",
+        help="return failure when any check warns; a SQLite store on a network filesystem "
+        "or shared by several worker processes is reported as FAIL",
+    )
+    p.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        metavar="N",
+        help="the number of worker processes the deployment runs (default: read "
+        "WEB_CONCURRENCY, GUNICORN_CMD_ARGS and UVICORN_WORKERS)",
+    )
 
 
 def _configure_hash(p: argparse.ArgumentParser) -> None:
@@ -908,7 +1020,7 @@ def _configure_check_show(p: argparse.ArgumentParser) -> None:
 
 def _cmd_check(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
     err.write(
-        "usage: redline check {record,compare,run,init,show} …\n\n"
+        "usage: redline check {record,compare,run,init,show,ratchet,comment} …\n\n"
         + "".join(f"  redline check {n:<8} {h}\n" for n, (h, _, _) in CHECK_COMMANDS.items())
     )
     return EXIT_USAGE
@@ -1317,6 +1429,155 @@ def _cmd_check_run(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
     return _cmd_check_record(args, out, err)
 
 
+def _configure_check_comment(p: argparse.ArgumentParser) -> None:
+    p.add_argument("report", help="report JSON (`--json`) or a Markdown file (`--markdown`)")
+    p.add_argument(
+        "--marker-id",
+        default="redline-check",
+        metavar="ID",
+        help="identifies the sticky comment (default redline-check); use one per suite",
+    )
+    p.add_argument(
+        "--token-env",
+        default="GITHUB_TOKEN",
+        metavar="VAR",
+        help="environment variable holding the token (default GITHUB_TOKEN)",
+    )
+    p.add_argument("--no-comment", action="store_true", help="only write the job summary")
+    p.add_argument("--dry-run", action="store_true", help="print the comment body, send nothing")
+
+
+def _cmd_check_comment(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
+    from .check import github
+    from .check.report import Report, ReportError
+
+    try:
+        with open(args.report, encoding="utf-8") as fh:
+            raw = fh.read()
+    except OSError as exc:
+        err.write(f"redline check comment: {args.report}: {exc}\n")
+        return EXIT_USAGE
+    if args.report.lower().endswith(".md"):
+        markdown = raw
+    else:
+        try:
+            markdown = Report.from_dict(json.loads(raw)).to_markdown()
+        except (ValueError, ReportError) as exc:
+            err.write(f"redline check comment: {args.report}: {exc}\n")
+            return EXIT_USAGE
+    body = github.sticky_body(markdown, args.marker_id)
+    if args.dry_run:
+        out.write(body)
+        return EXIT_OK
+    if github.write_job_summary(markdown):
+        out.write("wrote the job summary\n")
+    if args.no_comment:
+        return EXIT_OK
+    number = github.pull_request_number()
+    token = os.environ.get(args.token_env, "")
+    repository = os.environ.get("GITHUB_REPOSITORY", "")
+    if number is None:
+        out.write("not a pull_request event: no comment posted\n")
+        return EXIT_OK
+    if not token or not repository:
+        out.write(f"no {args.token_env} or GITHUB_REPOSITORY: no comment posted\n")
+        return EXIT_OK
+    try:
+        action, comment_id = github.upsert_comment(
+            body,
+            token=token,
+            repository=repository,
+            pr_number=number,
+            marker_id=args.marker_id,
+            api_url=os.environ.get("GITHUB_API_URL", "https://api.github.com"),
+        )
+    except github.CommentError as exc:
+        # fork PRs get a read-only token; a missing comment must not fail the check itself
+        err.write(f"redline check comment: {exc} (comment skipped)\n")
+        return EXIT_OK
+    out.write(f"{action} PR comment {comment_id}\n")
+    return EXIT_OK
+
+
+def _configure_check_ratchet(p: argparse.ArgumentParser) -> None:
+    _check_common(p)
+    p.add_argument(
+        "--ratchet-file",
+        metavar="FILE",
+        help="committed ratchet JSON (default <suite>.ratchet.json)",
+    )
+    p.add_argument(
+        "--update",
+        action="store_true",
+        help="when nothing regressed, write the file: improvements tighten it, new endpoints "
+        "are added (required to create the file)",
+    )
+    p.add_argument("--no-latency", action="store_true", help="ratchet query counts only")
+    p.add_argument("--latency-pct", type=float, default=30.0, metavar="X")
+    p.add_argument("--latency-ms", type=float, default=20.0, metavar="Y")
+    p.add_argument("--json", metavar="OUT", help="write the verdict as JSON")
+    p.add_argument("--markdown", metavar="OUT", help="write a Markdown summary")
+
+
+def _cmd_check_ratchet(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
+    from .check import ratchet
+
+    loaded = _load_suite_for(args, err)
+    if loaded is None:
+        return EXIT_USAGE
+    suite, base_url = loaded
+    path = args.ratchet_file or os.path.splitext(args.suite)[0] + ".ratchet.json"
+    try:
+        recorded = ratchet.load(path)
+    except FileNotFoundError:
+        if not args.update:
+            err.write(f"redline check ratchet: {path}: no such file (create it with --update)\n")
+            return EXIT_USAGE
+        recorded = {}
+    except ratchet.RatchetError as exc:
+        err.write(f"redline check ratchet: {exc}\n")
+        return EXIT_USAGE
+    store = _CheckStore(args, err)
+    try:
+        result = _run_check(
+            args,
+            out,
+            err=err,
+            suite=suite,
+            base_url=base_url,
+            kind="baseline",
+            baseline=None,
+            store=store,
+        )
+    finally:
+        store.close()
+    if isinstance(result, int):
+        return result
+    if result.status == "stopped":
+        err.write("redline check ratchet: stopped – ratchet file not touched\n")
+        return EXIT_INTERRUPTED
+    observed = ratchet.observe(result.requests, latency=not args.no_latency)
+    if recorded and not any(o.get("queries") is not None for o in observed.values()):
+        err.write("redline check ratchet: no server-side query counts (use --store)\n")
+    verdict = ratchet.compare(
+        recorded, observed, latency_pct=args.latency_pct, latency_ms=args.latency_ms
+    )
+    out.write("\n" + verdict.to_markdown("Redline ratchet"))
+    for attr, text in (
+        ("json", json.dumps(verdict.to_dict(), indent=2) + "\n"),
+        ("markdown", verdict.to_markdown()),
+    ):
+        if getattr(args, attr):
+            with open(getattr(args, attr), "w", encoding="utf-8") as fh:
+                fh.write(text)
+    if not verdict.ok:
+        return EXIT_FAIL
+    if args.update and verdict.updated != recorded:
+        ratchet.write(path, verdict.updated)
+        out.write(f"wrote {path}\n")
+    return EXIT_OK
+
+
 def _cmd_check_init(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
     from .check.generate import from_traces
     from .check.suite import Suite
@@ -1410,6 +1671,17 @@ CHECK_COMMANDS: dict[str, tuple[str, Callable[[argparse.ArgumentParser], None], 
         _cmd_check_init,
     ),
     "show": ("print a saved report (JSON) again", _configure_check_show, _cmd_check_show),
+    "ratchet": (
+        "fail on new query-count/latency regressions against a committed file; "
+        "--update tightens it",
+        _configure_check_ratchet,
+        _cmd_check_ratchet,
+    ),
+    "comment": (
+        "post a saved report as the sticky PR comment and job summary (GitHub Actions)",
+        _configure_check_comment,
+        _cmd_check_comment,
+    ),
 }
 
 
@@ -1419,18 +1691,25 @@ def _configure_analyze(parser):
     )
     parser.add_argument("--json", action="store_true", help="emit a JSON report")
     parser.add_argument("--fail", action="store_true", help="exit 1 when findings are present")
+    parser.add_argument("--max-files", type=int, default=200, help="Python file budget (1–10000)")
+    parser.add_argument(
+        "--max-project-bytes", type=int, default=2_000_000, help="source byte budget (1–64000000)"
+    )
 
 
 def _cmd_analyze(args, out, err):
     import json
     from pathlib import Path
 
-    from .analyze import analyze_project, analyze_source
+    from .analyze import analyze_project, analyze_source, validate_scan_limits
 
     try:
         path = Path(args.path)
+        validate_scan_limits(args.max_files, args.max_project_bytes)
         report = (
-            analyze_project(path)
+            analyze_project(
+                path, max_files=args.max_files, max_project_bytes=args.max_project_bytes
+            )
             if path.is_dir()
             else analyze_source(path.read_text(encoding="utf-8"), str(path))
         )
@@ -1462,6 +1741,18 @@ COMMANDS: dict[str, tuple[str, Callable[[argparse.ArgumentParser], None], Handle
         "preview or explicitly send sanitized OTLP recording summaries",
         operations.configure_export,
         operations.export_command,
+        {},
+    ),
+    "init": (
+        "detect the framework and write a starter redline.toml (never overwrites without --force)",
+        project_init.configure,
+        project_init.command,
+        {},
+    ),
+    "digest": (
+        "post newly seen issues to a chat webhook (deduplicated, with a state file)",
+        digest.configure,
+        digest.command,
         {},
     ),
     "audit-store": (
@@ -1504,7 +1795,7 @@ COMMANDS: dict[str, tuple[str, Callable[[argparse.ArgumentParser], None], Handle
     ),
     "doctor": (
         "check storage, the UI bundle and the access settings",
-        _configure_config,
+        _configure_doctor,
         _cmd_doctor,
         {},
     ),

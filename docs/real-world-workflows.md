@@ -1,6 +1,6 @@
 # Database failures, jobs and shared environments
 
-These tools are part of the **0.4.0a1 development release**. They extend the existing
+These tools are part of the **0.5.0a2 development release**. They extend the existing
 request profiler; they do not replace application tests, a database migration system or
 production error monitoring. Recording does not start an exporter. Active load/check,
 online compilation and export commands contact only their explicitly selected targets.
@@ -287,7 +287,12 @@ integration = instrument_celery(celery_app, recorder)
 Success, failure and retry outcomes are recorded. Publication can carry the current
 request/parent trace ID. Arguments and results are not captured. Eager-mode tests require
 no broker; prefork/broker behavior must be tested in the deployment. A task revoked before
-it starts has no recording. RQ and Dramatiq integrations are not implemented.
+it starts has no recording.
+
+RQ (`instrument_rq`), Dramatiq (`instrument_dramatiq`) and FastAPI/Starlette background
+tasks are recorded the same way, with trace-context propagation from the enqueuing request;
+see [Integrations](integrations.md#rq). Their tests use fakeredis, `StubBroker` and a
+TestClient, so real broker and process-model behavior must still be checked in deployment.
 
 ## Storage and mixed frameworks
 
@@ -312,7 +317,7 @@ flask_redline.Redline(flask_app, recorder=outer_redline.recorder, mode="nested")
 ```
 
 An active outer recording receives Flask route/view spans and errors rather than a second
-trace. The adapter test uses Starlette WSGIMiddleware and its copied context. It does not
+trace. The adapter test uses the a2wsgi WSGI bridge and its copied context. It does not
 claim equivalent behavior for every WSGI/ASGI bridge.
 
 ## Tests, import checks and explicit export
@@ -346,8 +351,9 @@ redline export --store /path/to/redline.db \
 
 The exporter sends a root recording span plus sanitized SQL spans using `db.system`,
 `db.operation`, `db.statement` (the normalized fingerprint unless `--include-sql` is
-explicit), `error.type` and selected numeric/status attributes. It also builds OTLP log
-records for recorded issues. It omits bodies, parameter values, arbitrary tags and error
+explicit; the raw statement is then redacted like the HTML export), `error.type` and
+selected numeric/status attributes. It also builds OTLP log records for recorded issues,
+with redacted titles. It omits bodies, parameter values, arbitrary tags and error
 messages. A valid incoming `traceparent` supplies the exported trace id and parent span;
 otherwise ids are derived from the recording id. It is not a production batching/retry
 pipeline, and no exporter runs automatically during recording.

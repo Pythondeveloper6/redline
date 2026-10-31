@@ -104,6 +104,13 @@ def _suggest(call: str | None, framework: str, callsite: Callsite | None) -> Sug
             code="async with httpx.AsyncClient() as client:\n    r = await client.get(url)",
             confidence="medium",
         )
+    if c == "SQLAlchemy work":
+        return Suggestion(
+            summary="Profile SQL compilation and ORM materialization; async SQLAlchemy also "
+            "does CPU work on the event loop. Confirm a synchronous driver call before "
+            "changing drivers or moving database work to another thread.",
+            confidence="low",
+        )
     if c.startswith(_DB):
         return Suggestion(
             summary="Use the async driver (SQLAlchemy AsyncSession with asyncpg/aiosqlite, "

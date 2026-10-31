@@ -26,6 +26,7 @@ from urllib.parse import urlsplit
 __all__ = [
     "ACCESS_POLICIES",
     "DEFAULT_IGNORE_PATHS",
+    "DEFAULT_IGNORE_SQL",
     "DEFAULT_REDACT_HEADERS",
     "DEFAULT_REDACT_KEYS",
     "EDITORS",
@@ -147,6 +148,13 @@ PASSWORD_HASH_PREFIX = "pbkdf2_sha256$"
 MIN_TOKEN_LENGTH = 24
 
 DEFAULT_IGNORE_PATHS: tuple[str, ...] = ("/static/", "/media/", "/favicon.ico")
+#: Session housekeeping that is not worth a span: SQL Server ``sp_set_session_context``
+#: and plain ``SET ...`` session statements (run on pool checkout). Regexes matched
+#: case-insensitively against the start of every statement of the normalised SQL.
+DEFAULT_IGNORE_SQL: tuple[str, ...] = (
+    r"^(?:EXEC(?:UTE)?\s+)?(?:\[?sys\]?\.)?\[?sp_set_session_context\]?\b",
+    r"^SET\s",
+)
 DEFAULT_REDACT_HEADERS: tuple[str, ...] = (
     "authorization",
     "cookie",
@@ -156,7 +164,7 @@ DEFAULT_REDACT_HEADERS: tuple[str, ...] = (
 )
 DEFAULT_REDACT_KEYS: tuple[str, ...] = (
     r"(?i)pass(word)?|secret|token|api[_-]?key|(?<![a-z])auth(orization)?(?![a-z])"
-    r"|session|csrf|card|cvv|ssn|private[_-]?key",
+    r"|session|csrf|card|cvv|ssn|private[_-]?key|access[_-]?key|signature|credential",
 )
 
 
@@ -173,6 +181,9 @@ class Settings:
 
     enabled: bool = True
     storage_path: str = ".redline/redline.db"
+    #: A ``postgresql://`` URL: store traces in that shared database instead of the SQLite
+    #: file at ``storage_path`` (needs ``redline-core[postgres]``).
+    storage_url: str | None = None
     storage_role: str = "web"
     extra_stores: tuple[str, ...] = ()
 
@@ -198,6 +209,7 @@ class Settings:
     redact_routes: Mapping[str, str] = field(default_factory=dict)
     capture_loggers: tuple[str, ...] = ()
     ignore_loggers: tuple[str, ...] = ()
+    ignore_sql: tuple[str, ...] = DEFAULT_IGNORE_SQL
     session_expected: Mapping[str, str] = field(default_factory=lambda: {"NOCOUNT": "OFF"})
     session_expected_context: tuple[str, ...] = ()
     user_resolver: Any = None
@@ -264,6 +276,10 @@ class Settings:
     max_logs_per_trace: int = 200
     capture_locals: bool = True
     capture_error_details: bool = True
+    #: Outbound-call integrations (httpx, requests, redis, boto3). ``"warn"`` (default) logs
+    #: one warning at install listing installed but uninstrumented ones; ``"on"``
+    #: instruments every installed one at install time; ``"off"`` does neither.
+    auto_instrument: str = "warn"
 
     # developer experience
     #: ``vscode``, ``cursor``, ``pycharm``, ``idea``, ``sublime``, ``none`` or a template
@@ -341,6 +357,7 @@ class Settings:
             "cookie_secure",
             "preset",
             "access",
+            "auto_instrument",
             "mount_path",
         ):
             object.__setattr__(self, name, _coerce(name, getattr(self, name)))
@@ -436,6 +453,7 @@ _SEQ_FIELDS = {
     "redact_tables",
     "capture_loggers",
     "ignore_loggers",
+    "ignore_sql",
     "request_id_headers",
     "session_expected_context",
     "ignore_paths",
@@ -460,8 +478,10 @@ def _coerce(name: str, value: Any) -> Any:
         return value
     if name == "log_level" and isinstance(value, str):
         return value.strip().upper()
-    if name in ("preset", "access") and isinstance(value, str):
+    if name in ("preset", "access", "auto_instrument") and isinstance(value, str):
         return value.strip().lower()
+    if name == "auto_instrument" and isinstance(value, bool):
+        return "on" if value else "off"
     if name == "mount_path" and isinstance(value, str):
         return "/" + value.strip().strip("/")
     if name in _MAP_FIELDS:
@@ -507,7 +527,15 @@ def _check_type(s: Settings, name: str, types: tuple[type, ...], label: str) -> 
         raise SettingsError(f"Redline setting {name!r} must be {label}, got {value!r}.")
 
 
+AUTO_INSTRUMENT_MODES: tuple[str, ...] = ("off", "warn", "on")
+
+
 def _validate(s: Settings) -> None:
+    if s.auto_instrument not in AUTO_INSTRUMENT_MODES:
+        raise SettingsError(
+            f"Redline setting 'auto_instrument' must be one of "
+            f"{', '.join(AUTO_INSTRUMENT_MODES)}; got {s.auto_instrument!r}."
+        )
     for name in (
         "enabled",
         "always_keep_errors",
@@ -603,6 +631,13 @@ def _validate(s: Settings) -> None:
         if not 0.0 <= getattr(s, name) <= 1.0:
             raise SettingsError(f"Redline setting {name!r} must be between 0 and 1.")
     _check_type(s, "storage_path", (str,), "a string or os.PathLike")
+    if s.storage_url is not None:
+        _check_type(s, "storage_url", (str,), "a postgresql:// URL or None")
+        if not s.storage_url.strip().lower().startswith(("postgresql://", "postgres://")):
+            raise SettingsError(
+                "Redline setting 'storage_url' must be a postgresql:// URL "
+                "(the SQLite file is configured with storage_path)."
+            )
     if s.project_root is not None:
         _check_type(s, "project_root", (str,), "a string, os.PathLike or None")
     if s.profile not in PROFILE_MODES:
@@ -633,7 +668,11 @@ def _validate(s: Settings) -> None:
         value = getattr(s, name)
         if not isinstance(value, tuple) or not all(isinstance(v, str) for v in value):
             raise SettingsError(f"Redline setting {name!r} must be a list of strings.")
-    for pattern in (*s.redact_keys, *(p for p in s.ignore_paths if p.startswith("^"))):
+    for pattern in (
+        *s.redact_keys,
+        *s.ignore_sql,
+        *(p for p in s.ignore_paths if p.startswith("^")),
+    ):
         try:
             re.compile(pattern)
         except re.error as exc:
