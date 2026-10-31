@@ -52,7 +52,6 @@ version is below `1.0` the public API may change between minor versions.
   calls hidden behind local helpers. These remain syntax candidates requiring runtime review.
 - Explicit `--max-files` and `--max-project-bytes` budgets for `analyze` and `check-sql`,
   capped at 10,000 files and 64 MB. UI/default budgets stay at 200 files and 2 MB.
-- An internal real-project evaluation and release validation pass (not published).
 
 ## 0.4.0a1 development baseline
 
