@@ -204,10 +204,10 @@ def test_sqlite_online_compile_never_writes():
 def test_nested_flask_fastapi_one_trace(store):
     pytest.importorskip("flask_redline")
     pytest.importorskip("fastapi_redline")
+    from a2wsgi import WSGIMiddleware
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
     from flask import Flask
-    from starlette.middleware.wsgi import WSGIMiddleware
 
     from fastapi_redline import install
     from flask_redline import Redline as FlaskRedline
