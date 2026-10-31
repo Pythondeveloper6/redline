@@ -1903,6 +1903,9 @@ source = { editable = "packages/redline-core" }
 asyncpg = [
     { name = "asyncpg" },
 ]
+dramatiq = [
+    { name = "dramatiq" },
+]
 graphene = [
     { name = "graphene" },
 ]
@@ -1923,6 +1926,9 @@ redis = [
 ]
 requests = [
     { name = "requests" },
+]
+rq = [
+    { name = "rq" },
 ]
 sqlalchemy = [
     { name = "sqlalchemy" },
@@ -1954,6 +1960,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "asyncpg", marker = "extra == 'asyncpg'", specifier = ">=0.29" },
+    { name = "dramatiq", marker = "extra == 'dramatiq'", specifier = ">=1.16" },
     { name = "graphene", marker = "extra == 'graphene'", specifier = ">=3.3" },
     { name = "httpx", marker = "extra == 'httpx'", specifier = ">=0.27" },
     { name = "httpx", marker = "extra == 'load'", specifier = ">=0.27" },
@@ -1961,10 +1968,11 @@ requires-dist = [
     { name = "pyinstrument", marker = "extra == 'profile'", specifier = ">=5.0,<6.0" },
     { name = "redis", marker = "extra == 'redis'", specifier = ">=5.0" },
     { name = "requests", marker = "extra == 'requests'", specifier = ">=2.31" },
+    { name = "rq", marker = "extra == 'rq'", specifier = ">=1.16" },
     { name = "sqlalchemy", marker = "extra == 'sqlalchemy'", specifier = ">=2.0,<3.0" },
     { name = "strawberry-graphql", marker = "extra == 'strawberry'", specifier = ">=0.240" },
 ]
-provides-extras = ["profile", "sqlalchemy", "httpx", "requests", "redis", "asyncpg", "psycopg", "strawberry", "graphene", "load"]
+provides-extras = ["profile", "sqlalchemy", "httpx", "requests", "redis", "asyncpg", "psycopg", "strawberry", "graphene", "load", "rq", "dramatiq"]
 
 [package.metadata.requires-dev]
 dev = [
