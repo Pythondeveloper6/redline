@@ -571,7 +571,10 @@ The step outputs `exit-code` and `report` (the JSON path). The comment is posted
 `redline check comment REPORT` (a `--json` report or a `--markdown` file; `--dry-run` prints
 the body, `--no-comment` only writes the job summary). It does nothing outside
 `pull_request` events, and a failed API call (for example the read-only token of a fork PR)
-only prints a warning: the check's own verdict decides the job result.
+only prints a warning: the check's own verdict decides the job result. The token is sent
+only to `GITHUB_API_URL` over https (plain http only to a loopback address), redirects are
+never followed, and `extra-args` is split on whitespace but never glob-expanded or
+evaluated; still, do not build it from pull-request-controlled text such as branch names.
 
 A baseline produced in CI can be opened in the UI: `POST api/checks/baselines/import` takes
 the JSON file (see [the HTTP API](http-api.md#checks)) and the run appears on the suite's

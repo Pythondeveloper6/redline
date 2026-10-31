@@ -7,13 +7,15 @@ is called with the token the workflow passes in, and only on ``pull_request`` ev
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
+import re
 from collections.abc import Mapping
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 __all__ = [
     "DEFAULT_MARKER_ID",
@@ -30,6 +32,9 @@ DEFAULT_MARKER_ID = "redline-check"
 MAX_BODY = 60_000
 PER_PAGE = 100
 MAX_PAGES = 20
+#: Upper bound on one API answer (a page of 100 comments is far below it).
+MAX_RESPONSE = 8 * 1024 * 1024
+_REPOSITORY = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 
 
 class CommentError(RuntimeError):
@@ -77,6 +82,37 @@ def pull_request_number(env: Mapping[str, str] | None = None) -> int | None:
     return number if isinstance(number, int) and not isinstance(number, bool) else None
 
 
+class _NoRedirect(HTTPRedirectHandler):
+    """Never follow a redirect: urllib would resend the ``Authorization`` header to it."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _loopback(host: str) -> bool:
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _check_api_url(api_url: str) -> None:
+    """The token goes only over https (plain http only to a loopback mock), with no
+    credentials, query or fragment in the URL."""
+    parts = urlsplit(api_url)
+    host = parts.hostname or ""
+    if (
+        not host
+        or parts.username is not None
+        or parts.query
+        or parts.fragment
+        or not (parts.scheme == "https" or (parts.scheme == "http" and _loopback(host)))
+    ):
+        raise CommentError("invalid GitHub API URL (https required)")
+
+
 def _api(method: str, url: str, token: str, payload: Any = None) -> Any:
     data = json.dumps(payload).encode() if payload is not None else None
     request = Request(
@@ -92,13 +128,18 @@ def _api(method: str, url: str, token: str, payload: Any = None) -> Any:
         },
     )
     try:
-        with urlopen(request, timeout=20) as response:
-            raw = response.read()
+        with build_opener(_NoRedirect).open(request, timeout=20) as response:
+            raw = response.read(MAX_RESPONSE + 1)
     except HTTPError as exc:
         raise CommentError(f"GitHub API {method} failed: HTTP {exc.code}") from None
     except (URLError, OSError) as exc:
         raise CommentError(f"GitHub API {method} failed: {exc}") from None
-    return json.loads(raw) if raw else None
+    if len(raw) > MAX_RESPONSE:
+        raise CommentError(f"GitHub API {method} answer too large")
+    try:
+        return json.loads(raw) if raw else None
+    except ValueError:
+        raise CommentError(f"GitHub API {method} answered invalid JSON") from None
 
 
 def upsert_comment(
@@ -113,9 +154,9 @@ def upsert_comment(
     """Update the comment carrying the marker, or create it. Returns ``(action, id)``."""
     if not token:
         raise CommentError("no token given")
-    parts = urlsplit(api_url)
-    if parts.scheme not in {"http", "https"} or not parts.hostname:
-        raise CommentError("invalid GitHub API URL")
+    _check_api_url(api_url)
+    if not _REPOSITORY.fullmatch(repository) or ".." in repository:
+        raise CommentError("invalid repository (expected owner/name)")
     base = f"{api_url.rstrip('/')}/repos/{repository}"
     wanted = marker(marker_id)
     for page in range(1, MAX_PAGES + 1):
