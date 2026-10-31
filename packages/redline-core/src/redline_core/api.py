@@ -236,6 +236,8 @@ class RedlineAPI:
             return route(self, method, path, params, body)
         if path == "api/suppressions" or path.startswith("api/suppressions/"):
             return self.suppression_routes(method, path, body)
+        if path == "api/metrics":
+            return self.metrics() if method == "GET" else _not_allowed()
         get_routes: dict[str, Callable[[Mapping[str, Any]], Response]] = {
             "api/compare": self.compare,
             "api/sql": self.sql,
@@ -325,6 +327,26 @@ class RedlineAPI:
                 "dropped": getattr(self.store, "dropped", 0),
             },
         }
+
+    def metrics(self) -> RawResponse:
+        """``GET api/metrics``: recorder health in the Prometheus text exposition format."""
+        from .metrics import render_metrics
+
+        return RawResponse(
+            200,
+            "text/plain; version=0.0.4; charset=utf-8",
+            render_metrics(self.store, self._recorder()).encode("utf-8"),
+            {"Cache-Control": "no-store"},
+        )
+
+    def _recorder(self) -> Any:
+        from .recorder import get_recorder
+
+        try:
+            recorder = get_recorder()
+        except Exception:
+            return None
+        return recorder if recorder.store is self.store else None
 
     def _features(self) -> dict[str, bool]:
         s = self.settings
