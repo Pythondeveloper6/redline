@@ -148,6 +148,7 @@ nav:
       - Configuration: configuration.md
       - Access control: access-control.md
       - Production: production.md
+      - Operating Redline: operating.md
       - Full-stack testing: testing.md
       - Security: security.md
       - Threat model: threat-model.md

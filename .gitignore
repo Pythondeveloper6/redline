@@ -42,3 +42,9 @@ docs/feature-backlog.md
 reports/
 .planning/
 .claude/
+
+# Local tooling and internal handoff notes (never committed)
+.serena/
+HANDOFF.md
+CONTRACT.md
+PACKAGES-*.md

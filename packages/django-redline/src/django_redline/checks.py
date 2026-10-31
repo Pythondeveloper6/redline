@@ -65,7 +65,7 @@ def check_redline(app_configs: Any = None, **kwargs: Any) -> list:
                 id="django_redline.W005",
             )
         )
-    if core.enabled:
+    if core.enabled and not core.storage_url:
         problems += _storage(core.storage_path)
     return problems
 

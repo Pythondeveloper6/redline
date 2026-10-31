@@ -181,6 +181,9 @@ class Settings:
 
     enabled: bool = True
     storage_path: str = ".redline/redline.db"
+    #: A ``postgresql://`` URL: store traces in that shared database instead of the SQLite
+    #: file at ``storage_path`` (needs ``redline-core[postgres]``).
+    storage_url: str | None = None
     storage_role: str = "web"
     extra_stores: tuple[str, ...] = ()
 
@@ -628,6 +631,13 @@ def _validate(s: Settings) -> None:
         if not 0.0 <= getattr(s, name) <= 1.0:
             raise SettingsError(f"Redline setting {name!r} must be between 0 and 1.")
     _check_type(s, "storage_path", (str,), "a string or os.PathLike")
+    if s.storage_url is not None:
+        _check_type(s, "storage_url", (str,), "a postgresql:// URL or None")
+        if not s.storage_url.strip().lower().startswith(("postgresql://", "postgres://")):
+            raise SettingsError(
+                "Redline setting 'storage_url' must be a postgresql:// URL "
+                "(the SQLite file is configured with storage_path)."
+            )
     if s.project_root is not None:
         _check_type(s, "project_root", (str,), "a string, os.PathLike or None")
     if s.profile not in PROFILE_MODES:

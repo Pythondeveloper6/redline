@@ -198,13 +198,25 @@ misleading under root or on special/read-only mounts.
 
 Checks that the setup is sound. Each line is `OK`, `WARN` or `FAIL`; the command exits `1`
 if any check fails or the configuration does not load, and `0` otherwise (warnings do not
-fail it). It takes `--json` and `--project-root DIR` like `redline config`.
+fail it). It takes `--json` and `--project-root DIR` like `redline config`, plus:
+
+- `--workers N`: the number of worker processes the deployment runs. Without it the count
+  is read from `WEB_CONCURRENCY`, `--workers`/`-w` in `GUNICORN_CMD_ARGS` and
+  `UVICORN_WORKERS`.
+- `--strict`: any warning makes the command exit `1`, and the `filesystem` and `workers`
+  checks about a SQLite store are reported as `FAIL`. Use it in deployment pipelines.
+- `--production`: also check the recording-only production policy (see
+  [Production doctor gate](#production-doctor-gate)).
+
+With `storage_url` set, the `storage` check verifies the PostgreSQL driver is installed and
+the database answers (password masked in the output); the SQLite file checks are skipped.
 
 | Check | Looks at |
 |---|---|
 | `storage` | a temporary file can actually be created/written in the nearest existing parent; an existing store can be opened for writing without truncation |
 | `storage WAL` | a throwaway SQLite database beside the store really accepts `PRAGMA journal_mode=WAL`; failure is a hard error because a writable store refuses non-WAL |
-| `filesystem` | on Linux, the mount type from `/proc/self/mountinfo`; `nfs`, `cifs`, `9p`, `virtiofs`, `fuse` and similar mounts warn that WAL may not be reliable |
+| `filesystem` | on Linux, the mount type from `/proc/self/mountinfo`; `nfs`, `cifs`, `9p`, `virtiofs`, `fuse` and similar mounts warn that WAL may not be reliable (fail with `--strict`) |
+| `workers` | more than one worker process sharing a SQLite file warns, recommending `storage_url` (fail with `--strict`) |
 | `ui bundle` | the prebuilt UI is present in `redline-core` |
 | `access` | `open` fails (warns when `REDLINE_ALLOW_OPEN=1` is set); `access` not set in the file or environment warns (FastAPI, Flask and Litestar answer `404` outside debug mode unless the app sets it in code); `trust_unix_socket` warns; `local` outside the `dev` preset warns, because behind a proxy nobody can reach Redline |
 | `token` | shorter than 24 characters (warn), an unreadable `token_file` (fail), a `token_file` readable by other users (warn) |
@@ -265,3 +277,12 @@ Scenarios come from the app's OpenAPI document:
 ```bash
 redline load init --from-openapi http://localhost:8000/openapi.json
 ```
+
+
+### Production doctor gate
+
+`redline doctor --production --strict --json` adds the recording-only production policy
+to the ordinary storage/access probes. It validates rather than changes settings.
+Warnings retain their `warn` status in JSON but produce nonzero exit status under
+`--strict`; configuration failures also produce valid JSON. See
+[Production deployment](production.md#enforce-the-recording-only-configuration-before-deployment).

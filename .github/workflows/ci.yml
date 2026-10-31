@@ -3,12 +3,13 @@
 # The distributions live here and ship in lockstep, so one workflow tests them all:
 #
 #   lint      ruff (check + format --check) and the lockstep-version check.
-#   core      redline-core on every interpreter it claims (3.10 - 3.14).
+#   core      redline-core on every interpreter it claims (3.10 - 3.14), coverage gated.
 #   django    django-redline across Python x Django.
 #   fastapi   fastapi-redline across Python.
 #   flask     flask-redline across Python.
 #   litestar  litestar-redline across Python.
-#   postgres  the EXPLAIN tests that need a real PostgreSQL server (they skip elsewhere).
+#   postgres  the EXPLAIN and shared-store tests that need a real PostgreSQL server (they
+#             skip elsewhere).
 #   frontend  builds the React UI and fails if the committed bundle is stale.
 #   docs      the MkDocs site, built with --strict (docs.yml deploys it).
 #   package   builds every distribution, installs the wheels into an empty
@@ -77,9 +78,13 @@ jobs:
         run: |
           uv venv --python "$PYTHON_VERSION" "$RUNNER_TEMP/venv"
           VIRTUAL_ENV="$RUNNER_TEMP/venv" uv pip install -e ".[profile]" --group dev
-      - name: Test
+      # Coverage is gated (measured ~86% locally with every optional integration installed);
+      # the floor leaves room for interpreter cells that skip a few optional imports.
+      - name: Test (coverage gated)
         working-directory: packages/redline-core
-        run: $RUNNER_TEMP/venv/bin/python -m pytest
+        run: >-
+          $RUNNER_TEMP/venv/bin/python -m pytest --cov=redline_core
+          --cov-report=term:skip-covered --cov-fail-under=80
 
   django:
     name: django / py${{ matrix.python-version }} / Django ${{ matrix.django }}
@@ -246,6 +251,12 @@ jobs:
         run: |
           uv run --no-sync pytest tests/test_explain.py -k live_postgres -rs -v | tee "$RUNNER_TEMP/core.log"
           ! grep -qi skipped "$RUNNER_TEMP/core.log"
+      - name: Core - shared PostgreSQL store
+        working-directory: packages/redline-core
+        shell: bash
+        run: |
+          uv run --no-sync pytest tests/test_storage_postgres.py -rs -v | tee "$RUNNER_TEMP/store.log"
+          ! grep -qi skipped "$RUNNER_TEMP/store.log"
       - name: django-redline - EXPLAIN on PostgreSQL
         working-directory: packages/django-redline
         shell: bash

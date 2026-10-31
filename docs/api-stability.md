@@ -3,9 +3,9 @@
 [← Index](index.md)
 
 Redline is **alpha** (`0.x`). This page says which names you can build on, how they may
-change before 1.0, and how a change is announced. It is the authoritative list; the older
-design document `CONTRACT.md` in the repository records how features were specified and
-is kept for history, not as a compatibility promise.
+change before 1.0, and how a change is announced. It is the authoritative list; older
+design notes cited in code comments describe how features were specified and are not a
+compatibility promise.
 
 ## Versioning
 
