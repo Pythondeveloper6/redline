@@ -158,7 +158,6 @@ nav:
       - Command line: cli.md
       - Project:
           - Roadmap: roadmap.md
-          - Feature backlog: feature-backlog.md
           - FAQ: faq.md
           - Changelog: changelog.md
           - Contributing: contributing.md

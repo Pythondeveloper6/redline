@@ -210,8 +210,7 @@ A forced kill can lose queued traces; state the acceptable loss window before ro
 
 The complete Compose baseline passed on 2026-10-29 (run
 `20261029T052447Z-caaef5f7`): 2,120 Python tests, zero failures/errors/skips, plus frontend,
-demo, docs and packaging checks. The committed validation record is
-`IMPLEMENTATION_STATUS.md` in the repository. Main CI and the actual production topology
+demo, docs and packaging checks. Main CI and the actual production topology
 still require their own evidence; an environment restriction is never a passing assertion.
 
 | Area | Confirmed baseline | Still required for the target deployment |

@@ -215,7 +215,7 @@ export const JOB_EXAMPLE = {
   "error": {
     "type": "ValueError",
     "message": "Example summary failed after the write committed",
-    "traceback": "Traceback (most recent call last):\n  File \"/Volumes/Data/apps/redline/packages/redline-core/src/redline_core/recorder.py\", line 575, in recording\n    yield builder\n  File \"/Volumes/Data/apps/redline/packages/redline-core/src/redline_core/jobs.py\", line 46, in job\n    yield builder\n  File \"/Volumes/Data/apps/redline/scripts/build_release_fixtures.py\", line 41, in <module>\n    raise ValueError(\"Example summary failed after the write committed\")\nValueError: Example summary failed after the write committed\n",
+    "traceback": "Traceback (most recent call last):\n  File \"/app/.venv/lib/python3.13/site-packages/redline_core/recorder.py\", line 575, in recording\n    yield builder\n  File \"/app/.venv/lib/python3.13/site-packages/redline_core/jobs.py\", line 46, in job\n    yield builder\n  File \"/app/scripts/build_release_fixtures.py\", line 41, in <module>\n    raise ValueError(\"Example summary failed after the write committed\")\nValueError: Example summary failed after the write committed\n",
     "origin": {
       "file": "scripts/build_release_fixtures.py",
       "line": 41,
