@@ -12,6 +12,7 @@ not be reached (``redline check``), 130 interrupted (Ctrl-C).
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import os
 import signal
@@ -908,7 +909,7 @@ def _configure_check_show(p: argparse.ArgumentParser) -> None:
 
 def _cmd_check(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
     err.write(
-        "usage: redline check {record,compare,run,init,show} …\n\n"
+        "usage: redline check {record,compare,run,init,show,comment} …\n\n"
         + "".join(f"  redline check {n:<8} {h}\n" for n, (h, _, _) in CHECK_COMMANDS.items())
     )
     return EXIT_USAGE
@@ -1317,6 +1318,76 @@ def _cmd_check_run(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
     return _cmd_check_record(args, out, err)
 
 
+def _configure_check_comment(p: argparse.ArgumentParser) -> None:
+    p.add_argument("report", help="report JSON (`--json`) or a Markdown file (`--markdown`)")
+    p.add_argument(
+        "--marker-id",
+        default="redline-check",
+        metavar="ID",
+        help="identifies the sticky comment (default redline-check); use one per suite",
+    )
+    p.add_argument(
+        "--token-env",
+        default="GITHUB_TOKEN",
+        metavar="VAR",
+        help="environment variable holding the token (default GITHUB_TOKEN)",
+    )
+    p.add_argument("--no-comment", action="store_true", help="only write the job summary")
+    p.add_argument("--dry-run", action="store_true", help="print the comment body, send nothing")
+
+
+def _cmd_check_comment(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
+    from .check import github
+    from .check.report import Report, ReportError
+
+    try:
+        with open(args.report, encoding="utf-8") as fh:
+            raw = fh.read()
+    except OSError as exc:
+        err.write(f"redline check comment: {args.report}: {exc}\n")
+        return EXIT_USAGE
+    if args.report.lower().endswith(".md"):
+        markdown = raw
+    else:
+        try:
+            markdown = Report.from_dict(json.loads(raw)).to_markdown()
+        except (ValueError, ReportError) as exc:
+            err.write(f"redline check comment: {args.report}: {exc}\n")
+            return EXIT_USAGE
+    body = github.sticky_body(markdown, args.marker_id)
+    if args.dry_run:
+        out.write(body)
+        return EXIT_OK
+    if github.write_job_summary(markdown):
+        out.write("wrote the job summary\n")
+    if args.no_comment:
+        return EXIT_OK
+    number = github.pull_request_number()
+    token = os.environ.get(args.token_env, "")
+    repository = os.environ.get("GITHUB_REPOSITORY", "")
+    if number is None:
+        out.write("not a pull_request event: no comment posted\n")
+        return EXIT_OK
+    if not token or not repository:
+        out.write(f"no {args.token_env} or GITHUB_REPOSITORY: no comment posted\n")
+        return EXIT_OK
+    try:
+        action, comment_id = github.upsert_comment(
+            body,
+            token=token,
+            repository=repository,
+            pr_number=number,
+            marker_id=args.marker_id,
+            api_url=os.environ.get("GITHUB_API_URL", "https://api.github.com"),
+        )
+    except github.CommentError as exc:
+        # fork PRs get a read-only token; a missing comment must not fail the check itself
+        err.write(f"redline check comment: {exc} (comment skipped)\n")
+        return EXIT_OK
+    out.write(f"{action} PR comment {comment_id}\n")
+    return EXIT_OK
+
+
 def _cmd_check_init(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
     from .check.generate import from_traces
     from .check.suite import Suite
@@ -1410,6 +1481,11 @@ CHECK_COMMANDS: dict[str, tuple[str, Callable[[argparse.ArgumentParser], None], 
         _cmd_check_init,
     ),
     "show": ("print a saved report (JSON) again", _configure_check_show, _cmd_check_show),
+    "comment": (
+        "post a saved report as the sticky PR comment and job summary (GitHub Actions)",
+        _configure_check_comment,
+        _cmd_check_comment,
+    ),
 }
 
 
