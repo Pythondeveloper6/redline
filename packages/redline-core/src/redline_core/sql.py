@@ -233,6 +233,10 @@ _STRICT_INERT = re.compile(
     """,
     re.VERBOSE | re.DOTALL,
 )
+#: The same pessimistic reading as MySQL sees it: ``#`` starts a comment that ends at the
+#: newline, so a quote after it opens nothing. (Elsewhere ``#`` is an operator; reading it
+#: as a comment in this extra pass can only refuse more.)
+_MYSQL_INERT = re.compile(r"\#[^\n]*|" + _STRICT_INERT.pattern, re.VERBOSE | re.DOTALL)
 _READ_KINDS = ("SELECT", "WITH", "VALUES", "TABLE")
 
 
@@ -268,10 +272,11 @@ def is_explainable(sql: str) -> bool:
         return False
     if _UNSAFE.search(_QUOTED_IDENT.sub(" ", fp)):
         return False
-    strict = _STRICT_INERT.sub(" ", sql).strip().rstrip(";")
-    if ";" in strict:
-        return False
-    return _UNSAFE.search(strict) is None
+    for inert in (_STRICT_INERT, _MYSQL_INERT):
+        strict = inert.sub(" ", sql).strip().rstrip(";")
+        if ";" in strict or _UNSAFE.search(strict):
+            return False
+    return True
 
 
 # ── table / column extraction (best-effort, for titles and index suggestions) ─────────

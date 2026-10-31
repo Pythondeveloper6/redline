@@ -154,3 +154,22 @@ def test_is_explainable_refuses_writes_locks_and_quoting_tricks(sql):
 )
 def test_is_explainable_accepts_ordinary_reads(sql):
     assert is_explainable(sql) is True
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        # MySQL ends a `#` comment at the newline; a quote inside it must not hide what follows.
+        "SELECT 1 # '\n; DELETE FROM users; -- '",
+        "SELECT 1 # '\nFOR UPDATE -- '",
+        "SELECT 1 # '\n INTO OUTFILE '/tmp/x' -- '",
+    ],
+)
+def test_mysql_hash_comment_cannot_hide_a_write(sql):
+    assert not is_explainable(sql)
+
+
+def test_hash_outside_comments_stays_explainable():
+    assert is_explainable("SELECT a # b FROM t")  # PostgreSQL's XOR operator
+    assert is_explainable("SELECT id FROM t WHERE tag = '#x'")
+    assert is_explainable("SELECT id FROM t # trailing comment\nWHERE id = 1")
