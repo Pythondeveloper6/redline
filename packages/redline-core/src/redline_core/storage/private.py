@@ -39,7 +39,9 @@ def ensure_private_dir(directory: str | os.PathLike[str], *, gitignore: bool = T
 def _write_gitignore(directory: Path) -> None:
     target = directory / ".gitignore"
     try:
-        fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        fd = os.open(
+            target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600
+        )
     except OSError:  # it exists (never overwritten) or the directory is read-only
         return
     with os.fdopen(fd, "w", encoding="utf-8") as fh:
@@ -50,9 +52,11 @@ def open_private(path: str | os.PathLike[str], mode: str = "ab") -> int:
     """``os.open`` flags for ``mode`` (``"ab"``/``"wb"``/``"w"``), creating the file ``0600``.
 
     Returns the file descriptor (wrap it with :func:`os.fdopen`). An existing file keeps
-    its contents and is tightened to ``0600``.
+    its contents and is tightened to ``0600``. A symlink at ``path`` is refused (where the
+    platform supports it), so a link planted in a shared directory cannot redirect the
+    write or the ``chmod``.
     """
-    flags = os.O_WRONLY | os.O_CREAT
+    flags = os.O_WRONLY | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
     flags |= os.O_APPEND if "a" in mode else os.O_TRUNC
     fd = os.open(path, flags, 0o600)
     if POSIX:
