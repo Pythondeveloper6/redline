@@ -17,6 +17,7 @@ from litestar.plugins import InitPluginProtocol
 from redline_core import Recorder, Settings, configure
 from redline_core.access import Access
 from redline_core.api import RedlineAPI
+from redline_core.auto_instrument import auto_instrument
 from redline_core.config import resolve_settings
 from redline_core.explain import ExplainExecutor
 from redline_core.load.control import run_hooks
@@ -121,6 +122,7 @@ class RedlinePlugin(InitPluginProtocol):
         self.store: Store = store if store is not None else SQLiteStore.from_settings(cfg)
         self.suggester = SQLAlchemyFixSuggester(project_root=cfg.project_root)
         self.recorder: Recorder = configure(cfg, self.store, [self.suggester])
+        auto_instrument(cfg)
         # POST api/runs: only with load_from_ui and a file-backed SQLiteStore (else 501)
         launcher, stopper = run_hooks(self.store, cfg)
         self.api = RedlineAPI(

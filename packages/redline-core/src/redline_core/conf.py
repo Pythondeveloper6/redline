@@ -264,6 +264,10 @@ class Settings:
     max_logs_per_trace: int = 200
     capture_locals: bool = True
     capture_error_details: bool = True
+    #: Outbound-call integrations (httpx, requests, redis, boto3). ``"warn"`` (default) logs
+    #: one warning at install listing installed but uninstrumented ones; ``"on"``
+    #: instruments every installed one at install time; ``"off"`` does neither.
+    auto_instrument: str = "warn"
 
     # developer experience
     #: ``vscode``, ``cursor``, ``pycharm``, ``idea``, ``sublime``, ``none`` or a template
@@ -341,6 +345,7 @@ class Settings:
             "cookie_secure",
             "preset",
             "access",
+            "auto_instrument",
             "mount_path",
         ):
             object.__setattr__(self, name, _coerce(name, getattr(self, name)))
@@ -460,8 +465,10 @@ def _coerce(name: str, value: Any) -> Any:
         return value
     if name == "log_level" and isinstance(value, str):
         return value.strip().upper()
-    if name in ("preset", "access") and isinstance(value, str):
+    if name in ("preset", "access", "auto_instrument") and isinstance(value, str):
         return value.strip().lower()
+    if name == "auto_instrument" and isinstance(value, bool):
+        return "on" if value else "off"
     if name == "mount_path" and isinstance(value, str):
         return "/" + value.strip().strip("/")
     if name in _MAP_FIELDS:
@@ -507,7 +514,15 @@ def _check_type(s: Settings, name: str, types: tuple[type, ...], label: str) -> 
         raise SettingsError(f"Redline setting {name!r} must be {label}, got {value!r}.")
 
 
+AUTO_INSTRUMENT_MODES: tuple[str, ...] = ("off", "warn", "on")
+
+
 def _validate(s: Settings) -> None:
+    if s.auto_instrument not in AUTO_INSTRUMENT_MODES:
+        raise SettingsError(
+            f"Redline setting 'auto_instrument' must be one of "
+            f"{', '.join(AUTO_INSTRUMENT_MODES)}; got {s.auto_instrument!r}."
+        )
     for name in (
         "enabled",
         "always_keep_errors",

@@ -342,3 +342,18 @@ def test_checks_suites_and_runs(client, staff, tmp_path, monkeypatch):
                "pad": "x" * (3 * 1024 * 1024)}  # fmt: skip
         r = _send(client, "post", "/redline/api/checks/baselines/import", big)
         assert r.status_code == 201, r.content
+
+
+def test_runtime_applies_auto_instrument_setting(monkeypatch, tmp_path):
+    from django_redline.runtime import build_runtime
+    from redline_core import Settings
+
+    seen = []
+    monkeypatch.setattr(
+        "django_redline.runtime.auto_instrument", lambda s: seen.append(s.auto_instrument)
+    )
+    runtime = build_runtime(Settings(storage_path=str(tmp_path / "r.db")))
+    try:
+        assert seen == ["warn"]
+    finally:
+        runtime.close() if hasattr(runtime, "close") else None

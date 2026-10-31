@@ -95,6 +95,7 @@ GROUPS: dict[str, tuple[str, ...]] = {
         "max_logs_per_trace",
         "capture_locals",
         "capture_error_details",
+        "auto_instrument",
         "max_spans_per_trace",
         "max_sql_bytes",
         "max_span_data_bytes",
