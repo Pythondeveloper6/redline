@@ -17,7 +17,7 @@ from ._httpx import instrument_httpx, uninstrument_httpx
 from ._middleware import RedlineMiddleware
 from ._security import RedlineHTTPError, csrf_guard, local_only, loopback_guard
 from ._sqlalchemy import instrument_engine
-from .plugin import RedlinePlugin
+from .plugin import RedlinePlugin, install_if_dev
 from .suggest import SQLAlchemyFixSuggester
 
 __version__ = "0.5.0a2"
@@ -29,6 +29,7 @@ __all__ = [
     "SQLAlchemyFixSuggester",
     "__version__",
     "csrf_guard",
+    "install_if_dev",
     "instrument_engine",
     "instrument_httpx",
     "local_only",

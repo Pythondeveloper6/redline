@@ -21,7 +21,7 @@ from ._middleware import RedlineMiddleware
 from ._requests import instrument_requests, uninstrument_requests
 from ._security import RedlineHTTPError, check_csrf, local_only, loopback_guard
 from ._sqlalchemy import instrument_engine
-from .integration import Redline
+from .integration import Redline, install_if_dev
 from .suggest import SQLAlchemyFixSuggester
 
 __version__ = "0.5.0a2"
@@ -33,6 +33,7 @@ __all__ = [
     "SQLAlchemyFixSuggester",
     "__version__",
     "check_csrf",
+    "install_if_dev",
     "instrument_engine",
     "instrument_httpx",
     "instrument_requests",

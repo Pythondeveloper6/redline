@@ -108,8 +108,8 @@ checks. Confirm their current remote configuration before authorizing publicatio
    uvx twine check --strict /tmp/redline-release-dist/*
    ```
 
-   Use an empty output directory for each build. Review `IMPLEMENTATION_STATUS.md`
-   for live database/worker validation limits before publishing.
+   Use an empty output directory for each build. Review the live database/worker
+   validation limits in `docs/production.md` before publishing.
 
 3. Merge the reviewed release to `main` after authorization. With the repository variable
    unset, successful CI automatically exercises Release's build and verification steps

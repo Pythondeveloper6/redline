@@ -123,7 +123,7 @@ def correlate(trace, request_headers, response_headers, settings):
             trace.tags["request_id"] = (
                 "[redacted]"
                 if Redactor(settings).is_secret_key("request_id")
-                else Redactor(settings).text(value)[:256]
+                else Redactor(settings).text(value[:1024])[:256]
             )
             break
 
@@ -145,7 +145,9 @@ def resolve_user(builder, request):
         redactor = builder.recorder.redactor
         builder.tag(
             "user_id",
-            "[redacted]" if redactor.is_secret_key("user_id") else redactor.text(str(value))[:256],
+            "[redacted]"
+            if redactor.is_secret_key("user_id")
+            else redactor.text(str(value)[:1024])[:256],
         )
     except Exception as exc:
         builder.tag("user_resolver_error", type(exc).__name__)

@@ -121,7 +121,9 @@ def _run(*args):
 
 
 def test_default_doctor_json_keeps_existing_check_set(project, monkeypatch):
-    monkeypatch.setattr(cli, "_doctor_checks", lambda resolved: [("ok", "existing", "unchanged")])
+    monkeypatch.setattr(
+        cli, "_doctor_checks", lambda resolved, **_: [("ok", "existing", "unchanged")]
+    )
     code, output, _ = _run("doctor", "--json")
     assert code == 0
     assert json.loads(output) == [{"status": "ok", "check": "existing", "detail": "unchanged"}]
@@ -138,7 +140,9 @@ def test_production_json_and_strict_warning_exit(project, monkeypatch):
         f'token = "{TOKEN}"\n'
         f'secret_key = "{SIGNING_SECRET}"\n'
     )
-    monkeypatch.setattr(cli, "_doctor_checks", lambda resolved: [("warn", "probe", "needs review")])
+    monkeypatch.setattr(
+        cli, "_doctor_checks", lambda resolved, **_: [("warn", "probe", "needs review")]
+    )
 
     code, output, _ = _run("doctor", "--production", "--json")
     checks = json.loads(output)

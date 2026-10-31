@@ -313,7 +313,13 @@ curl -s -X DELETE localhost:8000/_redline/api/traces
 
 ### GET api/endpoints
 
-Per-route aggregates. Parameter: `window`.
+Per-route aggregates. Parameters: `window`, `group_by` (optional).
+
+`group_by=blueprint` (Flask) or `group_by=tag:<key>` aggregates by a trace tag instead of
+by route: one item per tag value with `route` set to the value, `method` `"*"` and
+`routes` counting the distinct routes inside it; untagged requests are `"(none)"`. The
+response then also carries `"group_by"`. An invalid value answers 400
+(`invalid_group_by`).
 
 ```bash
 curl -s "localhost:8000/_redline/api/endpoints?window=1h"
@@ -779,6 +785,35 @@ and compared against in the UI. `?suite_id=` attaches it to a saved suite. A doc
 not a `redline-check-baseline` of version 1, or that does not have the right shape, is
 `400 invalid_baseline`. Suite headers and URLs, request paths, response headers and bodies are
 redacted again on import.
+
+### GET api/metrics
+
+Recorder health in the [Prometheus text exposition format](https://prometheus.io/docs/instrumenting/exposition_formats/)
+(`text/plain; version=0.0.4`), without a `prometheus_client` dependency. It passes through
+the same access check as every other `api/` endpoint (so a scraper needs the token, basic
+credentials or the framework permission your `access` setting requires) and is read-only
+(`405` for other methods).
+
+| Metric | Type | Meaning |
+|---|---|---|
+| `redline_writer_queue_depth` | gauge | Recordings waiting for the background writer |
+| `redline_writer_queue_capacity` | gauge | Queue bound (`writer_queue_size`) |
+| `redline_traces_saved_total` | counter | Recordings written since the process started |
+| `redline_traces_dropped_total{reason}` | counter | Not stored: `queue_full`, `write_failure`, `closed`, `capture_failed` (a recording that could not be captured safely) |
+| `redline_write_failures_total` | counter | Failed write batches |
+
+Counters are per process (and reset in a forked worker); with several workers scrape each one
+or sum the series. Labels are fixed names, never request data.
+
+```yaml
+scrape_configs:
+  - job_name: redline
+    metrics_path: /_redline/api/metrics
+    authorization:
+      credentials_file: /etc/prometheus/redline-token
+    static_configs:
+      - targets: ["dev.example.com"]
+```
 
 ### POST api/login, POST api/logout, GET api/config
 

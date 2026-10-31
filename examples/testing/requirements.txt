@@ -4,6 +4,7 @@ Django>=5.2,<5.3
 celery[redis]==5.6.3
 pymysql[rsa]>=1.1,<2
 aiomysql>=0.2,<1
+asyncmy>=0.2.9,<1
 pyodbc>=5.2,<6
 aioodbc>=0.5,<1
 mysqlclient>=2.2,<3

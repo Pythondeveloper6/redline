@@ -178,3 +178,14 @@ def test_env_and_file_layers(make_env, monkeypatch, tmp_path):
     with TestClient(env.app, base_url=LOCAL) as c:
         data = c.get("/_redline/api/config", headers={"Authorization": f"Bearer {TOKEN}"}).json()
         assert data["sources"]["access"] == "env" and data["settings"]["token"] == "***"
+
+
+def test_framework_policy_without_dependencies_fails_closed(make_env):
+    # `access="framework"` delegates the decision to the app's dependencies. With none
+    # attached there is nothing to delegate to, so every route must refuse.
+    env = make_env(dependencies=None, settings={"access": "framework"})
+    assert env.redline.access.policy == "framework"
+    with TestClient(env.app, base_url=LOCAL) as c:
+        assert c.get("/_redline/api/meta").status_code == 403
+        assert c.get("/_redline/api/traces").status_code == 403
+        assert c.delete("/_redline/api/traces").status_code == 403

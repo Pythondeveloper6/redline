@@ -40,7 +40,7 @@ import threading
 import time
 import weakref
 from collections import defaultdict
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from redline_core.diagnostics import capture_failure
 
@@ -71,7 +71,10 @@ from .checks import SCHEMA_V4, CheckStoreMixin
 from .derive import HOUR, Derived, derive, fingerprint_key
 from .private import ensure_private_dir, precreate, tighten
 
-__all__ = ["SQLiteStore"]
+if TYPE_CHECKING:
+    from typing_extensions import Self
+
+__all__ = ["SQLStore", "SQLiteStore"]
 
 logger = logging.getLogger("redline")
 
@@ -257,13 +260,26 @@ _RUN_TAG_GRACE_S = 60.0
 DEAD_RUN_MESSAGE = "the load process exited unexpectedly"
 #: Tags set from ``X-Redline-Check`` (validated by the writer).
 _CHECK_TAGS = ("check_run_id", "check_req", "check_n")
+
+
 #: Tables holding one or more rows per trace, deleted with it.
+def _group_tag(group_by: str | None) -> str | None:
+    """The trace tag an endpoints ``group_by`` names; ``ValueError`` for anything else."""
+    if group_by is None:
+        return None
+    if group_by == "blueprint":
+        return "blueprint"
+    if group_by.startswith("tag:") and 0 < len(group_by) - 4 <= 128:
+        return group_by[4:]
+    raise ValueError("group_by must be 'blueprint' or 'tag:<key>'")
+
+
 _TRACE_TABLES = ("profiles", "trace_tags", "issues", "trace_sql", "trace_ext", "trace_cache")
 #: Long-lived tables, kept across ``clear()`` unless ``history=True``.
 _HISTORY_TABLES = ("rollups", "releases", "issue_index", "issue_rollups", "run_steps", "runs")
 
 #: Every live store, so the fork hook can reset them in the child.
-_STORES: weakref.WeakSet[SQLiteStore] = weakref.WeakSet()
+_STORES: weakref.WeakSet[SQLStore] = weakref.WeakSet()
 #: Connections inherited across fork(). They must never be used *or closed* in the
 #: child (closing would release the parent's locks), so they are kept alive here.
 _INHERITED: list[Any] = []
@@ -283,33 +299,35 @@ _SUMMARY_COLS = (
 )
 
 
-class SQLiteStore(CheckStoreMixin):
-    """SQLite-backed :class:`~redline_core.storage.Store`.
-
-    :param path: database file; parent directories are created. ``":memory:"`` works.
-    :param background: write on a daemon thread (default). ``False`` writes inline,
-        which tests and short scripts find convenient.
-    :param queue_size: bound of the write queue; overflow is dropped and counted.
-    :param max_rows, max_age_s: retention applied by :meth:`prune`, which the writer runs
-        every ``prune_every`` saved traces.
-    :param history_retention_s: how long the history tables (hourly rollups, releases, the
-        issue index, load-test runs) are kept; independent of trace retention. ``0``/``None``
-        keeps them forever.
+class SQLStore(CheckStoreMixin):
+    """The SQL engine behind :class:`SQLiteStore` and
+    :class:`~redline_core.storage.postgres.PostgresStore`: the background writer, the
+    queries and the history. Subclasses provide the connection (``_connect``) and the
+    schema setup; the connection must offer sqlite3's ``execute`` / ``executemany`` API
+    with ``?`` placeholders and ``BEGIN IMMEDIATE`` / ``COMMIT`` / ``ROLLBACK`` statements.
     """
 
-    def __init__(
+    path: str
+    #: Errors of the database driver (caught where a failed read must not stop a write).
+    _db_errors: tuple[type[BaseException], ...] = (sqlite3.Error,)
+    #: The newest trace per SQL fingerprint (``{where}`` filters ``trace_sql``).
+    #: SQLite: a bare column next to max() comes from the row holding the maximum.
+    _SAMPLES_SQL = (
+        "SELECT fingerprint, trace_id, max(started_at) FROM trace_sql "
+        "WHERE {where} GROUP BY fingerprint"
+    )
+
+    def _init_common(
         self,
-        path: str | os.PathLike[str] = ".redline/redline.db",
         *,
-        background: bool = True,
-        queue_size: int = 1_000,
-        max_rows: int | None = 10_000,
-        max_age_s: float | None = 7 * 86_400.0,
-        prune_every: int = 200,
-        batch_size: int = 50,
-        history_retention_s: float | None = 90 * 86_400.0,
+        background: bool,
+        queue_size: int,
+        max_rows: int | None,
+        max_age_s: float | None,
+        prune_every: int,
+        batch_size: int,
+        history_retention_s: float | None,
     ) -> None:
-        path = os.fspath(path)
         for name, value in (
             ("max_rows", max_rows),
             ("max_age_s", max_age_s),
@@ -317,7 +335,6 @@ class SQLiteStore(CheckStoreMixin):
         ):
             if value is not None and value < 0:
                 raise ValueError(f"{name} must not be negative (use 0 or None to disable it).")
-        self.path = path
         #: Retention rules; ``0``/``None`` disables a rule.
         self.max_rows = max_rows or None
         self.max_age_s = max_age_s or None
@@ -335,52 +352,20 @@ class SQLiteStore(CheckStoreMixin):
         self._check_cache: tuple[float, set[str]] | None = None
         self._last_lifecycle: tuple | None = None
         self._last_lifecycle_at = 0.0
-        if path != ":memory:" and not path.startswith("file:"):
-            # 0700 + a ".gitignore" of "*" when Redline creates the directory; the
-            # database (and so its -wal/-shm files) is created 0600
-            ensure_private_dir(os.path.dirname(os.path.abspath(path)))
-            precreate(path)
         self._lock = threading.RLock()
         self._start_lock = threading.Lock()
         self._admission_lock = threading.Lock()
         self._reset_health()
-        self._conn = self._connect()
         self._queue: queue.Queue[Any] | None = None
         self._thread: threading.Thread | None = None
         self._pid = os.getpid()
-        _STORES.add(self)
 
-    def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(
-            self.path, check_same_thread=False, isolation_level=None, timeout=10.0
-        )
-        conn.row_factory = sqlite3.Row
-        if self.path != ":memory:":
-            # Two processes may initialize the same new file at once. SQLite can report
-            # "database is locked" for the WAL switch even though both connections have a
-            # busy timeout, so retry that one statement; schema setup then uses the same
-            # timeout and serialized busy handling.
-            deadline = time.monotonic() + 10.0
-            while True:
-                try:
-                    mode = conn.execute("PRAGMA journal_mode=WAL").fetchone()[0]
-                    break
-                except sqlite3.OperationalError as exc:
-                    if "locked" not in str(exc).lower() or time.monotonic() >= deadline:
-                        conn.close()
-                        raise
-                    time.sleep(0.05)
-            if str(mode).lower() != "wal":
-                conn.close()
-                raise RuntimeError(
-                    "Redline storage requires SQLite WAL on a compatible local filesystem"
-                )
-        conn.execute("PRAGMA synchronous=NORMAL")
-        conn.executescript(_SCHEMA)
-        _migrate(conn)
-        if self.path != ":memory:" and not self.path.startswith("file:"):
-            tighten(self.path, f"{self.path}-wal", f"{self.path}-shm")  # older stores
-        return conn
+    def _connect(self) -> Any:  # pragma: no cover - provided by subclasses
+        raise NotImplementedError
+
+    def _park_inherited(self, conn: Any) -> None:
+        """Keep a connection inherited across fork() alive, never used or closed."""
+        _INHERITED.append(conn)
 
     def _reset_after_fork(self) -> None:
         """Called in a forked child: drop everything inherited from the parent.
@@ -401,7 +386,7 @@ class SQLiteStore(CheckStoreMixin):
         self.dropped = 0
         self.written = 0
         self._since_prune = 0
-        _INHERITED.append(self._conn)
+        self._park_inherited(self._conn)
         if self._closed:
             self._connection_closed = True
             return
@@ -498,27 +483,6 @@ class SQLiteStore(CheckStoreMixin):
                 self._drop("enqueue_failure")
                 raise
 
-    @classmethod
-    def from_settings(cls, settings: Any, **kwargs: Any) -> SQLiteStore:
-        """Build from a :class:`~redline_core.conf.Settings`."""
-        days = getattr(settings, "history_retention_days", 90)
-        kwargs.setdefault("history_retention_s", float(days) * 86_400.0 if days else None)
-        from .safety import prepare_path
-
-        primary = cls(
-            prepare_path(settings),
-            queue_size=settings.writer_queue_size,
-            max_rows=settings.max_rows,
-            max_age_s=settings.max_age_s,
-            **kwargs,
-        )
-
-        if settings.extra_stores:
-            from .multiple import MultipleStores
-
-            return MultipleStores(primary, settings.extra_stores)
-        return primary
-
     # writing ---------------------------------------------------------------
     def save(self, trace: Trace) -> None:
         """Enqueue ``trace`` (never blocks); dropped and counted when the queue is full."""
@@ -535,6 +499,31 @@ class SQLiteStore(CheckStoreMixin):
                 except Exception as exc:
                     self._drop("write_failure", error=exc)
                     raise
+
+    @property
+    def dropped_by_reason(self) -> dict[str, int]:
+        """``dropped`` split by reason (they always add up)."""
+        with self._health_lock:
+            return dict(self._health["dropped_by_reason"])
+
+    @property
+    def write_failures(self) -> int:
+        """Failed write batches (each may drop several traces)."""
+        with self._health_lock:
+            return int(self._health["write_failures"])
+
+    def health(self) -> dict[str, Any]:
+        """Writer counters for ``api/metrics``: queue depth and capacity, traces written,
+        drops by reason and failed write batches."""
+        q = self._queue
+        return {
+            "queue_depth": q.qsize() if q is not None else 0,
+            "queue_capacity": self.queue_size,
+            "written": self.written,
+            # The usual reasons are always present (zero) so dashboards see the series.
+            "dropped": {"queue_full": 0, "write_failure": 0, "closed": 0, **self.dropped_by_reason},
+            "write_failures": self.write_failures,
+        }
 
     def flush(self, timeout: float | None = 5.0) -> bool:
         """Wait until everything enqueued so far is written. ``False`` on timeout."""
@@ -633,7 +622,7 @@ class SQLiteStore(CheckStoreMixin):
                 (time.time() - _RUN_TAG_GRACE_S,),
             )
             ids = {r["id"] for r in rows}
-        except sqlite3.Error:  # pragma: no cover - e.g. a store being closed
+        except self._db_errors:  # pragma: no cover - e.g. a store being closed
             ids = set()
         self._runs_cache = (now, ids)
         return ids
@@ -866,20 +855,38 @@ class SQLiteStore(CheckStoreMixin):
             params.append(_like(f.sql))
         return (" WHERE " + " AND ".join(clauses)) if clauses else "", params
 
-    def endpoints(self, window: float, now: float | None = None) -> builtins.list[EndpointStats]:
+    def endpoints(
+        self, window: float, now: float | None = None, *, group_by: str | None = None
+    ) -> builtins.list[EndpointStats]:
         """Per ``(route, method)`` latency percentiles, query stats and a ≤48-bucket series.
 
         Requests without a resolved route are grouped by their concrete path. ``series``
         lists only non-empty buckets, ``t`` being each bucket's start (epoch seconds).
+
+        ``group_by`` (``"blueprint"`` or ``"tag:<key>"``) aggregates by that trace tag
+        instead: one row per tag value (``route`` is the value, ``method`` is ``"*"``),
+        ``routes`` counts the distinct routes in it, and untagged requests form
+        ``"(none)"``.
         """
         now = time.time() if now is None else now
         since = now - window
-        rows = self._query(
-            "SELECT coalesce(route, path) AS r, method, status, duration_ms, query_count, "
-            "query_ms, issue_count, started_at FROM traces WHERE started_at >= ? "
-            "AND started_at <= ?",
-            (since, now),
-        )
+        tag_key = _group_tag(group_by)
+        if tag_key is None:
+            rows = self._query(
+                "SELECT coalesce(route, path) AS r, method, status, duration_ms, query_count, "
+                "query_ms, issue_count, started_at FROM traces WHERE started_at >= ? "
+                "AND started_at <= ?",
+                (since, now),
+            )
+        else:
+            rows = self._query(
+                "SELECT coalesce(g.value, '(none)') AS r, '*' AS method, "
+                "coalesce(t.route, t.path) AS route_key, t.status, t.duration_ms, "
+                "t.query_count, t.query_ms, t.issue_count, t.started_at FROM traces t "
+                "LEFT JOIN trace_tags g ON g.trace_id = t.id AND g.key = ? "
+                "WHERE t.started_at >= ? AND t.started_at <= ?",
+                (tag_key, since, now),
+            )
         groups: dict[tuple[str, str], builtins.list[sqlite3.Row]] = defaultdict(list)
         for row in rows:
             groups[(row["r"], row["method"])].append(row)
@@ -914,6 +921,7 @@ class SQLiteStore(CheckStoreMixin):
                     avg_query_ms=round(sum(r["query_ms"] for r in items) / n, 3),
                     issue_count=sum(r["issue_count"] for r in items),
                     series=series,
+                    routes=len({r["route_key"] for r in items}) if tag_key else None,
                 )
             )
         out.sort(key=lambda e: (-e.count, -e.p95_ms, e.route))
@@ -1122,15 +1130,7 @@ class SQLiteStore(CheckStoreMixin):
             f"FROM trace_sql WHERE {where} GROUP BY fingerprint",
             params,
         )
-        # SQLite: a bare column next to max() comes from the row holding the maximum.
-        samples = {
-            r[0]: r[1]
-            for r in self._query(
-                "SELECT fingerprint, trace_id, max(started_at) FROM trace_sql "
-                f"WHERE {where} GROUP BY fingerprint",
-                params,
-            )
-        }
+        samples = {r[0]: r[1] for r in self._query(self._SAMPLES_SQL.format(where=where), params)}
         routes: dict[str, builtins.list[str]] = defaultdict(list)
         for r in self._query(
             f"SELECT DISTINCT fingerprint, method, route FROM trace_sql WHERE {where}", params
@@ -1300,10 +1300,14 @@ class SQLiteStore(CheckStoreMixin):
                          fresh_failures_hour, updated_at)
                     VALUES (?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(bucket, release, db_alias, vendor) DO UPDATE SET
-                        connects_hour = MAX(lifecycle_hourly.connects_hour,
-                                            excluded.connects_hour),
-                        fresh_failures_hour = MAX(lifecycle_hourly.fresh_failures_hour,
-                                                  excluded.fresh_failures_hour),
+                        connects_hour = CASE
+                            WHEN excluded.connects_hour > lifecycle_hourly.connects_hour
+                            THEN excluded.connects_hour ELSE lifecycle_hourly.connects_hour END,
+                        fresh_failures_hour = CASE
+                            WHEN excluded.fresh_failures_hour
+                                > lifecycle_hourly.fresh_failures_hour
+                            THEN excluded.fresh_failures_hour
+                            ELSE lifecycle_hourly.fresh_failures_hour END,
                         updated_at = excluded.updated_at
                     """,
                     [(*row, now) for row in rows],
@@ -1869,11 +1873,118 @@ class SQLiteStore(CheckStoreMixin):
             self._health["shutdown_complete"] = True
         return True
 
-    def __enter__(self) -> SQLiteStore:
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *exc: object) -> None:
         self.close()
+
+
+class SQLiteStore(SQLStore):
+    """SQLite-backed :class:`~redline_core.storage.Store`.
+
+    :param path: database file; parent directories are created. ``":memory:"`` works.
+    :param background: write on a daemon thread (default). ``False`` writes inline,
+        which tests and short scripts find convenient.
+    :param queue_size: bound of the write queue; overflow is dropped and counted.
+    :param max_rows, max_age_s: retention applied by :meth:`prune`, which the writer runs
+        every ``prune_every`` saved traces.
+    :param history_retention_s: how long the history tables (hourly rollups, releases, the
+        issue index, load-test runs) are kept; independent of trace retention. ``0``/``None``
+        keeps them forever.
+    """
+
+    def __init__(
+        self,
+        path: str | os.PathLike[str] = ".redline/redline.db",
+        *,
+        background: bool = True,
+        queue_size: int = 1_000,
+        max_rows: int | None = 10_000,
+        max_age_s: float | None = 7 * 86_400.0,
+        prune_every: int = 200,
+        batch_size: int = 50,
+        history_retention_s: float | None = 90 * 86_400.0,
+    ) -> None:
+        path = os.fspath(path)
+        self._init_common(
+            background=background,
+            queue_size=queue_size,
+            max_rows=max_rows,
+            max_age_s=max_age_s,
+            prune_every=prune_every,
+            batch_size=batch_size,
+            history_retention_s=history_retention_s,
+        )
+        self.path = path
+        if path != ":memory:" and not path.startswith("file:"):
+            # 0700 + a ".gitignore" of "*" when Redline creates the directory; the
+            # database (and so its -wal/-shm files) is created 0600
+            ensure_private_dir(os.path.dirname(os.path.abspath(path)))
+            precreate(path)
+        self._conn = self._connect()
+        _STORES.add(self)
+
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(
+            self.path, check_same_thread=False, isolation_level=None, timeout=10.0
+        )
+        conn.row_factory = sqlite3.Row
+        if self.path != ":memory:":
+            # Two processes may initialize the same new file at once. SQLite can report
+            # "database is locked" for the WAL switch even though both connections have a
+            # busy timeout, so retry that one statement; schema setup then uses the same
+            # timeout and serialized busy handling.
+            deadline = time.monotonic() + 10.0
+            while True:
+                try:
+                    mode = conn.execute("PRAGMA journal_mode=WAL").fetchone()[0]
+                    break
+                except sqlite3.OperationalError as exc:
+                    if "locked" not in str(exc).lower() or time.monotonic() >= deadline:
+                        conn.close()
+                        raise
+                    time.sleep(0.05)
+            if str(mode).lower() != "wal":
+                conn.close()
+                raise RuntimeError(
+                    "Redline storage requires SQLite WAL on a compatible local filesystem"
+                )
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.executescript(_SCHEMA)
+        _migrate(conn)
+        if self.path != ":memory:" and not self.path.startswith("file:"):
+            tighten(self.path, f"{self.path}-wal", f"{self.path}-shm")  # older stores
+        return conn
+
+    @classmethod
+    def from_settings(cls, settings: Any, **kwargs: Any) -> Any:
+        """Build from a :class:`~redline_core.conf.Settings`.
+
+        With ``storage_url`` set this returns the shared store that URL names (see
+        :func:`~redline_core.storage.store_from_settings`) instead of a SQLite file.
+        """
+        if getattr(settings, "storage_url", None):
+            from . import store_from_settings
+
+            return store_from_settings(settings, **kwargs)
+        days = getattr(settings, "history_retention_days", 90)
+        kwargs.setdefault("history_retention_s", float(days) * 86_400.0 if days else None)
+        from .safety import prepare_path
+
+        primary = cls(
+            prepare_path(settings),
+            queue_size=settings.writer_queue_size,
+            max_rows=settings.max_rows,
+            max_age_s=settings.max_age_s,
+            **kwargs,
+        )
+
+        if settings.extra_stores:
+            from .multiple import MultipleStores
+
+            return MultipleStores(primary, settings.extra_stores)
+        return primary
 
 
 def _summary(row: sqlite3.Row) -> dict[str, Any]:
@@ -1974,37 +2085,46 @@ def _backfill(conn: sqlite3.Connection, chunk: int = 500) -> None:
         _insert_derived(conn, derive(traces))
 
 
+# The upserts are portable SQL (SQLite and PostgreSQL): the stored row's columns are
+# qualified with the table name, and CASE stands in for the two-argument min()/max().
 _ROLLUP_UPSERT = (
     "INSERT INTO rollups VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
     "ON CONFLICT (bucket, release, route, method) DO UPDATE SET "
-    "count = count + excluded.count, errors = errors + excluded.errors, "
-    "sum_ms = sum_ms + excluded.sum_ms, hist = excluded.hist, "
-    "sum_queries = sum_queries + excluded.sum_queries, "
-    "sum_query_ms = sum_query_ms + excluded.sum_query_ms, issues = issues + excluded.issues"
+    "count = rollups.count + excluded.count, errors = rollups.errors + excluded.errors, "
+    "sum_ms = rollups.sum_ms + excluded.sum_ms, hist = excluded.hist, "
+    "sum_queries = rollups.sum_queries + excluded.sum_queries, "
+    "sum_query_ms = rollups.sum_query_ms + excluded.sum_query_ms, "
+    "issues = rollups.issues + excluded.issues"
 )
 _RELEASE_UPSERT = (
     "INSERT INTO releases VALUES (?, ?, ?, ?) ON CONFLICT (release) DO UPDATE SET "
-    "first_seen = min(first_seen, excluded.first_seen), "
-    "last_seen = max(last_seen, excluded.last_seen), requests = requests + excluded.requests"
+    "first_seen = CASE WHEN excluded.first_seen < releases.first_seen "
+    "THEN excluded.first_seen ELSE releases.first_seen END, "
+    "last_seen = CASE WHEN excluded.last_seen > releases.last_seen "
+    "THEN excluded.last_seen ELSE releases.last_seen END, "
+    "requests = releases.requests + excluded.requests"
 )
 # Every SET expression reads the row's values from before the update.
 _ISSUE_UPSERT = (
     "INSERT INTO issue_index VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
     "ON CONFLICT (issue_id) DO UPDATE SET "
-    "first_release = CASE WHEN excluded.first_seen < first_seen "
-    "THEN excluded.first_release ELSE first_release END, "
-    "first_seen = min(first_seen, excluded.first_seen), "
-    "severity = CASE WHEN excluded.last_seen >= last_seen "
-    "THEN excluded.severity ELSE severity END, "
-    "title = CASE WHEN excluded.last_seen >= last_seen THEN excluded.title ELSE title END, "
-    "last_release = CASE WHEN excluded.last_seen >= last_seen "
-    "THEN excluded.last_release ELSE last_release END, "
-    "last_seen = max(last_seen, excluded.last_seen), "
-    "occurrences = occurrences + excluded.occurrences"
+    "first_release = CASE WHEN excluded.first_seen < issue_index.first_seen "
+    "THEN excluded.first_release ELSE issue_index.first_release END, "
+    "first_seen = CASE WHEN excluded.first_seen < issue_index.first_seen "
+    "THEN excluded.first_seen ELSE issue_index.first_seen END, "
+    "severity = CASE WHEN excluded.last_seen >= issue_index.last_seen "
+    "THEN excluded.severity ELSE issue_index.severity END, "
+    "title = CASE WHEN excluded.last_seen >= issue_index.last_seen "
+    "THEN excluded.title ELSE issue_index.title END, "
+    "last_release = CASE WHEN excluded.last_seen >= issue_index.last_seen "
+    "THEN excluded.last_release ELSE issue_index.last_release END, "
+    "last_seen = CASE WHEN excluded.last_seen > issue_index.last_seen "
+    "THEN excluded.last_seen ELSE issue_index.last_seen END, "
+    "occurrences = issue_index.occurrences + excluded.occurrences"
 )
 _ISSUE_BUCKET_UPSERT = (
     "INSERT INTO issue_rollups VALUES (?, ?, ?, ?) ON CONFLICT (bucket, release, issue_id) "
-    "DO UPDATE SET occurrences = occurrences + excluded.occurrences"
+    "DO UPDATE SET occurrences = issue_rollups.occurrences + excluded.occurrences"
 )
 
 

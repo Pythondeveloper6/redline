@@ -29,6 +29,109 @@ version is below `1.0` the public API may change between minor versions.
   later recording attempts, and counters are protected and reset for a forked process.
 - Internal API exception messages are withheld when error-detail capture is disabled.
 
+### Added (production readiness)
+
+- Shared PostgreSQL trace store (`PostgresStore`): set `storage_url` /
+  `REDLINE_STORAGE_URL` to a `postgresql://` URL (install `redline-core[postgres]`) so
+  several workers and hosts write one store, with the same pages, aggregates, retention and
+  background writer as SQLite; schema-versioned, serialized across processes, fork-safe.
+- `redline doctor --strict` and `--workers N`: doctor warns (fails with `--strict`) when
+  several worker processes share one SQLite file (detected from `WEB_CONCURRENCY`,
+  `GUNICORN_CMD_ARGS` or `UVICORN_WORKERS`), and checks the driver and connection of a
+  `storage_url` store.
+- `engines="auto"` for Flask `Redline`, FastAPI `install` and Litestar `RedlinePlugin`
+  captures SQLAlchemy engines created at runtime (per user or per request, e.g.
+  token-authenticated SQL Server connections); EXPLAIN works on auto-found sync engines.
+- Stored procedures are a query kind: `EXEC`/`EXECUTE`, `CALL` and ODBC `{CALL ...}` spans
+  carry `query_kind: "procedure"` and the procedure name, and fingerprint per procedure.
+- `ignore_sql` setting (regular expressions); the default skips `sp_set_session_context`
+  and `SET ...` session housekeeping.
+- Flask requests carry a `blueprint` trace tag; `GET api/endpoints?group_by=blueprint`
+  (or `tag:<key>`) and `flask redline endpoints --group-by blueprint` aggregate per blueprint.
+- Composite GitHub Action (`uses: Pythondeveloper6/redline@<ref>`) and
+  `redline check comment`: job summary plus one sticky pull-request comment.
+- `install_if_dev` in every adapter (and `redline_core.environment`): refuses to attach
+  when the environment looks like production; `REDLINE_ALLOW_PRODUCTION=1` overrides.
+- `redline init`: detects the framework, writes a starter `redline.toml` (or
+  `--pyproject`) and adds the store directory to `.gitignore`.
+- `redline check ratchet` and pytest `--redline-ratchet` / `--redline-ratchet-update`:
+  per-endpoint query-count and latency baselines that only tighten.
+- `redline_core.correlation`: a `redline_trace_id` logging filter and a Sentry
+  `before_send` hook with an "Open in Redline" link; OTLP spans carry `redline.trace_id`.
+- `redline export ID --html OUT`: one self-contained, redacted HTML summary of a recording
+  or load run.
+- `redline digest`: posts newly seen issues to a Slack-compatible webhook, deduplicated
+  through a state file.
+- `GET api/metrics` (Prometheus text format) for recorder health; `SQLiteStore.health()`
+  counts drops by reason and write failures.
+- `auto_instrument` setting (`off` / `warn` / `on`, default `warn`): warn once about, or
+  instrument, installed httpx/requests/Redis/boto3.
+- RQ (`redline_core.contrib.rq`) and Dramatiq (`redline_core.contrib.dramatiq`) job
+  recording with trace-context propagation (`rq` and `dramatiq` extras); FastAPI/Starlette
+  `BackgroundTask`s are recorded as jobs linked to the request trace.
+- `check-sql` resolves more dynamic SQL (`%`, `.format`, `join` of literals, `+=`,
+  straight-line local reassignments) and reports `unresolved_by_reason` and a per-item
+  `category`.
+- `scripts/measure_static_precision.py` and a labelled corpus measure static-analysis
+  precision, recall and false-positive rate, also on your own reviewed findings.
+- Live MySQL qualification (EXPLAIN, index advice, killed connections, pre-ping) with
+  pymysql, aiomysql and asyncmy, a `mysql` CI job, and a SQL Server per-request engine test
+  in the Compose suite.
+- *Compatibility* workflow: fresh-venv installs from PyPI and from built wheels
+  (`scripts/check_clean_install.py`), and stores written by every published release opened
+  by the current code (`scripts/check_store_upgrade.py`).
+- `scripts/run_tests.py` runs every package suite from the repository root;
+  `benchmarks/real_app.py` measures p50/p95 overhead on a running application over HTTP.
+- Documentation pages: API stability and deprecation policy (`docs/api-stability.md`),
+  threat model (`docs/threat-model.md`) and operating Redline (`docs/operating.md`).
+
+### Changed (production readiness)
+
+- Installing an adapter with httpx, requests, Redis or boto3 present but uninstrumented now
+  logs one warning (`auto_instrument = "off"` silences it).
+- A stored-procedure call's fingerprint no longer includes its arguments
+  (`EXEC dbo.usp_x`); N+1 detection groups procedure calls and duplicate procedure calls
+  are reported as `info`.
+- A SQLite store on a network filesystem fails `redline doctor --strict` (still a warning
+  by default), and the message recommends the shared PostgreSQL store.
+- Adapters build their default store with `redline_core.storage.store_from_settings`;
+  `SQLiteStore.from_settings` returns the PostgreSQL store when `storage_url` is set.
+- `REDLINE_ENV` and `REDLINE_ALLOW_PRODUCTION` are no longer reported as unknown settings.
+- Public API is defined in `docs/api-stability.md`; the internal design contract and
+  planning files left the public tree.
+
+### Security
+
+- `access="framework"` with no dependencies or guards attached now refuses every request
+  in the FastAPI and Litestar adapters, as Flask and Django already did (it previously
+  allowed everyone).
+- Free-text redaction (bodies, logs, error messages, locals) runs in linear time; crafted
+  input could previously cost seconds of CPU per request. Error, header and identifier
+  texts are cut before they are scanned.
+- Redaction also masks a bare token used as a URL user name; the default secret key names
+  now include access keys, signatures and credentials.
+- The EXPLAIN safety check reads MySQL `#` comments, so a quote inside one can no longer
+  hide a second statement or a locking clause.
+- `redline check comment` sends the GitHub token only over https (plain http only to
+  loopback), never follows redirects, caps API answers and validates the repository name.
+- OpenAPI downloads for `redline load init` are size-capped and follow redirects only to
+  http(s).
+- The OTLP export redacts issue titles and the raw SQL included with `--include-sql`.
+- The login rate limit counts IPv6 clients per /64 and keeps blocked clients when its table
+  is full; Basic authentication takes the same time for unknown and known user names.
+- Internal-error API answers redact the exception text.
+- Store side files, run files and `redline export --html` pages are created `0600` and are
+  never written through a symlink.
+- A PostgreSQL store URL is masked correctly when the password contains `/`, `?` or `#`.
+- CI and the GitHub Action: third-party actions pinned to full commit SHAs, checkouts do not
+  persist credentials, Pages/OIDC permissions limited to the deploy job, matrix values
+  passed through the environment, and the action's `extra-args` is never glob-expanded.
+- A curated set of flake8-bandit rules is enforced by ruff.
+
+### Fixed (production readiness)
+
+- Tests no longer use the deprecated `starlette.middleware.wsgi` (now `a2wsgi`).
+
 ## 0.5.0a1 development baseline
 
 ### Added
@@ -73,7 +176,6 @@ version is below `1.0` the public API may change between minor versions.
   calls hidden behind local helpers. These remain syntax candidates requiring runtime review.
 - Explicit `--max-files` and `--max-project-bytes` budgets for `analyze` and `check-sql`,
   capped at 10,000 files and 64 MB. UI/default budgets stay at 200 files and 2 MB.
-- A real-project FastAPI evaluation, baseline rating and release validation pass.
 
 ## 0.4.0a1 development baseline
 
