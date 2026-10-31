@@ -207,6 +207,23 @@ setting alone does not make every form of database inspection or application rep
 
 Detailed APIs, support boundaries and UI paths are in [Real-world workflows](docs/real-world-workflows.md).
 
+### New in the 0.5 development release
+
+| Capability | Evidence and boundaries |
+|---|---|
+| Safer setup | `redline init` writes a starter `redline.toml` and ignores the store; `install_if_dev(...)` in every adapter refuses to attach when the environment looks like production |
+| CI gates | A composite GitHub Action runs `redline check` and keeps one sticky PR comment; `redline check ratchet` and pytest `--redline-ratchet` store per-endpoint query/latency baselines that only tighten |
+| Shared store | `storage_url = "postgresql://..."` stores recordings for several workers or hosts in one PostgreSQL database; `redline doctor` flags a single SQLite file shared by workers or on a network filesystem |
+| Runtime engines | `engines="auto"` captures SQLAlchemy engines created per user or per request; stored procedures (`EXEC`, `CALL`) are their own query kind, and session housekeeping (`sp_set_session_context`, `SET ...`) is ignored by default (`ignore_sql`) |
+| Grouping | Flask requests carry their blueprint; `api/endpoints?group_by=blueprint` and `flask redline endpoints --group-by blueprint` aggregate per blueprint |
+| Jobs | RQ, Dramatiq and FastAPI/Starlette background tasks are recorded as jobs linked to the request that queued them |
+| Coverage | `auto_instrument` (`off`/`warn`/`on`) warns about, or instruments, installed httpx/requests/Redis/boto3 |
+| Static analysis | More dynamic SQL resolved, unresolved inputs reported by reason, and a precision harness to measure the false-positive rate on your own code |
+| Sharing and alerts | `redline export ID --html` writes one redacted, self-contained page; `redline digest` posts new issues to a webhook; `api/metrics` exposes recorder health for Prometheus; `redline_trace_id` links logs, Sentry events and OTLP spans to a recording |
+| Release checks | Live MySQL qualification (pymysql, aiomysql, asyncmy) in CI; fresh-venv install and old-store upgrade checks against published releases |
+
+Stability promises for these and older APIs are in [API stability](docs/api-stability.md).
+
 ## Real-life investigations
 
 | Situation | How Redline helps | What the evidence does not prove |
@@ -249,8 +266,8 @@ production jobs need the production capture/access/storage policy and lifecycle 
 |---|---|---|
 | Django + SQLite/PostgreSQL/MySQL | Native execute-wrapper SQL capture, handled errors, fetched-row evidence where supported | Existing Django plan paths; each deployed backend/driver/process combination still needs qualification |
 | Django + SQL Server backend | Native wrapper evidence with normalized vendor naming; depends on the selected third-party backend | **Django SQL Server EXPLAIN is unsupported**; live backend/driver validation pending |
-| FastAPI/Flask/Litestar + SQLAlchemy + SQLite/PostgreSQL/MySQL | Registered sync/async engine capture and optional engine discovery | Existing SQLAlchemy plan paths; actual driver support differs by capability |
-| FastAPI/Flask/Litestar + SQLAlchemy + SQL Server | SQL failure/session/connection evidence and SQL Server parsing support | **Experimental** plan/catalog support; actual-plan mode requires a supported sync multi-result driver; live MySQL/SQL Server and deployment qualification remain pending |
+| FastAPI/Flask/Litestar + SQLAlchemy + SQLite/PostgreSQL/MySQL | Registered sync/async engine capture and optional engine discovery (`engines="auto"`) | Existing SQLAlchemy plan paths; live MySQL EXPLAIN, index advice and reconnect tests run in CI with pymysql, aiomysql and asyncmy; actual driver support differs by capability |
+| FastAPI/Flask/Litestar + SQLAlchemy + SQL Server | SQL failure/session/connection evidence and SQL Server parsing support | **Experimental** plan/catalog support; actual-plan mode requires a supported sync multi-result driver; per-request engine capture is tested in the Compose suite; live Azure SQL and deployment qualification remain pending |
 | Celery | Explicit worker recorder and signal integration; eager-mode coverage | Live broker, retries, prefork/restart and actual database driver behavior require deployment tests |
 
 An explicit engine registry is the default. Opting into `instrument_engines="all"`
