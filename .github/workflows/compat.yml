@@ -32,8 +32,10 @@ jobs:
       matrix:
         python-version: ["3.12", "3.14"]
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: ${{ matrix.python-version }}
       - run: python scripts/check_clean_install.py --from-pypi
@@ -42,8 +44,10 @@ jobs:
     name: clean install from built wheels
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10.3.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           python-version: "3.13"
       - run: uv build --all-packages --out-dir dist
@@ -58,16 +62,20 @@ jobs:
         # Published redline-core releases; add each new one when it ships.
         from: ["0.2.0a1", "0.3.0a1", "0.4.0a1"]
     steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10.3.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           enable-cache: true
           cache-dependency-glob: "uv.lock"
           python-version: "3.13"
       - name: Write a store with redline-core ${{ matrix.from }}
+        env:
+          FROM_VERSION: ${{ matrix.from }}
         run: |
           uv venv "$RUNNER_TEMP/old"
-          VIRTUAL_ENV="$RUNNER_TEMP/old" uv pip install "redline-core==${{ matrix.from }}"
+          VIRTUAL_ENV="$RUNNER_TEMP/old" uv pip install "redline-core==$FROM_VERSION"
           "$RUNNER_TEMP/old/bin/python" -I scripts/check_store_upgrade.py write "$RUNNER_TEMP/store/traces.db"
       - name: Open it with this commit
         run: |

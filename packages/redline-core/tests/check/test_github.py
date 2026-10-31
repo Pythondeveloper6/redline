@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -196,3 +197,29 @@ def test_action_yml_is_well_formed():
     assert all("shell" in s for s in data["runs"]["steps"] if "run" in s)
     commands = "\n".join(s.get("run", "") for s in data["runs"]["steps"])
     assert "redline check run" in commands and "redline check comment" in commands
+
+
+def test_action_and_workflows_pin_third_party_actions_to_commits():
+    # A tag can be moved to different code; a full commit SHA cannot.
+    root = ACTION.parent
+    files = [ACTION, *sorted((root / ".github" / "workflows").glob("*.yml"))]
+    files = [f for f in files if f.exists()]
+    if not files:
+        pytest.skip("workflows are not part of this checkout")
+    pinned = re.compile(r"^[\w.-]+/[\w./-]+@[0-9a-f]{40} # v\d")
+    for path in files:
+        for line in path.read_text().splitlines():
+            if "uses:" in line and not line.lstrip().startswith("#"):
+                ref = line.split("uses:", 1)[1].strip()
+                assert pinned.match(ref), f"{path.name}: {ref}"
+
+
+def test_action_does_not_inline_inputs_into_scripts():
+    # Inputs reach shell scripts through env, never through `${{ }}` text substitution.
+    if not ACTION.exists():
+        pytest.skip("action.yml is not part of this checkout")
+    yaml = pytest.importorskip("yaml")
+    data = yaml.safe_load(ACTION.read_text())
+    for step in data["runs"]["steps"]:
+        assert "${{" not in step.get("run", "")
+    assert "set -f" in ACTION.read_text()
