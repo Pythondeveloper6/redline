@@ -26,6 +26,7 @@ from ._serialize import instrument_serialization
 from ._sqlalchemy import (
     EngineLike,
     alias_for,
+    auto_engine,
     build_executor,
     instrument_engine,
     name_engines,
@@ -118,7 +119,7 @@ class Redline:
         return alias
 
     def _executor_for(self, alias: str, vendor: str) -> ExplainExecutor | None:
-        engine = self.engines.get(alias)
+        engine = self.engines.get(alias) or auto_engine(alias)
         if engine is None:
             return None
         return build_executor(engine, vendor_of(engine), lambda: self.loop)
@@ -134,6 +135,7 @@ def install(
     app: FastAPI,
     *,
     engine: Any = None,
+    engines: str | None = None,
     settings: Mapping[str, Any] | Settings | None = None,
     prefix: str | None = None,
     dependencies: Sequence[Callable[..., Any] | DependsParam] | None = None,
@@ -145,6 +147,11 @@ def install(
     ``engine``
         A sync ``Engine``, an ``AsyncEngine``, a list of them, or ``{alias: engine}``.
         The first of a list is the ``"default"`` db alias (used by EXPLAIN).
+    ``engines``
+        ``"auto"`` instruments every SQLAlchemy engine created after install (per-user or
+        per-request engines) without registering it, by setting
+        ``instrument_engines="all"``. Engines are held weakly. Default: only the engines
+        passed as ``engine``.
     ``settings``
         A ``Settings`` or a dict of settings (case-insensitive keys). They are the top
         layer over ``redline.toml`` / ``[tool.redline]`` and ``REDLINE_*`` variables
@@ -173,6 +180,10 @@ def install(
     # with nothing to check.
     resolved = resolve_settings(settings, native_hook=bool(dependencies))
     cfg = resolved.settings
+    if engines not in (None, "auto"):
+        raise ValueError('engines must be "auto" or None')
+    if engines == "auto":
+        cfg = cfg.replace(instrument_engines="all")
     prefix = prefix if prefix is not None else (cfg.mount_path or "/_redline")
     prefix = "/" + prefix.strip("/")
     if prefix == "/":

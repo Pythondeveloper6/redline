@@ -26,6 +26,7 @@ from urllib.parse import urlsplit
 __all__ = [
     "ACCESS_POLICIES",
     "DEFAULT_IGNORE_PATHS",
+    "DEFAULT_IGNORE_SQL",
     "DEFAULT_REDACT_HEADERS",
     "DEFAULT_REDACT_KEYS",
     "EDITORS",
@@ -147,6 +148,13 @@ PASSWORD_HASH_PREFIX = "pbkdf2_sha256$"
 MIN_TOKEN_LENGTH = 24
 
 DEFAULT_IGNORE_PATHS: tuple[str, ...] = ("/static/", "/media/", "/favicon.ico")
+#: Session housekeeping that is not worth a span: SQL Server ``sp_set_session_context``
+#: and plain ``SET ...`` session statements (run on pool checkout). Regexes matched
+#: case-insensitively against the start of every statement of the normalised SQL.
+DEFAULT_IGNORE_SQL: tuple[str, ...] = (
+    r"^(?:EXEC(?:UTE)?\s+)?(?:\[?sys\]?\.)?\[?sp_set_session_context\]?\b",
+    r"^SET\s",
+)
 DEFAULT_REDACT_HEADERS: tuple[str, ...] = (
     "authorization",
     "cookie",
@@ -198,6 +206,7 @@ class Settings:
     redact_routes: Mapping[str, str] = field(default_factory=dict)
     capture_loggers: tuple[str, ...] = ()
     ignore_loggers: tuple[str, ...] = ()
+    ignore_sql: tuple[str, ...] = DEFAULT_IGNORE_SQL
     session_expected: Mapping[str, str] = field(default_factory=lambda: {"NOCOUNT": "OFF"})
     session_expected_context: tuple[str, ...] = ()
     user_resolver: Any = None
@@ -436,6 +445,7 @@ _SEQ_FIELDS = {
     "redact_tables",
     "capture_loggers",
     "ignore_loggers",
+    "ignore_sql",
     "request_id_headers",
     "session_expected_context",
     "ignore_paths",
@@ -633,7 +643,11 @@ def _validate(s: Settings) -> None:
         value = getattr(s, name)
         if not isinstance(value, tuple) or not all(isinstance(v, str) for v in value):
             raise SettingsError(f"Redline setting {name!r} must be a list of strings.")
-    for pattern in (*s.redact_keys, *(p for p in s.ignore_paths if p.startswith("^"))):
+    for pattern in (
+        *s.redact_keys,
+        *s.ignore_sql,
+        *(p for p in s.ignore_paths if p.startswith("^")),
+    ):
         try:
             re.compile(pattern)
         except re.error as exc:
