@@ -53,13 +53,17 @@ def mask_url(url: str) -> str:
     scheme, sep, rest = url.partition("://")
     if not sep:
         return url
-    netloc, slash, tail = rest.partition("/")
-    if "@" in netloc:
-        user, _, host = netloc.rpartition("@")
+    # The last "@" ends the userinfo even when an unencoded "/", "?" or "#" sits in the
+    # password; over-masking a stray "@" elsewhere is the safe failure.
+    if "@" in rest:
+        user, _, rest = rest.rpartition("@")
         name = user.split(":", 1)[0]
-        netloc = f"{name}:***@{host}" if ":" in user else f"{name}@{host}"
+        prefix = f"{name}:***@" if ":" in user else f"{name}@"
+    else:
+        prefix = ""
+    netloc, slash, tail = rest.partition("/")
     tail = re.sub(r"(?i)(password=)[^&]*", r"\1***", tail)
-    return f"{scheme}{sep}{netloc}{slash}{tail}"
+    return f"{scheme}{sep}{prefix}{netloc}{slash}{tail}"
 
 
 def _import_psycopg() -> Any:
