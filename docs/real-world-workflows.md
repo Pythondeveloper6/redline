@@ -287,7 +287,12 @@ integration = instrument_celery(celery_app, recorder)
 Success, failure and retry outcomes are recorded. Publication can carry the current
 request/parent trace ID. Arguments and results are not captured. Eager-mode tests require
 no broker; prefork/broker behavior must be tested in the deployment. A task revoked before
-it starts has no recording. RQ and Dramatiq integrations are not implemented.
+it starts has no recording.
+
+RQ (`instrument_rq`), Dramatiq (`instrument_dramatiq`) and FastAPI/Starlette background
+tasks are recorded the same way, with trace-context propagation from the enqueuing request;
+see [Integrations](integrations.md#rq). Their tests use fakeredis, `StubBroker` and a
+TestClient, so real broker and process-model behavior must still be checked in deployment.
 
 ## Storage and mixed frameworks
 

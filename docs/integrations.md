@@ -186,13 +186,67 @@ For plain timing of your own code, use `redline_core.span` ([Custom spans](custo
 For a full integration with its own fix suggestions see [Extending](extending.md).
 
 
+## Zero-config coverage
+
+httpx, requests, Redis and boto3 capture is opt-in, so an installed library can silently go
+unrecorded. The `auto_instrument` setting (all four adapters apply it when Redline installs)
+decides what happens:
+
+| Value | Behaviour |
+|---|---|
+| `"warn"` (default) | Log **one** warning listing installed but uninstrumented integrations and how to enable them. Nothing is patched. |
+| `"on"` | Instrument every installed supported integration at install time. |
+| `"off"` | Do nothing. |
+
+```python
+install(app, settings={"auto_instrument": "on"})   # or REDLINE_AUTO_INSTRUMENT=on
+```
+
+Provider libraries are only imported when being instrumented. A failure to instrument one
+integration is logged and never stops startup. Calling `instrument_httpx()` yourself still
+works and silences the warning for that integration.
+
+## RQ
+
+```python
+from redline_core.contrib.rq import instrument_rq
+
+integration = instrument_rq(recorder)   # web process and worker process
+# integration.uninstall() restores RQ
+```
+
+Install with `pip install "redline-core[rq]"`. Enqueueing inside a traced request stores its
+trace context in `job.meta["redline"]`; `Job.perform` then records the job (name, id, queue,
+outcome, SQL and other spans) linked to that request through `parent_trace_id` and the W3C
+trace id. Arguments and results are not captured. Pass `task_filter=lambda name: ...` to
+limit which jobs are recorded.
+
+## Dramatiq
+
+```python
+from redline_core.contrib.dramatiq import instrument_dramatiq
+
+instrument_dramatiq(broker, recorder)    # in the web process and in the worker process
+```
+
+Install with `pip install "redline-core[dramatiq]"`. A middleware carries the trace context
+in `message.options["redline"]` and records each processed message as a job (the retry count
+is the attempt). Works with any broker; the tests use `StubBroker`.
+
+## FastAPI and Starlette background tasks
+
+`BackgroundTasks.add_task` / `BackgroundTask` run after the response was sent, when the
+request trace has already been stored. `fastapi_redline.install` records each as its own job
+(`job.queue = starlette.background`), linked to the request that created it. Other
+Starlette apps can call `redline_core.contrib.starlette_background.instrument_background_tasks(recorder)`.
+
 ## Checking integration coverage
 
 Open **Analysis → Recording health** (or `GET api/analysis/health`) to distinguish whether
 an optional provider is installed, loaded in this process and instrumented. The check
 never imports providers or enables hooks. An inactive hook means those calls may be
 missing; an active hook still does not prove calls occurred or cover other workers.
-HTTPX, Redis and boto3 remain explicit opt-ins.
+HTTPX, requests, Redis and boto3 are explicit opt-ins unless `auto_instrument` is `"on"`; the default `"warn"` logs which ones are installed but inactive.
 
 SDK operation spans use a `SDK:<operation>` method and a synthetic service URL. Because
 resource identity and individual retry attempts are deliberately omitted, these spans
