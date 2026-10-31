@@ -18,7 +18,8 @@ Django-only keys:
     Where traces go (the counterpart of FastAPI's ``install(store=...)``): a
     :class:`~redline_core.storage.Store` instance, a callable (or class) taking the core
     :class:`~redline_core.Settings` and returning one, or the dotted path of either.
-    Default: ``SQLiteStore.from_settings(settings)``.
+    Default: ``store_from_settings(settings)`` (the SQLite file at ``STORAGE_PATH``, or
+    the shared PostgreSQL store at ``STORAGE_URL``).
 """
 
 from __future__ import annotations
@@ -36,7 +37,7 @@ from django.utils.module_loading import import_string
 
 from redline_core.conf import Settings, SettingsError
 from redline_core.config import ResolvedConfig, resolve_settings
-from redline_core.storage import SQLiteStore, Store
+from redline_core.storage import Store, store_from_settings
 
 __all__ = [
     "DJANGO_KEYS",
@@ -163,12 +164,13 @@ def get_options() -> DjangoOptions:
 def build_store(spec: Any, core: Settings) -> tuple[Store, bool]:
     """``(store, owned)`` for a ``STORE`` value; ``owned`` stores are closed on rebuilds.
 
-    ``None`` builds the default SQLite store. A class or plain callable is called with the
-    core settings. A ready instance is used as-is and is *not* closed when the runtime is
-    rebuilt (``override_settings``), only flushed – it outlives the runtime.
+    ``None`` builds the default store (SQLite, or PostgreSQL with ``storage_url``). A class
+    or plain callable is called with the core settings. A ready instance is used as-is and
+    is *not* closed when the runtime is rebuilt (``override_settings``), only flushed – it
+    outlives the runtime.
     """
     if spec is None:
-        return SQLiteStore.from_settings(core), True
+        return store_from_settings(core), True
     if inspect.isclass(spec) or (callable(spec) and not isinstance(spec, Store)):
         store = spec(core)
         owned = True
