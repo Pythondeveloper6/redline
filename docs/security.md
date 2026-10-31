@@ -49,7 +49,7 @@ numbers masked by shape.
 | Log messages, exception messages and tracebacks, non-JSON request bodies | `key=value`, `key: value`, `"key": "value"` pairs and `<key>value</key>` elements whose key matches `redact_keys`; URL passwords and secret query values inside the text; JWTs; Luhn-valid card numbers (13–19 digits, optionally grouped) | `[redacted]` |
 | Exception locals | the value of a variable whose name matches `redact_keys`; secret keys of containers (4 levels deep); and the free-text rule over the whole `repr` | `[redacted]` |
 | Headers | `authorization`, `cookie`, `set-cookie`, `x-api-key`, `proxy-authorization` (case-insensitive), and any header whose name matches `redact_keys` | `[redacted]` |
-| Query strings, form bodies, multipart fields, JSON bodies (any depth, GraphQL `variables` included) | any key matching `(?i)pass(word)?\|secret\|token\|api[_-]?key\|(?<![a-z])auth(orization)?(?![a-z])\|session\|csrf\|card\|cvv\|ssn\|private[_-]?key` | `[redacted]` |
+| Query strings, form bodies, multipart fields, JSON bodies (any depth, GraphQL `variables` included) | any key matching `(?i)pass(word)?\|secret\|token\|api[_-]?key\|(?<![a-z])auth(orization)?(?![a-z])\|session\|csrf\|card\|cvv\|ssn\|private[_-]?key\|access[_-]?key\|signature\|credential` | `[redacted]` |
 | Outbound URLs | the same key rule on the query string, and the password in `user:password@host` | `[redacted]`, or `%5Bredacted%5D` in the userinfo so the URL still parses |
 | SQL parameters | values bound to a column whose name matches the same pattern (`SET "password" = %s`, `INSERT ... ("token") VALUES (%s)`, `password = crypt(%s, ...)`, `ON CONFLICT ... DO UPDATE SET api_key = %s`), or to a table whose name matches it (`"authtoken_token"."key" = %s`, `"django_session"."session_key" = %s`; an unqualified column in a statement on such a table is masked too). Django's `auth_` app prefix is ignored, so `auth_user` stays visible | `[redacted]` |
 | Cache keys (Django cache, redis) | the rest of the key after `django.contrib.sessions.cache`, `django.contrib.sessions.cached_db`, `session:`, `sess:`, or after a word matching the key pattern | `django.contrib.sessions.cache[redacted]` (the prefix is kept, so hit rates still group) |
@@ -70,7 +70,7 @@ REDLINE = {
                        "proxy-authorization", "x-internal-token"],
     "REDACT_KEYS": [
         r"(?i)pass(word)?|secret|token|api[_-]?key|(?<![a-z])auth(orization)?(?![a-z])"
-        r"|session|csrf|card|cvv|ssn|private[_-]?key",
+        r"|session|csrf|card|cvv|ssn|private[_-]?key|access[_-]?key|signature|credential",
         r"(?i)^iban$|national_id",
     ],
 }
