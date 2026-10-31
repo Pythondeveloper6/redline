@@ -257,7 +257,20 @@ _RUN_TAG_GRACE_S = 60.0
 DEAD_RUN_MESSAGE = "the load process exited unexpectedly"
 #: Tags set from ``X-Redline-Check`` (validated by the writer).
 _CHECK_TAGS = ("check_run_id", "check_req", "check_n")
+
+
 #: Tables holding one or more rows per trace, deleted with it.
+def _group_tag(group_by: str | None) -> str | None:
+    """The trace tag an endpoints ``group_by`` names; ``ValueError`` for anything else."""
+    if group_by is None:
+        return None
+    if group_by == "blueprint":
+        return "blueprint"
+    if group_by.startswith("tag:") and 0 < len(group_by) - 4 <= 128:
+        return group_by[4:]
+    raise ValueError("group_by must be 'blueprint' or 'tag:<key>'")
+
+
 _TRACE_TABLES = ("profiles", "trace_tags", "issues", "trace_sql", "trace_ext", "trace_cache")
 #: Long-lived tables, kept across ``clear()`` unless ``history=True``.
 _HISTORY_TABLES = ("rollups", "releases", "issue_index", "issue_rollups", "run_steps", "runs")
@@ -762,20 +775,38 @@ class SQLiteStore(CheckStoreMixin):
             params.append(_like(f.sql))
         return (" WHERE " + " AND ".join(clauses)) if clauses else "", params
 
-    def endpoints(self, window: float, now: float | None = None) -> builtins.list[EndpointStats]:
+    def endpoints(
+        self, window: float, now: float | None = None, *, group_by: str | None = None
+    ) -> builtins.list[EndpointStats]:
         """Per ``(route, method)`` latency percentiles, query stats and a ≤48-bucket series.
 
         Requests without a resolved route are grouped by their concrete path. ``series``
         lists only non-empty buckets, ``t`` being each bucket's start (epoch seconds).
+
+        ``group_by`` (``"blueprint"`` or ``"tag:<key>"``) aggregates by that trace tag
+        instead: one row per tag value (``route`` is the value, ``method`` is ``"*"``),
+        ``routes`` counts the distinct routes in it, and untagged requests form
+        ``"(none)"``.
         """
         now = time.time() if now is None else now
         since = now - window
-        rows = self._query(
-            "SELECT coalesce(route, path) AS r, method, status, duration_ms, query_count, "
-            "query_ms, issue_count, started_at FROM traces WHERE started_at >= ? "
-            "AND started_at <= ?",
-            (since, now),
-        )
+        tag_key = _group_tag(group_by)
+        if tag_key is None:
+            rows = self._query(
+                "SELECT coalesce(route, path) AS r, method, status, duration_ms, query_count, "
+                "query_ms, issue_count, started_at FROM traces WHERE started_at >= ? "
+                "AND started_at <= ?",
+                (since, now),
+            )
+        else:
+            rows = self._query(
+                "SELECT coalesce(g.value, '(none)') AS r, '*' AS method, "
+                "coalesce(t.route, t.path) AS route_key, t.status, t.duration_ms, "
+                "t.query_count, t.query_ms, t.issue_count, t.started_at FROM traces t "
+                "LEFT JOIN trace_tags g ON g.trace_id = t.id AND g.key = ? "
+                "WHERE t.started_at >= ? AND t.started_at <= ?",
+                (tag_key, since, now),
+            )
         groups: dict[tuple[str, str], builtins.list[sqlite3.Row]] = defaultdict(list)
         for row in rows:
             groups[(row["r"], row["method"])].append(row)
@@ -810,6 +841,7 @@ class SQLiteStore(CheckStoreMixin):
                     avg_query_ms=round(sum(r["query_ms"] for r in items) / n, 3),
                     issue_count=sum(r["issue_count"] for r in items),
                     series=series,
+                    routes=len({r["route_key"] for r in items}) if tag_key else None,
                 )
             )
         out.sort(key=lambda e: (-e.count, -e.p95_ms, e.route))
