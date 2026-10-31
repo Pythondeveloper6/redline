@@ -377,6 +377,9 @@ and in-process clients. It is a repeatable feature demonstration, not a substitu
 live SQL Server/MySQL, broker or deployment load testing. External-driver probes require
 explicit disposable-database opt-in; follow the demo instructions.
 
+`uv run python scripts/smoke_examples.py` seeds, boots and requests all four examples as a
+smoke test.
+
 Please try Redline on a real project in development or staging and tell us what happens.
 [Open an issue for a bug or feature request](https://github.com/Pythondeveloper6/redline/issues/new)
 with your framework, database and driver versions, the expected/actual behavior, and a
@@ -391,7 +394,8 @@ It also serves all four example UIs on loopback ports 8011–8014.
 ## Documentation and development
 
 [Documentation site](https://pythondeveloper6.github.io/redline/) ·
-[Configuration](docs/configuration.md) · [All settings](docs/settings.md) ·
+[Configuration](docs/configuration.md) · [Upgrading](docs/upgrading.md) ·
+[Examples](docs/examples.md) · [All settings](docs/settings.md) ·
 [Real-world workflows](docs/real-world-workflows.md) · [Contributing](CONTRIBUTING.md) ·
 [Changelog](CHANGELOG.md) · [Roadmap](docs/roadmap.md).
 
