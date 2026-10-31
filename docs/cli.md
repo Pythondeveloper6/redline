@@ -13,6 +13,7 @@ Redline has two kinds of commands:
 
 ```text
 redline load SCENARIO [options]       run a load test against a running app
+redline init                          write a starter redline.toml and update .gitignore
 redline load init ...                 write a scenario file
 redline check record|compare|run|init|show|comment   refactor check: prove a refactor is safe
 redline config                        print the effective configuration
@@ -23,6 +24,24 @@ redline hash-password                 make a password hash for access = "basic"
 Exit codes: `0` success, `1` a check or threshold failed, `2` a usage, configuration or
 scenario error, `130` interrupted with Ctrl-C. `redline check` adds `3`, the app could not be
 reached.
+
+### `redline init`
+
+Detects the framework (`manage.py`, then dependencies in `pyproject.toml` /
+`requirements*.txt`, then installed packages) and writes a starter `redline.toml`
+(`preset`, `storage_path`, sampling and `ignore_paths`, plus the adapter's install line as a
+comment). It also adds the store directory (`/.redline/`) to `.gitignore`, once.
+
+```bash
+redline init                    # write redline.toml, update .gitignore
+redline init --dry-run          # print what would be written
+redline init --pyproject        # append a [tool.redline] table to pyproject.toml instead
+redline init --framework flask  # skip detection
+```
+
+It never overwrites: an existing `redline.toml` is left alone unless `--force`, and a
+`pyproject.toml` that already has `[tool.redline]` is never edited. `--dir DIR` selects the
+project.
 
 ### `redline load`
 

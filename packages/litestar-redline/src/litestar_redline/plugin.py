@@ -18,6 +18,7 @@ from redline_core import Recorder, Settings, configure
 from redline_core.access import Access
 from redline_core.api import RedlineAPI
 from redline_core.config import resolve_settings
+from redline_core.environment import refuse_in_production
 from redline_core.explain import ExplainExecutor
 from redline_core.load.control import run_hooks
 from redline_core.storage import SQLiteStore, Store
@@ -35,7 +36,7 @@ from ._sqlalchemy import (
 from .router import build_router
 from .suggest import SQLAlchemyFixSuggester
 
-__all__ = ["RedlinePlugin"]
+__all__ = ["RedlinePlugin", "install_if_dev"]
 
 logger = logging.getLogger("redline")
 
@@ -198,3 +199,21 @@ class RedlinePlugin(InitPluginProtocol):
             app_config.after_exception.append(self._after_exception)
         app_config.on_shutdown.append(self._on_shutdown)
         return app_config
+
+
+def install_if_dev(**kwargs: Any) -> RedlinePlugin | None:
+    """``RedlinePlugin(**kwargs)``, unless the process looks like production.
+
+    Litestar plugins are given to the constructor, so this returns the plugin (or ``None``)
+    instead of taking the app::
+
+        plugin = install_if_dev(engine=engine)
+        app = Litestar([...], plugins=[plugin] if plugin else [])
+
+    Production signals: ``REDLINE_ENV``/``APP_ENV``/``ENV``/``ENVIRONMENT``/``FLASK_ENV``/
+    ``DJANGO_ENV`` set to ``prod`` or ``production``. ``REDLINE_ALLOW_PRODUCTION=1`` attaches
+    anyway.
+    """
+    if refuse_in_production("litestar"):
+        return None
+    return RedlinePlugin(**kwargs)

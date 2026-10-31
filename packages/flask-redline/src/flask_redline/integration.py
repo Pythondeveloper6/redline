@@ -5,6 +5,7 @@ from __future__ import annotations
 import atexit
 import contextlib
 import logging
+import os
 import re
 import threading
 from collections.abc import Callable, Mapping
@@ -16,6 +17,7 @@ from redline_core import Recorder, Settings, configure, ui
 from redline_core.access import Access
 from redline_core.api import RedlineAPI
 from redline_core.config import ResolvedConfig, resolve_settings
+from redline_core.environment import refuse_in_production
 from redline_core.explain import ExplainExecutor
 from redline_core.load.control import run_hooks
 from redline_core.storage import SQLiteStore, Store
@@ -35,7 +37,7 @@ from .blueprint import build_blueprint
 from .cli import redline_cli
 from .suggest import SQLAlchemyFixSuggester
 
-__all__ = ["Redline"]
+__all__ = ["Redline", "install_if_dev"]
 
 logger = logging.getLogger("redline")
 
@@ -308,3 +310,20 @@ class Redline:
             runtime.discover_engines()
         if self._shared_recorder is None:
             atexit.register(runtime.close)
+
+
+def install_if_dev(app: Flask, **kwargs: Any) -> Redline | None:
+    """``Redline(app, **kwargs)``, unless the process looks like production.
+
+    Production signals: ``REDLINE_ENV``/``APP_ENV``/``ENV``/``ENVIRONMENT``/``FLASK_ENV``/
+    ``DJANGO_ENV`` set to ``prod`` or ``production`` in the environment or in ``app.config``
+    (``ENV``, ``ENVIRONMENT``, ``APP_ENV``). Then nothing is attached, a warning is logged
+    and ``None`` is returned. ``REDLINE_ALLOW_PRODUCTION=1`` attaches anyway.
+    """
+    environ = dict(os.environ)
+    for key in ("ENV", "ENVIRONMENT", "APP_ENV"):
+        if app.config.get(key):
+            environ[key] = str(app.config[key])
+    if refuse_in_production("flask", environ):
+        return None
+    return Redline(app, **kwargs)
