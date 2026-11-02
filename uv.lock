@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.12"
 
 [manifest]
@@ -2024,7 +2024,7 @@ requires-dist = [
     { name = "httpx", marker = "extra == 'httpx'", specifier = ">=0.27" },
     { name = "httpx", marker = "extra == 'load'", specifier = ">=0.27" },
     { name = "psycopg", marker = "extra == 'psycopg'", specifier = ">=3.1" },
-    { name = "psycopg", extras = ["binary"], marker = "extra == 'postgres'", specifier = ">=3.1" },
+    { name = "psycopg", extras = ["binary"], marker = "extra == 'postgres'", specifier = ">=3.3.6" },
     { name = "pyinstrument", marker = "extra == 'profile'", specifier = ">=5.0,<6.0" },
     { name = "redis", marker = "extra == 'redis'", specifier = ">=5.0" },
     { name = "requests", marker = "extra == 'requests'", specifier = ">=2.31" },
