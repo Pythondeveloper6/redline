@@ -18,6 +18,7 @@ class TraceReader:
     count = SQLiteStore.count
     list = SQLiteStore.list
     issue_index = SQLiteStore.issue_index
+    issues = SQLiteStore.issues
     _where = staticmethod(SQLiteStore._where)
 
     def __init__(self, path):
