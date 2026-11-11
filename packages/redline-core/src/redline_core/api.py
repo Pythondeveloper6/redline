@@ -43,9 +43,9 @@ from . import __version__, ui
 from .access import is_local_host, route_policy
 from .conf import FEATURES, Settings, editor_url_template, resolve_release
 from .explain import ExplainError, ExplainExecutor, run_explain
-from .index_advisor import advise
 from .finding_explain import explain_issue
 from .impact import rank_by_impact
+from .index_advisor import advise
 from .model import ISSUE_KINDS, Trace
 from .profiler import is_available as profiler_available
 from .storage.base import FilterError, Filters, Store, parse_period, parse_window, percentile

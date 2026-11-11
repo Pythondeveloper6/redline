@@ -1,9 +1,5 @@
 from __future__ import annotations
 
-import time
-import typing
-
-from redline_core.detect import detect
 from redline_core.finding_explain import explain_issue
 from redline_core.model import ISSUE_KINDS
 
