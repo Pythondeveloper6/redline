@@ -916,3 +916,14 @@ written to either server. Both servers must serve equivalent data (same dataset 
 configuration). Timings include network time and are not a substitute for a load test. A
 server that fails is reported per request and the run continues. The exit code is 1 when any
 response differs.
+
+## When server-side metrics are unavailable
+
+"server-side metrics: unavailable" means no traces tagged with the run id were found in the
+store passed with `--store` within 5 seconds of the run ending. Known causes: `--store`
+points at a different file than the app writes to, the app is not instrumented or drops
+traces (check `redline instrumentation`), the app's sampling rate is below 1, or the store is
+on a filesystem the app cannot write. An intermittent case was reported once after
+`record`; 30 consecutive record-then-compare runs against the FastAPI demo
+(`scripts/check_metrics_loop.py`) did not reproduce it. If you see it, run that script against
+your setup and keep the output.
