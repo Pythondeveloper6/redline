@@ -15,7 +15,7 @@ export type IssueKind = 'application_error' | 'sql_error' | 'placeholder_in_comm
   | 'blocking_in_async' | 'large_result' | 'unbounded_query' | 'inefficient_count'
   | 'slow_serializer' | 'long_transaction' | 'external_in_transaction'
   | 'slow_external' | 'duplicate_external' | 'retry_storm' | 'sql_retry_storm'
-  | 'repeated_writes' | 'deep_offset' | 'database_round_trips' | 'connection_pool_wait' | 'large_response' | 'repeated_scan' | 'large_cache_entry' | 'many_orm_instances' | 'json_decode_hotspot' | 'slow_cache_decode'
+  | 'repeated_writes' | 'deep_offset' | 'database_round_trips' | 'connection_pool_wait' | 'duplicate_llm_call' | 'serial_llm_calls' | 'llm_in_transaction' | 'llm_call_loop' | 'uncached_large_prompt' | 'large_response' | 'repeated_scan' | 'large_cache_entry' | 'many_orm_instances' | 'json_decode_hotspot' | 'slow_cache_decode'
 export type Severity = 'info' | 'warning' | 'critical'
 export interface Issue {
   id: string; kind: IssueKind; severity: Severity; title: string; detail: string

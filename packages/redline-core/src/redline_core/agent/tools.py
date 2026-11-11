@@ -128,7 +128,12 @@ def _verify_fix(store: Any, args: dict[str, Any]) -> dict[str, Any]:
 
 
 def _llm_summary(store: Any, args: dict[str, Any]) -> dict[str, Any]:
-    return {"items": [], "note": "LLM-call summary is not available in this build."}
+    status, data = _api(store).dispatch(
+        "GET", "api/llm", {"window": str(args.get("window", "24h"))}
+    )
+    if status != 200:
+        raise ValueError(data.get("error", {}).get("message", "could not summarise LLM calls"))
+    return data
 
 
 def _obj(props: dict[str, Any], required: tuple[str, ...] = ()) -> dict[str, Any]:

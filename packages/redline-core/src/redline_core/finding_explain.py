@@ -51,6 +51,27 @@ _RULES: dict[str, tuple[str, str]] = {
         "A request waited for a database connection longer than the pool-wait threshold.",
         "Pool-wait spans in one trace for the route.",
     ),
+    "duplicate_llm_call": (
+        "The same model received an identical prompt more than once in one request.",
+        "Same model and prompt hash within a single trace (prompt text is never stored).",
+    ),
+    "serial_llm_calls": (
+        "Several LLM calls ran one after another with no overlap in one request.",
+        "LLM calls in a single trace ordered by start time; a candidate only, because the "
+        "trace shows timing, not whether a later prompt needs an earlier answer.",
+    ),
+    "llm_in_transaction": (
+        "An LLM call ran while a database transaction was open.",
+        "LLM call spans that started inside a transaction span in one trace.",
+    ),
+    "llm_call_loop": (
+        "A single request made many LLM calls, as an agent loop or per-item calls do.",
+        "All LLM call spans in one trace.",
+    ),
+    "uncached_large_prompt": (
+        "A large Anthropic prompt was sent without reading from or writing to the prompt cache.",
+        "One LLM call span with a large prompt and no cache tokens.",
+    ),
     "large_response": (
         "A response was larger than the configured byte limit.",
         "One response per trace for the route.",

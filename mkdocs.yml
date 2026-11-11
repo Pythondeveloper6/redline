@@ -135,6 +135,7 @@ nav:
           - Logs and exceptions: logs-and-exceptions.md
   - For AI agents:
       - Working with agents: agents.md
+      - LLM-call observability: llm.md
   - Load and history:
       - Load testing: load-testing.md
       - History and releases: history.md
