@@ -896,3 +896,23 @@ See [Performance workflows](performance-workflows.md) for per-endpoint budgets, 
   beyond the suite limits (`repeat` up to 1000).
 
 `redline analyze` and its UI are documented in [Performance workflows](performance-workflows.md).
+
+## Verify a fix
+
+`redline check verify REPORT.json --kind n_plus_one [--fingerprint FP] [--min-samples 5]`
+reads a saved compare report and answers three questions about one finding: is it `gone`,
+`still_present` or `inconclusive`; are the responses `equal` or `changed`; is the request
+`faster`, `slower` or `unchanged`. A finding is only called `gone` when it was seen in the
+baseline, is absent after the change, and the after-change run has at least `--min-samples`
+calls with complete server-side metrics. Absence from sampled data is not proof of a fix, so
+too few samples or missing metrics give `inconclusive`. The exit code is 0 only for `gone`.
+
+## Compare two running versions
+
+`redline check compare-live SUITE --old http://old:8000 --new http://new:8001 --rounds 5`
+sends every request to both servers back to back and flips the order each round, so drift
+and warm-up affect both sides alike. Suites only contain read-only methods, so nothing is
+written to either server. Both servers must serve equivalent data (same dataset and
+configuration). Timings include network time and are not a substitute for a load test. A
+server that fails is reported per request and the run continues. The exit code is 1 when any
+response differs.

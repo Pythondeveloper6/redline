@@ -1671,6 +1671,50 @@ def _cmd_check_verify(args: argparse.Namespace, out: TextIO, err: TextIO) -> int
     return EXIT_OK if verdict["finding"] == "gone" else EXIT_FAIL
 
 
+def _configure_check_compare_live(p: argparse.ArgumentParser) -> None:
+    p.add_argument("suite", help="check suite (read-only requests only)")
+    p.add_argument("--old", required=True, help="base URL of the current version")
+    p.add_argument("--new", required=True, help="base URL of the changed version")
+    p.add_argument("--rounds", type=int, default=5, help="alternating rounds (1-1000)")
+    p.add_argument("--json", metavar="OUT", help="also write the result as JSON")
+
+
+def _cmd_check_compare_live(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
+    import json
+
+    from .check import live
+    from .check.suite import Suite, SuiteError
+
+    try:
+        suite = Suite.from_file(args.suite)
+        result = live.run_live_compare(
+            suite, old_url=args.old, new_url=args.new, rounds=args.rounds
+        )
+    except (SuiteError, ValueError) as exc:
+        err.write(f"redline check compare-live: {exc}\n")
+        return EXIT_USAGE
+    except RuntimeError as exc:
+        err.write(f"redline check compare-live: {exc}\n")
+        return EXIT_UNREACHABLE
+    out.write(f"live compare: {result['rounds_done']} round(s), {result['status']}\n")
+    out.write("request            old ms   new ms   delta ms  responses\n")
+    for row in result["requests"]:
+        delta = row["median_delta_ms"]
+        equal = {True: "equal", False: "CHANGED", None: "unknown"}[row["responses_equal"]]
+        failed = sum(sum(v.values()) for v in row["errors"].values())
+        out.write(
+            f"{row['name'][:18]:<18} {row['median_old']!s:>7}  {row['median_new']!s:>7}  "
+            f"{'n/a' if delta is None else format(delta, '+.1f'):>8}  {equal}"
+            f"{f' ({failed} failed)' if failed else ''}\n"
+        )
+    out.write("Timings include network noise; both servers must serve equivalent data.\n")
+    if args.json:
+        with open(args.json, "w", encoding="utf-8") as fh:
+            json.dump(result, fh, indent=2)
+    changed = any(r["responses_equal"] is False for r in result["requests"])
+    return EXIT_FAIL if changed else EXIT_OK
+
+
 def _cmd_check_show(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
     import json
 
@@ -1712,6 +1756,11 @@ CHECK_COMMANDS: dict[str, tuple[str, Callable[[argparse.ArgumentParser], None], 
         _cmd_check_init,
     ),
     "show": ("print a saved report (JSON) again", _configure_check_show, _cmd_check_show),
+    "compare-live": (
+        "alternate requests between two running versions (exit 1 when responses differ)",
+        _configure_check_compare_live,
+        _cmd_check_compare_live,
+    ),
     "verify": (
         "did a fix remove a finding? gone/still_present/inconclusive from a saved report "
         "(exit 0 only when gone)",
