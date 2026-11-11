@@ -1630,6 +1630,47 @@ def _cmd_check_init(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
     return EXIT_OK
 
 
+def _configure_check_verify(p: argparse.ArgumentParser) -> None:
+    p.add_argument("report", help="report JSON written by `redline check compare --json`")
+    p.add_argument("--kind", required=True, help="issue kind to verify, e.g. n_plus_one")
+    p.add_argument("--fingerprint", default=None, help="limit to one SQL/route fingerprint")
+    p.add_argument(
+        "--min-samples", type=int, default=5, help="calls needed after the change to call it gone"
+    )
+    p.add_argument("--json", action="store_true", help="print the verdict as JSON")
+
+
+def _cmd_check_verify(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
+    import json
+
+    from .check.report import Report, ReportError
+    from .check.verify import verify_report
+
+    if args.min_samples < 0:
+        err.write("redline check verify: --min-samples must be 0 or more\n")
+        return EXIT_USAGE
+    try:
+        with open(args.report, encoding="utf-8") as fh:
+            report = Report.from_dict(json.load(fh))
+    except FileNotFoundError:
+        err.write(f"redline check verify: {args.report}: file not found\n")
+        return EXIT_USAGE
+    except (OSError, ValueError, ReportError) as exc:
+        err.write(f"redline check verify: {args.report}: {exc}\n")
+        return EXIT_USAGE
+    verdict = verify_report(
+        report.requests, args.kind, args.fingerprint, min_samples=args.min_samples
+    )
+    if args.json:
+        out.write(json.dumps(verdict, indent=2) + "\n")
+    else:
+        out.write(
+            f"finding: {verdict['finding']} ({verdict['reason']})\n"
+            f"responses: {verdict['responses']}\nspeed: {verdict['speed']}\n"
+        )
+    return EXIT_OK if verdict["finding"] == "gone" else EXIT_FAIL
+
+
 def _cmd_check_show(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
     import json
 
@@ -1671,6 +1712,12 @@ CHECK_COMMANDS: dict[str, tuple[str, Callable[[argparse.ArgumentParser], None], 
         _cmd_check_init,
     ),
     "show": ("print a saved report (JSON) again", _configure_check_show, _cmd_check_show),
+    "verify": (
+        "did a fix remove a finding? gone/still_present/inconclusive from a saved report "
+        "(exit 0 only when gone)",
+        _configure_check_verify,
+        _cmd_check_verify,
+    ),
     "ratchet": (
         "fail on new query-count/latency regressions against a committed file; "
         "--update tightens it",
