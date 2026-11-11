@@ -101,7 +101,9 @@ def test_protocol_url_masking_and_repr(store):
     assert "***" in store.path and "***" in repr(store)
     if ":" in DSN.split("://", 1)[1].split("@", 1)[0]:
         password = DSN.split("://", 1)[1].split("@", 1)[0].split(":", 1)[1]
-        assert password not in store.path
+        # The password may equal text elsewhere in the URL (scheme, user), so look for
+        # it in the credential position only.
+        assert f":{password}@" not in store.path
 
 
 def test_round_trip_trace_with_profile_tags_and_nul(store):
