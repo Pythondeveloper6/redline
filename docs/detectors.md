@@ -34,6 +34,11 @@ An *issue* is something the detectors found in one trace. Issues with the same i
 | `deep_offset` | Large observed OFFSET | 10000 rows | [Performance workflows](performance-workflows.md) |
 | `database_round_trips` | Many queries with substantial cumulative cost | 10 queries and 100 ms | [Performance workflows](performance-workflows.md) |
 | `connection_pool_wait` | Long captured checkout wait | 50 ms | [Performance workflows](performance-workflows.md) |
+| `duplicate_llm_call` | Identical LLM prompt repeated in a request | 2 calls | [LLM-call observability](llm.md) |
+| `serial_llm_calls` | LLM calls that ran back to back | 3 calls | [LLM-call observability](llm.md) |
+| `llm_in_transaction` | LLM call while a transaction was open | always | [LLM-call observability](llm.md) |
+| `llm_call_loop` | Many LLM calls in one request | 8 calls | [LLM-call observability](llm.md) |
+| `uncached_large_prompt` | Large Anthropic prompt without prompt caching | 4000 characters | [LLM-call observability](llm.md) |
 | `repeated_scan` | Distinct aggregates with matching predicate shape | 2 | [Performance workflows](performance-workflows.md) |
 | `large_response` | Response bytes exceed the threshold | 1000000 bytes | [Performance workflows](performance-workflows.md) |
 | `many_orm_instances` | Many model objects constructed or loaded | 500 | [Performance workflows](performance-workflows.md) |

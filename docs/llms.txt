@@ -48,6 +48,7 @@ CLI reference as JSON: https://pythondeveloper6.github.io/redline/reference/cli.
 ## For AI agents
 
 - [Working with agents](https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/agents.md): Redline is built so a coding agent can find a performance problem, fix it and prove the fix, using recorded data instead of guesses.
+- [LLM-call observability](https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/llm.md): Redline records calls to the Anthropic and OpenAI SDKs as llm_call spans, next to the SQL and HTTP spans of the same request, and flags patterns that waste time or money.
 
 ## Load and history
 

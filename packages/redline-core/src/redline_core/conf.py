@@ -267,6 +267,13 @@ class Settings:
     round_trip_ms: float = 100.0
     pool_wait_ms: float = 50.0
     json_decode_ms: float = 50.0
+    #: LLM-call detectors (0 disables each): identical prompt repeated N times in a request,
+    #: N back-to-back calls, N calls in one request, and an Anthropic prompt of N characters
+    #: sent without prompt caching.
+    llm_duplicate_threshold: int = 2
+    llm_serial_min: int = 3
+    llm_loop_calls: int = 8
+    llm_prompt_cache_chars: int = 4000
     cache_decode_ms: float = 50.0
 
     # logs & exceptions
@@ -563,6 +570,10 @@ def _validate(s: Settings) -> None:
         "deep_offset_rows",
         "round_trip_count",
         "repeated_scans_threshold",
+        "llm_duplicate_threshold",
+        "llm_serial_min",
+        "llm_loop_calls",
+        "llm_prompt_cache_chars",
         "large_response_bytes",
         "large_cache_bytes",
         "max_body_bytes",

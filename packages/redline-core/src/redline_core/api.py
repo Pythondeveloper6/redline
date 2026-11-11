@@ -324,6 +324,16 @@ class RedlineAPI:
             from .instrumentation_report import build_report
 
             return 200, build_report(self.store, self.runtime_health)
+        if path == "api/llm":
+            if method != "GET":
+                return _not_allowed()
+            try:
+                window = parse_window(_str_param(params, "window"))
+            except FilterError as exc:
+                return error(400, "invalid_window", str(exc))
+            from .llm_usage import summarize
+
+            return 200, summarize(self.store, window=window)
         if path == "api/endpoints":
             return self.endpoints(params) if method == "GET" else _not_allowed()
         if path == "api/issues":

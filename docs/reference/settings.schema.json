@@ -185,6 +185,22 @@
       "type": "integer",
       "default": 1000
     },
+    "llm_duplicate_threshold": {
+      "type": "integer",
+      "default": 2
+    },
+    "llm_loop_calls": {
+      "type": "integer",
+      "default": 8
+    },
+    "llm_prompt_cache_chars": {
+      "type": "integer",
+      "default": 4000
+    },
+    "llm_serial_min": {
+      "type": "integer",
+      "default": 3
+    },
     "load_from_ui": {
       "type": "boolean",
       "default": false
