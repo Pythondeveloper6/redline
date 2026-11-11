@@ -58,7 +58,9 @@ export interface EndpointStats {
   avg_queries: number; max_queries: number; avg_query_ms: number; issue_count: number
   series: { t: number; p95_ms: number; count: number }[]
 }
+export interface IssueWhy { rule: string; observed: string; threshold: string | null; grouping: string; limits: string; sampled: boolean }
 export interface IssueGroup {
+  why?: IssueWhy
   observed_total_ms?: number; fingerprint?: string | null; suppressed?: boolean; suppressed_routes?: string[]
   id: string; kind: IssueKind; severity: Severity; title: string; detail: string
   occurrences: number; first_seen: number; last_seen: number; routes: string[]

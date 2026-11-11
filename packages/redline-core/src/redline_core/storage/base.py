@@ -229,6 +229,9 @@ class IssueGroup:
     callsite: Callsite | None
     observed_total_ms: float = 0.0
     fingerprint: str | None = None
+    #: Detector evidence of the sampled occurrence; used to explain the finding.
+    extra: dict[str, Any] = field(default_factory=dict)
+    sample_count: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {

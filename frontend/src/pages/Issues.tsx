@@ -43,6 +43,14 @@ export default function Issues() {
               </div>
               <div className="text-[14px] font-semibold break-words">{g.title}</div>
               <p className="m-0 text-muted max-w-3xl">{g.detail}</p>
+              {g.why && <details className="text-[12px]"><summary className="cursor-pointer text-info">Why this fired</summary>
+                <dl className="m-0 mt-1 space-y-0.5 text-muted">
+                  <div><dt className="inline font-semibold text-ink">Rule: </dt><dd className="inline">{g.why.rule}</dd></div>
+                  <div><dt className="inline font-semibold text-ink">Observed: </dt><dd className="inline">{g.why.observed}</dd></div>
+                  {g.why.threshold && <div><dt className="inline font-semibold text-ink">Threshold: </dt><dd className="inline">{g.why.threshold}</dd></div>}
+                  <div><dt className="inline font-semibold text-ink">Grouping: </dt><dd className="inline">{g.why.grouping}</dd></div>
+                  <div><dt className="inline font-semibold text-ink">Limits: </dt><dd className="inline">{g.why.limits}</dd></div>
+                </dl></details>}
               <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[12px]">
                 {g.callsite && <Callsite cs={g.callsite} />}
                 <span className="flex flex-wrap gap-1.5">{g.routes.map(r => <span key={r} className="mono rounded bg-raised px-1.5 text-[11px]">{r}</span>)}</span>
