@@ -19,7 +19,7 @@ export default function Issues() {
       <div className="flex flex-wrap items-center gap-2 mb-3">
         <h1 className="m-0 text-[15px] font-semibold flex-1">Issues</h1>
         <label className="inline-flex gap-1 items-center"><input type="checkbox" checked={showSuppressed} onChange={e => setShowSuppressed(e.target.checked)} />Show suppressed</label>
-        <select className="field" aria-label="Issue ordering" value={sort} onChange={e => setSort(e.target.value)}><option value="severity">Severity</option><option value="cost">Observed cumulative time</option><option value="frequency">Occurrences</option></select>
+        <select className="field" aria-label="Issue ordering" value={sort} onChange={e => setSort(e.target.value)}><option value="severity">Severity</option><option value="impact">Fix impact (sampled)</option><option value="cost">Observed cumulative time</option><option value="frequency">Occurrences</option></select>
         <select className="field" value={kind} onChange={e => setKind(e.target.value)} aria-label="Issue kind">
           <option value="">All kinds</option>{Object.entries(ISSUE_LABEL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
         </select>
@@ -33,7 +33,7 @@ export default function Issues() {
       ) : (
         <div className="space-y-3">
           <p className="text-muted">Times and occurrences describe retained traces. Issue costs can overlap and are not predicted savings.</p>
-          {d.data?.items.filter(g => showSuppressed || !g.suppressed).slice().sort((a, b) => sort === 'cost' ? (b.observed_total_ms ?? 0) - (a.observed_total_ms ?? 0) : sort === 'frequency' ? b.occurrences - a.occurrences : 0).map(g => (
+          {d.data?.items.filter(g => showSuppressed || !g.suppressed).slice().sort((a, b) => sort === 'impact' ? Number(a.suppressed ?? false) - Number(b.suppressed ?? false) || (b.impact?.observed_ms ?? 0) - (a.impact?.observed_ms ?? 0) || b.occurrences - a.occurrences : sort === 'cost' ? (b.observed_total_ms ?? 0) - (a.observed_total_ms ?? 0) : sort === 'frequency' ? b.occurrences - a.occurrences : 0).map(g => (
             <div key={g.id} className="card p-4 space-y-3">
               <div className="flex flex-wrap items-center gap-2">
                 {g.suppressed && <span className="text-muted">Suppressed</span>}
@@ -43,6 +43,14 @@ export default function Issues() {
               </div>
               <div className="text-[14px] font-semibold break-words">{g.title}</div>
               <p className="m-0 text-muted max-w-3xl">{g.detail}</p>
+              {g.why && <details className="text-[12px]"><summary className="cursor-pointer text-info">Why this fired</summary>
+                <dl className="m-0 mt-1 space-y-0.5 text-muted">
+                  <div><dt className="inline font-semibold text-ink">Rule: </dt><dd className="inline">{g.why.rule}</dd></div>
+                  <div><dt className="inline font-semibold text-ink">Observed: </dt><dd className="inline">{g.why.observed}</dd></div>
+                  {g.why.threshold && <div><dt className="inline font-semibold text-ink">Threshold: </dt><dd className="inline">{g.why.threshold}</dd></div>}
+                  <div><dt className="inline font-semibold text-ink">Grouping: </dt><dd className="inline">{g.why.grouping}</dd></div>
+                  <div><dt className="inline font-semibold text-ink">Limits: </dt><dd className="inline">{g.why.limits}</dd></div>
+                </dl></details>}
               <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[12px]">
                 {g.callsite && <Callsite cs={g.callsite} />}
                 <span className="flex flex-wrap gap-1.5">{g.routes.map(r => <span key={r} className="mono rounded bg-raised px-1.5 text-[11px]">{r}</span>)}</span>

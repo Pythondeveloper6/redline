@@ -20,7 +20,10 @@ import sys
 from collections.abc import Callable, Sequence
 from typing import Any, TextIO
 
-from . import digest, operations, project_init
+from . import diagnose, digest, instrumentation_report, operations, project_init
+from .agent import fixprompt as agent_fixprompt
+from .agent import mcp as agent_mcp
+from .agent import skill as agent_skill
 from .check_sql import command as _cmd_sql
 from .check_sql import configure_cli as _configure_sql
 from .schema_watch import command as _cmd_schema_watch
@@ -1630,6 +1633,143 @@ def _cmd_check_init(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
     return EXIT_OK
 
 
+def _configure_check_verify(p: argparse.ArgumentParser) -> None:
+    p.add_argument("report", help="report JSON written by `redline check compare --json`")
+    p.add_argument("--kind", required=True, help="issue kind to verify, e.g. n_plus_one")
+    p.add_argument("--fingerprint", default=None, help="limit to one SQL/route fingerprint")
+    p.add_argument(
+        "--min-samples", type=int, default=5, help="calls needed after the change to call it gone"
+    )
+    p.add_argument("--json", action="store_true", help="print the verdict as JSON")
+
+
+def _cmd_check_verify(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
+    import json
+
+    from .check.report import Report, ReportError
+    from .check.verify import verify_report
+
+    if args.min_samples < 0:
+        err.write("redline check verify: --min-samples must be 0 or more\n")
+        return EXIT_USAGE
+    try:
+        with open(args.report, encoding="utf-8") as fh:
+            report = Report.from_dict(json.load(fh))
+    except FileNotFoundError:
+        err.write(f"redline check verify: {args.report}: file not found\n")
+        return EXIT_USAGE
+    except (OSError, ValueError, ReportError) as exc:
+        err.write(f"redline check verify: {args.report}: {exc}\n")
+        return EXIT_USAGE
+    verdict = verify_report(
+        report.requests, args.kind, args.fingerprint, min_samples=args.min_samples
+    )
+    if args.json:
+        out.write(json.dumps(verdict, indent=2) + "\n")
+    else:
+        out.write(
+            f"finding: {verdict['finding']} ({verdict['reason']})\n"
+            f"responses: {verdict['responses']}\nspeed: {verdict['speed']}\n"
+        )
+    return EXIT_OK if verdict["finding"] == "gone" else EXIT_FAIL
+
+
+def _configure_check_compare_live(p: argparse.ArgumentParser) -> None:
+    p.add_argument("suite", help="check suite (read-only requests only)")
+    p.add_argument("--old", required=True, help="base URL of the current version")
+    p.add_argument("--new", required=True, help="base URL of the changed version")
+    p.add_argument("--rounds", type=int, default=5, help="alternating rounds (1-1000)")
+    p.add_argument("--json", metavar="OUT", help="also write the result as JSON")
+
+
+def _cmd_check_compare_live(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
+    import json
+
+    from .check import live
+    from .check.suite import Suite, SuiteError
+
+    try:
+        suite = Suite.from_file(args.suite)
+        result = live.run_live_compare(
+            suite, old_url=args.old, new_url=args.new, rounds=args.rounds
+        )
+    except (SuiteError, ValueError) as exc:
+        err.write(f"redline check compare-live: {exc}\n")
+        return EXIT_USAGE
+    except RuntimeError as exc:
+        err.write(f"redline check compare-live: {exc}\n")
+        return EXIT_UNREACHABLE
+    out.write(f"live compare: {result['rounds_done']} round(s), {result['status']}\n")
+    out.write("request            old ms   new ms   delta ms  responses\n")
+    for row in result["requests"]:
+        delta = row["median_delta_ms"]
+        equal = {True: "equal", False: "CHANGED", None: "unknown"}[row["responses_equal"]]
+        failed = sum(sum(v.values()) for v in row["errors"].values())
+        out.write(
+            f"{row['name'][:18]:<18} {row['median_old']!s:>7}  {row['median_new']!s:>7}  "
+            f"{'n/a' if delta is None else format(delta, '+.1f'):>8}  {equal}"
+            f"{f' ({failed} failed)' if failed else ''}\n"
+        )
+    out.write("Timings include network noise; both servers must serve equivalent data.\n")
+    if args.json:
+        with open(args.json, "w", encoding="utf-8") as fh:
+            json.dump(result, fh, indent=2)
+    changed = any(r["responses_equal"] is False for r in result["requests"])
+    return EXIT_FAIL if changed else EXIT_OK
+
+
+def _configure_check_findings(p: argparse.ArgumentParser) -> None:
+    p.add_argument("report", help="report JSON written by `redline check compare --json`")
+    p.add_argument("--new-only", action="store_true", help="only findings new since the baseline")
+    p.add_argument("--json", action="store_true", help="print findings as JSON")
+
+
+def _cmd_check_findings(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
+    import json
+
+    from .agent.fixprompt import build_fix_prompt
+    from .check.report import Report, ReportError
+
+    try:
+        with open(args.report, encoding="utf-8") as fh:
+            report = Report.from_dict(json.load(fh))
+    except FileNotFoundError:
+        err.write(f"redline check findings: {args.report}: file not found\n")
+        return EXIT_USAGE
+    except (OSError, ValueError, ReportError) as exc:
+        err.write(f"redline check findings: {args.report}: {exc}\n")
+        return EXIT_USAGE
+    findings = []
+    for entry in report.requests:
+        server = entry.get("server") or {}
+        for issue in server.get("new_issues") or []:
+            group = {
+                "id": issue.get("id") or f"{issue.get('kind')}:{issue.get('fingerprint')}",
+                "kind": issue.get("kind"),
+                "title": issue.get("title"),
+                "fingerprint": issue.get("fingerprint"),
+                "routes": [entry.get("path")],
+            }
+            findings.append(
+                {
+                    "request": entry.get("name"),
+                    "kind": issue.get("kind"),
+                    "title": issue.get("title"),
+                    "fingerprint": issue.get("fingerprint"),
+                    "sample_trace_id": issue.get("sample_trace_id"),
+                    "prompt": build_fix_prompt(group),
+                }
+            )
+    if args.json:
+        out.write(json.dumps({"findings": findings}, indent=2) + "\n")
+    else:
+        for f in findings:
+            out.write(f"new {f['kind']} on {f['request']}: {f['title']}\n")
+        if not findings:
+            out.write("no new findings\n")
+    return EXIT_FAIL if findings else EXIT_OK
+
+
 def _cmd_check_show(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
     import json
 
@@ -1671,6 +1811,22 @@ CHECK_COMMANDS: dict[str, tuple[str, Callable[[argparse.ArgumentParser], None], 
         _cmd_check_init,
     ),
     "show": ("print a saved report (JSON) again", _configure_check_show, _cmd_check_show),
+    "compare-live": (
+        "alternate requests between two running versions (exit 1 when responses differ)",
+        _configure_check_compare_live,
+        _cmd_check_compare_live,
+    ),
+    "findings": (
+        "list findings in a compare report with an agent brief each (exit 1 when any are new)",
+        _configure_check_findings,
+        _cmd_check_findings,
+    ),
+    "verify": (
+        "did a fix remove a finding? gone/still_present/inconclusive from a saved report "
+        "(exit 0 only when gone)",
+        _configure_check_verify,
+        _cmd_check_verify,
+    ),
     "ratchet": (
         "fail on new query-count/latency regressions against a committed file; "
         "--update tightens it",
@@ -1753,6 +1909,36 @@ COMMANDS: dict[str, tuple[str, Callable[[argparse.ArgumentParser], None], Handle
         "post newly seen issues to a chat webhook (deduplicated, with a state file)",
         digest.configure,
         digest.command,
+        {},
+    ),
+    "instrumentation": (
+        "show what redline is blind to: inactive integrations, truncated traces, dropped writes",
+        instrumentation_report.configure,
+        instrumentation_report.command,
+        {},
+    ),
+    "agent-skill": (
+        "print or write the redline skill / AGENTS.md section that teaches a coding agent",
+        agent_skill.configure,
+        agent_skill.command,
+        {},
+    ),
+    "diagnose": (
+        "preview (or, opted in, send) a redacted finding to an AI provider for diagnosis",
+        diagnose.configure,
+        diagnose.command,
+        {},
+    ),
+    "fix-prompt": (
+        "write a brief an AI agent can act on to fix one finding",
+        agent_fixprompt.configure_fix_prompt,
+        agent_fixprompt.command_fix_prompt,
+        {},
+    ),
+    "mcp": (
+        "serve read-only redline tools to an AI agent over MCP (stdio)",
+        agent_mcp.configure,
+        agent_mcp.command,
         {},
     ),
     "audit-store": (

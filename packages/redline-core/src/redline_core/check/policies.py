@@ -39,8 +39,12 @@ def validate_rules(raw: Mapping[str, Any]) -> dict[str, dict]:
                     raise ValueError("tolerances must be finite non-negative numbers")
                 out[name][path] = dict(value)
     budgets = out["budgets"]
-    if set(budgets) - {*NUMERIC_BUDGETS, "forbidden_issues"}:
+    if set(budgets) - {*NUMERIC_BUDGETS, "forbidden_issues", "min_samples"}:
         raise ValueError("unknown budget key")
+    if "min_samples" in budgets:
+        value = budgets["min_samples"]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ValueError("budgets.min_samples must be a whole number of at least 1")
     for key in NUMERIC_BUDGETS:
         if key in budgets and (not number(budgets[key]) or budgets[key] < 0):
             raise ValueError(f"budgets.{key} must be a finite non-negative number")
@@ -160,7 +164,22 @@ def evaluate_budgets(budgets: Mapping[str, Any], after: Mapping[str, Any]) -> li
     }
     metrics_complete = server.get("calls") in (None, after.get("calls"))
     results = []
+    min_samples = budgets.get("min_samples")
+    samples = len(perf.get("samples_ms") or ())
     for key, limit in budgets.items():
+        if key == "min_samples":
+            continue
+        if key in ("max_median_ms", "max_p95_ms") and min_samples and samples < min_samples:
+            results.append(
+                {
+                    "rule": key,
+                    "limit": limit,
+                    "observed": None,
+                    "passed": False,
+                    "reason": f"insufficient samples ({samples} of {min_samples})",
+                }
+            )
+            continue
         if key == "forbidden_issues":
             if not limit:
                 continue

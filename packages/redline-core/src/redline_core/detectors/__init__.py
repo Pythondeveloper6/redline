@@ -26,6 +26,7 @@ from . import (  # noqa: E402
     blocking,
     external,
     json_decode,
+    llm,
     patterns,
     results,
     serializers,
@@ -43,5 +44,6 @@ REGISTRY.extend(
         transactions.detect,
         patterns.detect,
         json_decode.detect,
+        llm.detect,
     ]
 )

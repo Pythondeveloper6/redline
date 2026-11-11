@@ -101,7 +101,7 @@ not silently treated as finished.
 | Log capture allowlist (`capture_loggers` / `ignore_loggers`) | **Landed in 0.4** |
 | RQ and Dramatiq integrations | Open |
 | `redline_core.dbapi.wrap` for non-SQLAlchemy projects | Open |
-| Postgres store | Open; the report places it in 0.6 |
+| Postgres store (`storage_url = "postgresql://..."`, see [Storage](storage.md)) | **Landed in 0.5** |
 | AI-diagnosis policy, as a separate package if built | Open; never sends trace data without explicit opt-in |
 
 ## v1.0

@@ -58,6 +58,7 @@ EDITORS: dict[str, str | None] = {
 }
 
 #: ``Settings.access`` policies (``CONTRACT.md`` §18).
+AI_PROVIDERS: tuple[str, ...] = ("anthropic",)
 ACCESS_POLICIES: tuple[str, ...] = ("local", "token", "basic", "framework", "custom", "open")
 #: Switches of ``Settings.features``; a missing key means on.
 FEATURES: tuple[str, ...] = (
@@ -267,6 +268,19 @@ class Settings:
     round_trip_ms: float = 100.0
     pool_wait_ms: float = 50.0
     json_decode_ms: float = 50.0
+    #: LLM-call detectors (0 disables each): identical prompt repeated N times in a request,
+    #: N back-to-back calls, N calls in one request, and an Anthropic prompt of N characters
+    #: sent without prompt caching.
+    llm_duplicate_threshold: int = 2
+    llm_serial_min: int = 3
+    llm_loop_calls: int = 8
+    llm_prompt_cache_chars: int = 4000
+
+    #: Opt-in AI diagnosis of one finding (``redline diagnose --send``). Off by default; the
+    #: API key is read from ``REDLINE_AI_API_KEY`` and is never a setting.
+    ai_diagnosis: bool = False
+    ai_provider: str = "anthropic"
+    ai_model: str = "claude-sonnet-5-5"
     cache_decode_ms: float = 50.0
 
     # logs & exceptions
@@ -551,8 +565,13 @@ def _validate(s: Settings) -> None:
         "ui_enabled",
         "trust_unix_socket",
         "allow_storage_in_repo",
+        "ai_diagnosis",
     ):
         _check_type(s, name, (bool,), "True or False")
+    if s.ai_provider not in AI_PROVIDERS:
+        raise SettingsError(f"ai_provider must be one of {', '.join(AI_PROVIDERS)}")
+    if not isinstance(s.ai_model, str) or not re.fullmatch(r"[A-Za-z0-9._:/-]{1,100}", s.ai_model):
+        raise SettingsError("ai_model must be a model name of letters, digits and . _ : / -")
     for name in (
         "max_sql_bytes",
         "max_span_data_bytes",
@@ -563,6 +582,10 @@ def _validate(s: Settings) -> None:
         "deep_offset_rows",
         "round_trip_count",
         "repeated_scans_threshold",
+        "llm_duplicate_threshold",
+        "llm_serial_min",
+        "llm_loop_calls",
+        "llm_prompt_cache_chars",
         "large_response_bytes",
         "large_cache_bytes",
         "max_body_bytes",

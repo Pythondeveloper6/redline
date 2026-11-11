@@ -43,6 +43,8 @@ from . import __version__, ui
 from .access import is_local_host, route_policy
 from .conf import FEATURES, Settings, editor_url_template, resolve_release
 from .explain import ExplainError, ExplainExecutor, run_explain
+from .finding_explain import explain_issue
+from .impact import rank_by_impact
 from .index_advisor import advise
 from .model import ISSUE_KINDS, Trace
 from .profiler import is_available as profiler_available
@@ -316,6 +318,22 @@ class RedlineAPI:
 
             health = health_snapshot(self.store, self.runtime_health)
             return (200 if health["status"] == "ok" else 503), health
+        if path == "api/instrumentation":
+            if method != "GET":
+                return _not_allowed()
+            from .instrumentation_report import build_report
+
+            return 200, build_report(self.store, self.runtime_health)
+        if path == "api/llm":
+            if method != "GET":
+                return _not_allowed()
+            try:
+                window = parse_window(_str_param(params, "window"))
+            except FilterError as exc:
+                return error(400, "invalid_window", str(exc))
+            from .llm_usage import summarize
+
+            return 200, summarize(self.store, window=window)
         if path == "api/endpoints":
             return self.endpoints(params) if method == "GET" else _not_allowed()
         if path == "api/issues":
@@ -504,9 +522,15 @@ class RedlineAPI:
         kind = _str_param(params, "kind")
         if kind is not None and kind not in _ISSUE_KINDS:
             return error(400, "invalid_kind", f"kind must be one of {', '.join(_ISSUE_KINDS)}.")
+        sort = _str_param(params, "sort")
+        if sort not in (None, "impact"):
+            return error(400, "invalid_sort", "sort must be 'impact' or omitted.")
         from .suppressions import matches
 
-        items = [g.to_dict() for g in self.store.issues(window, kind=kind)]
+        groups = self.store.issues(window, kind=kind)
+        items = [g.to_dict() for g in groups]
+        for item, g in zip(items, groups, strict=True):
+            item["why"] = explain_issue(g.kind, g.extra, g.sample_count)
         rules = getattr(self.store, "list_suppressions", lambda: [])()
         for item in items:
             site = item.get("callsite")
@@ -528,6 +552,9 @@ class RedlineAPI:
             item["suppressed"] = bool(item["routes"]) and len(item["suppressed_routes"]) == len(
                 item["routes"]
             )
+        items = rank_by_impact(items) if sort == "impact" else items
+        for item in items:
+            item.setdefault("impact", rank_by_impact([item])[0]["impact"])
         return 200, {"items": items, "sampled": self.settings.sample_rate < 1}
 
     def explain(self, body: bytes | str | Mapping[str, Any] | None) -> Response:

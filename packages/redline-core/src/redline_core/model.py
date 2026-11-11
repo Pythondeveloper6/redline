@@ -55,6 +55,7 @@ SpanKind = Literal[
     "transaction",
     "blocking",
     "pool_wait",
+    "llm_call",
 ]
 IssueKind = Literal[
     "fresh_connection_failure",
@@ -85,6 +86,11 @@ IssueKind = Literal[
     "deep_offset",
     "database_round_trips",
     "connection_pool_wait",
+    "duplicate_llm_call",
+    "serial_llm_calls",
+    "llm_in_transaction",
+    "llm_call_loop",
+    "uncached_large_prompt",
     "large_response",
     "repeated_scan",
     "large_cache_entry",
@@ -109,6 +115,7 @@ SPAN_KINDS: tuple[str, ...] = (
     "transaction",
     "blocking",
     "pool_wait",
+    "llm_call",
 )
 ISSUE_KINDS: tuple[str, ...] = (
     "fresh_connection_failure",
@@ -139,6 +146,11 @@ ISSUE_KINDS: tuple[str, ...] = (
     "deep_offset",
     "database_round_trips",
     "connection_pool_wait",
+    "duplicate_llm_call",
+    "serial_llm_calls",
+    "llm_in_transaction",
+    "llm_call_loop",
+    "uncached_large_prompt",
     "large_response",
     "repeated_scan",
     "large_cache_entry",

@@ -1,0 +1,2125 @@
+{
+  "commands": [
+    {
+      "command": "redline agent-skill",
+      "help": "print or write the redline skill / AGENTS.md section that teaches a coding agent",
+      "arguments": [
+        {
+          "name": [
+            "--format"
+          ],
+          "required": false,
+          "help": "SKILL.md or AGENTS section"
+        },
+        {
+          "name": [
+            "--write"
+          ],
+          "required": false,
+          "help": "write into DIR instead of printing"
+        },
+        {
+          "name": [
+            "--force"
+          ],
+          "required": false,
+          "help": "overwrite an existing file"
+        }
+      ]
+    },
+    {
+      "command": "redline analyze",
+      "help": "analyze Python source without executing it",
+      "arguments": [
+        {
+          "name": [
+            "path"
+          ],
+          "required": false,
+          "help": "Python source file or project directory"
+        },
+        {
+          "name": [
+            "--json"
+          ],
+          "required": false,
+          "help": "emit a JSON report"
+        },
+        {
+          "name": [
+            "--fail"
+          ],
+          "required": false,
+          "help": "exit 1 when findings are present"
+        },
+        {
+          "name": [
+            "--max-files"
+          ],
+          "required": false,
+          "help": "Python file budget (1\u201310000)"
+        },
+        {
+          "name": [
+            "--max-project-bytes"
+          ],
+          "required": false,
+          "help": "source byte budget (1\u201364000000)"
+        }
+      ]
+    },
+    {
+      "command": "redline audit-store",
+      "help": "count possible unmasked profile keys without displaying values",
+      "arguments": [
+        {
+          "name": [
+            "--store"
+          ],
+          "required": true,
+          "help": ""
+        },
+        {
+          "name": [
+            "--limit"
+          ],
+          "required": false,
+          "help": ""
+        }
+      ]
+    },
+    {
+      "command": "redline check",
+      "help": "refactor check: record a baseline of read-only requests, then compare a new version",
+      "arguments": [
+        {
+          "name": [
+            "rest"
+          ],
+          "required": false,
+          "help": "==SUPPRESS=="
+        }
+      ],
+      "subcommands": [
+        {
+          "command": "redline check comment",
+          "help": "post a saved report as the sticky PR comment and job summary (GitHub Actions)",
+          "arguments": [
+            {
+              "name": [
+                "report"
+              ],
+              "required": true,
+              "help": "report JSON (`--json`) or a Markdown file (`--markdown`)"
+            },
+            {
+              "name": [
+                "--marker-id"
+              ],
+              "required": false,
+              "help": "identifies the sticky comment (default redline-check); use one per suite"
+            },
+            {
+              "name": [
+                "--token-env"
+              ],
+              "required": false,
+              "help": "environment variable holding the token (default GITHUB_TOKEN)"
+            },
+            {
+              "name": [
+                "--no-comment"
+              ],
+              "required": false,
+              "help": "only write the job summary"
+            },
+            {
+              "name": [
+                "--dry-run"
+              ],
+              "required": false,
+              "help": "print the comment body, send nothing"
+            }
+          ]
+        },
+        {
+          "command": "redline check compare",
+          "help": "run a suite again and compare it with a baseline (exit 1 on --fail-on verdicts, 2 usage/suite error, 3 app unreachable)",
+          "arguments": [
+            {
+              "name": [
+                "suite"
+              ],
+              "required": true,
+              "help": "suite file (.toml or .json)"
+            },
+            {
+              "name": [
+                "--base-url"
+              ],
+              "required": false,
+              "help": "override the suite's base_url"
+            },
+            {
+              "name": [
+                "--store"
+              ],
+              "required": false,
+              "help": "the app's Redline store, for server-side metrics (default: the configured storage_path when that file exists)"
+            },
+            {
+              "name": [
+                "--no-store"
+              ],
+              "required": false,
+              "help": "client-side metrics only"
+            },
+            {
+              "name": [
+                "--label"
+              ],
+              "required": false,
+              "help": "a label for this run (e.g. 'before')"
+            },
+            {
+              "name": [
+                "--quiet",
+                "-q"
+              ],
+              "required": false,
+              "help": "no progress line"
+            },
+            {
+              "name": [
+                "--baseline"
+              ],
+              "required": false,
+              "help": "baseline JSON (default <suite>.baseline.json)"
+            },
+            {
+              "name": [
+                "--baseline-id"
+              ],
+              "required": false,
+              "help": "a baseline stored in --store"
+            },
+            {
+              "name": [
+                "--json"
+              ],
+              "required": false,
+              "help": "write the full report as JSON"
+            },
+            {
+              "name": [
+                "--markdown"
+              ],
+              "required": false,
+              "help": "write a Markdown PR comment"
+            },
+            {
+              "name": [
+                "--junit"
+              ],
+              "required": false,
+              "help": "write JUnit XML (one testcase per request)"
+            },
+            {
+              "name": [
+                "--fail-on"
+              ],
+              "required": false,
+              "help": "verdicts that make the exit code 1 (default slower,changed,broken; 'none')"
+            },
+            {
+              "name": [
+                "--slower-pct"
+              ],
+              "required": false,
+              "help": "override thresholds.slower_pct"
+            },
+            {
+              "name": [
+                "--slower-ms"
+              ],
+              "required": false,
+              "help": "override thresholds.slower_ms"
+            },
+            {
+              "name": [
+                "--no-color"
+              ],
+              "required": false,
+              "help": "no ANSI colours"
+            },
+            {
+              "name": [
+                "--ruff"
+              ],
+              "required": false,
+              "help": "include Ruff JSON from PATH, or run `ruff check --select F` and include it"
+            }
+          ]
+        },
+        {
+          "command": "redline check compare-live",
+          "help": "alternate requests between two running versions (exit 1 when responses differ)",
+          "arguments": [
+            {
+              "name": [
+                "suite"
+              ],
+              "required": true,
+              "help": "check suite (read-only requests only)"
+            },
+            {
+              "name": [
+                "--old"
+              ],
+              "required": true,
+              "help": "base URL of the current version"
+            },
+            {
+              "name": [
+                "--new"
+              ],
+              "required": true,
+              "help": "base URL of the changed version"
+            },
+            {
+              "name": [
+                "--rounds"
+              ],
+              "required": false,
+              "help": "alternating rounds (1-1000)"
+            },
+            {
+              "name": [
+                "--json"
+              ],
+              "required": false,
+              "help": "also write the result as JSON"
+            }
+          ]
+        },
+        {
+          "command": "redline check findings",
+          "help": "list findings in a compare report with an agent brief each (exit 1 when any are new)",
+          "arguments": [
+            {
+              "name": [
+                "report"
+              ],
+              "required": true,
+              "help": "report JSON written by `redline check compare --json`"
+            },
+            {
+              "name": [
+                "--new-only"
+              ],
+              "required": false,
+              "help": "only findings new since the baseline"
+            },
+            {
+              "name": [
+                "--json"
+              ],
+              "required": false,
+              "help": "print findings as JSON"
+            }
+          ]
+        },
+        {
+          "command": "redline check init",
+          "help": "write a suite from recorded read-only traffic",
+          "arguments": [
+            {
+              "name": [
+                "--from-traces"
+              ],
+              "required": true,
+              "help": "recorded traffic in the store"
+            },
+            {
+              "name": [
+                "--store"
+              ],
+              "required": false,
+              "help": "Redline store (default: configured path)"
+            },
+            {
+              "name": [
+                "--route"
+              ],
+              "required": false,
+              "help": "only routes matching this pattern (fnmatch; repeatable)"
+            },
+            {
+              "name": [
+                "--limit"
+              ],
+              "required": false,
+              "help": "at most N requests (20)"
+            },
+            {
+              "name": [
+                "--base-url"
+              ],
+              "required": false,
+              "help": ""
+            },
+            {
+              "name": [
+                "-o",
+                "--out"
+              ],
+              "required": false,
+              "help": "output (.toml/.json, - = stdout)"
+            },
+            {
+              "name": [
+                "--force"
+              ],
+              "required": false,
+              "help": "overwrite an existing file"
+            }
+          ]
+        },
+        {
+          "command": "redline check ratchet",
+          "help": "fail on new query-count/latency regressions against a committed file; --update tightens it",
+          "arguments": [
+            {
+              "name": [
+                "suite"
+              ],
+              "required": true,
+              "help": "suite file (.toml or .json)"
+            },
+            {
+              "name": [
+                "--base-url"
+              ],
+              "required": false,
+              "help": "override the suite's base_url"
+            },
+            {
+              "name": [
+                "--store"
+              ],
+              "required": false,
+              "help": "the app's Redline store, for server-side metrics (default: the configured storage_path when that file exists)"
+            },
+            {
+              "name": [
+                "--no-store"
+              ],
+              "required": false,
+              "help": "client-side metrics only"
+            },
+            {
+              "name": [
+                "--label"
+              ],
+              "required": false,
+              "help": "a label for this run (e.g. 'before')"
+            },
+            {
+              "name": [
+                "--quiet",
+                "-q"
+              ],
+              "required": false,
+              "help": "no progress line"
+            },
+            {
+              "name": [
+                "--ratchet-file"
+              ],
+              "required": false,
+              "help": "committed ratchet JSON (default <suite>.ratchet.json)"
+            },
+            {
+              "name": [
+                "--update"
+              ],
+              "required": false,
+              "help": "when nothing regressed, write the file: improvements tighten it, new endpoints are added (required to create the file)"
+            },
+            {
+              "name": [
+                "--no-latency"
+              ],
+              "required": false,
+              "help": "ratchet query counts only"
+            },
+            {
+              "name": [
+                "--latency-pct"
+              ],
+              "required": false,
+              "help": ""
+            },
+            {
+              "name": [
+                "--latency-ms"
+              ],
+              "required": false,
+              "help": ""
+            },
+            {
+              "name": [
+                "--json"
+              ],
+              "required": false,
+              "help": "write the verdict as JSON"
+            },
+            {
+              "name": [
+                "--markdown"
+              ],
+              "required": false,
+              "help": "write a Markdown summary"
+            }
+          ]
+        },
+        {
+          "command": "redline check record",
+          "help": "run a suite and write a baseline",
+          "arguments": [
+            {
+              "name": [
+                "suite"
+              ],
+              "required": true,
+              "help": "suite file (.toml or .json)"
+            },
+            {
+              "name": [
+                "--base-url"
+              ],
+              "required": false,
+              "help": "override the suite's base_url"
+            },
+            {
+              "name": [
+                "--store"
+              ],
+              "required": false,
+              "help": "the app's Redline store, for server-side metrics (default: the configured storage_path when that file exists)"
+            },
+            {
+              "name": [
+                "--no-store"
+              ],
+              "required": false,
+              "help": "client-side metrics only"
+            },
+            {
+              "name": [
+                "--label"
+              ],
+              "required": false,
+              "help": "a label for this run (e.g. 'before')"
+            },
+            {
+              "name": [
+                "--quiet",
+                "-q"
+              ],
+              "required": false,
+              "help": "no progress line"
+            },
+            {
+              "name": [
+                "--out"
+              ],
+              "required": false,
+              "help": "baseline file (default <suite>.baseline.json)"
+            }
+          ]
+        },
+        {
+          "command": "redline check run",
+          "help": "record when there is no baseline file yet, else compare",
+          "arguments": [
+            {
+              "name": [
+                "suite"
+              ],
+              "required": true,
+              "help": "suite file (.toml or .json)"
+            },
+            {
+              "name": [
+                "--base-url"
+              ],
+              "required": false,
+              "help": "override the suite's base_url"
+            },
+            {
+              "name": [
+                "--store"
+              ],
+              "required": false,
+              "help": "the app's Redline store, for server-side metrics (default: the configured storage_path when that file exists)"
+            },
+            {
+              "name": [
+                "--no-store"
+              ],
+              "required": false,
+              "help": "client-side metrics only"
+            },
+            {
+              "name": [
+                "--label"
+              ],
+              "required": false,
+              "help": "a label for this run (e.g. 'before')"
+            },
+            {
+              "name": [
+                "--quiet",
+                "-q"
+              ],
+              "required": false,
+              "help": "no progress line"
+            },
+            {
+              "name": [
+                "--baseline"
+              ],
+              "required": false,
+              "help": "baseline JSON (default <suite>.baseline.json)"
+            },
+            {
+              "name": [
+                "--baseline-id"
+              ],
+              "required": false,
+              "help": "a baseline stored in --store"
+            },
+            {
+              "name": [
+                "--json"
+              ],
+              "required": false,
+              "help": "write the full report as JSON"
+            },
+            {
+              "name": [
+                "--markdown"
+              ],
+              "required": false,
+              "help": "write a Markdown PR comment"
+            },
+            {
+              "name": [
+                "--junit"
+              ],
+              "required": false,
+              "help": "write JUnit XML (one testcase per request)"
+            },
+            {
+              "name": [
+                "--fail-on"
+              ],
+              "required": false,
+              "help": "verdicts that make the exit code 1 (default slower,changed,broken; 'none')"
+            },
+            {
+              "name": [
+                "--slower-pct"
+              ],
+              "required": false,
+              "help": "override thresholds.slower_pct"
+            },
+            {
+              "name": [
+                "--slower-ms"
+              ],
+              "required": false,
+              "help": "override thresholds.slower_ms"
+            },
+            {
+              "name": [
+                "--no-color"
+              ],
+              "required": false,
+              "help": "no ANSI colours"
+            },
+            {
+              "name": [
+                "--ruff"
+              ],
+              "required": false,
+              "help": "include Ruff JSON from PATH, or run `ruff check --select F` and include it"
+            },
+            {
+              "name": [
+                "--out"
+              ],
+              "required": false,
+              "help": "baseline file to write when recording"
+            }
+          ]
+        },
+        {
+          "command": "redline check show",
+          "help": "print a saved report (JSON) again",
+          "arguments": [
+            {
+              "name": [
+                "report"
+              ],
+              "required": true,
+              "help": "report JSON written by `redline check compare --json`"
+            },
+            {
+              "name": [
+                "--fail-on"
+              ],
+              "required": false,
+              "help": ""
+            },
+            {
+              "name": [
+                "--markdown"
+              ],
+              "required": false,
+              "help": "also write the Markdown PR comment"
+            },
+            {
+              "name": [
+                "--junit"
+              ],
+              "required": false,
+              "help": "also write JUnit XML"
+            },
+            {
+              "name": [
+                "--no-color"
+              ],
+              "required": false,
+              "help": ""
+            },
+            {
+              "name": [
+                "--ruff"
+              ],
+              "required": false,
+              "help": "include Ruff JSON from PATH, or run `ruff check --select F` and include it"
+            }
+          ]
+        },
+        {
+          "command": "redline check verify",
+          "help": "did a fix remove a finding? gone/still_present/inconclusive from a saved report (exit 0 only when gone)",
+          "arguments": [
+            {
+              "name": [
+                "report"
+              ],
+              "required": true,
+              "help": "report JSON written by `redline check compare --json`"
+            },
+            {
+              "name": [
+                "--kind"
+              ],
+              "required": true,
+              "help": "issue kind to verify, e.g. n_plus_one"
+            },
+            {
+              "name": [
+                "--fingerprint"
+              ],
+              "required": false,
+              "help": "limit to one SQL/route fingerprint"
+            },
+            {
+              "name": [
+                "--min-samples"
+              ],
+              "required": false,
+              "help": "calls needed after the change to call it gone"
+            },
+            {
+              "name": [
+                "--json"
+              ],
+              "required": false,
+              "help": "print the verdict as JSON"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "command": "redline check-imports",
+      "help": "explicitly import a development target in an isolated subprocess",
+      "arguments": [
+        {
+          "name": [
+            "target"
+          ],
+          "required": true,
+          "help": "module or module:attribute to import in a development subprocess"
+        },
+        {
+          "name": [
+            "--timeout"
+          ],
+          "required": false,
+          "help": ""
+        }
+      ]
+    },
+    {
+      "command": "redline check-sql",
+      "help": "lint SQL in Python without importing the app",
+      "arguments": [
+        {
+          "name": [
+            "paths"
+          ],
+          "required": true,
+          "help": ""
+        },
+        {
+          "name": [
+            "--dialect"
+          ],
+          "required": false,
+          "help": ""
+        },
+        {
+          "name": [
+            "--json"
+          ],
+          "required": false,
+          "help": ""
+        },
+        {
+          "name": [
+            "--junit"
+          ],
+          "required": false,
+          "help": ""
+        },
+        {
+          "name": [
+            "--dsn"
+          ],
+          "required": false,
+          "help": "compile explicit files against an isolated development database (optional SQLAlchemy required)"
+        },
+        {
+          "name": [
+            "--schema-snapshot"
+          ],
+          "required": false,
+          "help": "compare/update default-schema metadata with --dsn"
+        },
+        {
+          "name": [
+            "--baseline"
+          ],
+          "required": false,
+          "help": ""
+        },
+        {
+          "name": [
+            "--write-baseline"
+          ],
+          "required": false,
+          "help": ""
+        },
+        {
+          "name": [
+            "--max-files"
+          ],
+          "required": false,
+          "help": "Python file budget (1\u201310000)"
+        },
+        {
+          "name": [
+            "--max-project-bytes"
+          ],
+          "required": false,
+          "help": "source byte budget (1\u201364000000)"
+        }
+      ]
+    },
+    {
+      "command": "redline config",
+      "help": "print the effective configuration, where each value comes from, and warnings",
+      "arguments": [
+        {
+          "name": [
+            "--json"
+          ],
+          "required": false,
+          "help": "print JSON"
+        },
+        {
+          "name": [
+            "--project-root"
+          ],
+          "required": false,
+          "help": "where to look for redline.toml / pyproject.toml (default: the current directory)"
+        }
+      ]
+    },
+    {
+      "command": "redline diagnose",
+      "help": "preview (or, opted in, send) a redacted finding to an AI provider for diagnosis",
+      "arguments": [
+        {
+          "name": [
+            "issue_id"
+          ],
+          "required": true,
+          "help": "issue id from the UI, `redline mcp` or `fix-prompt`"
+        },
+        {
+          "name": [
+            "--store"
+          ],
+          "required": true,
+          "help": "path to the redline store"
+        },
+        {
+          "name": [
+            "--window"
+          ],
+          "required": false,
+          "help": "look-back window (default 7d)"
+        },
+        {
+          "name": [
+            "--send"
+          ],
+          "required": false,
+          "help": "really send it (needs ai_diagnosis and a key)"
+        }
+      ]
+    },
+    {
+      "command": "redline digest",
+      "help": "post newly seen issues to a chat webhook (deduplicated, with a state file)",
+      "arguments": [
+        {
+          "name": [
+            "--store"
+          ],
+          "required": true,
+          "help": "Redline SQLite store"
+        },
+        {
+          "name": [
+            "--webhook"
+          ],
+          "required": false,
+          "help": "Slack-compatible incoming webhook"
+        },
+        {
+          "name": [
+            "--since"
+          ],
+          "required": false,
+          "help": "look back this far (default 24h)"
+        },
+        {
+          "name": [
+            "--min-severity"
+          ],
+          "required": false,
+          "help": "only issues at or above this severity"
+        },
+        {
+          "name": [
+            "--state"
+          ],
+          "required": false,
+          "help": "remembers what was sent (default: digest-state.json next to the store)"
+        },
+        {
+          "name": [
+            "--ui-url"
+          ],
+          "required": false,
+          "help": "link to the Redline UI in the message"
+        },
+        {
+          "name": [
+            "--title"
+          ],
+          "required": false,
+          "help": "first line of the message"
+        },
+        {
+          "name": [
+            "--dry-run"
+          ],
+          "required": false,
+          "help": "print the payload, send nothing"
+        }
+      ]
+    },
+    {
+      "command": "redline doctor",
+      "help": "check storage, the UI bundle and the access settings",
+      "arguments": [
+        {
+          "name": [
+            "--json"
+          ],
+          "required": false,
+          "help": "print JSON"
+        },
+        {
+          "name": [
+            "--project-root"
+          ],
+          "required": false,
+          "help": "where to look for redline.toml / pyproject.toml (default: the current directory)"
+        },
+        {
+          "name": [
+            "--production"
+          ],
+          "required": false,
+          "help": "also check production recording-only policy settings"
+        },
+        {
+          "name": [
+            "--strict"
+          ],
+          "required": false,
+          "help": "return failure when any check warns; a SQLite store on a network filesystem or shared by several worker processes is reported as FAIL"
+        },
+        {
+          "name": [
+            "--workers"
+          ],
+          "required": false,
+          "help": "the number of worker processes the deployment runs (default: read WEB_CONCURRENCY, GUNICORN_CMD_ARGS and UVICORN_WORKERS)"
+        }
+      ]
+    },
+    {
+      "command": "redline export",
+      "help": "preview or explicitly send sanitized OTLP recording summaries",
+      "arguments": [
+        {
+          "name": [
+            "target"
+          ],
+          "required": false,
+          "help": "recording id or load run id to summarise (with --html)"
+        },
+        {
+          "name": [
+            "--html"
+          ],
+          "required": false,
+          "help": "write one self-contained, redacted HTML summary of TARGET instead of OTLP"
+        },
+        {
+          "name": [
+            "--store"
+          ],
+          "required": true,
+          "help": ""
+        },
+        {
+          "name": [
+            "--endpoint"
+          ],
+          "required": false,
+          "help": ""
+        },
+        {
+          "name": [
+            "--logs-endpoint"
+          ],
+          "required": false,
+          "help": "optional OTLP logs endpoint for recorded issues"
+        },
+        {
+          "name": [
+            "--include-sql"
+          ],
+          "required": false,
+          "help": "include raw SQL text instead of the normalized fingerprint"
+        },
+        {
+          "name": [
+            "--send"
+          ],
+          "required": false,
+          "help": "send the displayed spans and logs to the explicit collectors"
+        },
+        {
+          "name": [
+            "--limit"
+          ],
+          "required": false,
+          "help": ""
+        }
+      ]
+    },
+    {
+      "command": "redline fix-prompt",
+      "help": "write a brief an AI agent can act on to fix one finding",
+      "arguments": [
+        {
+          "name": [
+            "issue_id"
+          ],
+          "required": true,
+          "help": "issue id from `redline mcp` list_issues or the UI"
+        },
+        {
+          "name": [
+            "--store"
+          ],
+          "required": true,
+          "help": "path to the redline store"
+        },
+        {
+          "name": [
+            "--window"
+          ],
+          "required": false,
+          "help": "look-back window (default 7d)"
+        },
+        {
+          "name": [
+            "--out"
+          ],
+          "required": false,
+          "help": "write the brief to FILE"
+        }
+      ]
+    },
+    {
+      "command": "redline hash-password",
+      "help": "hash a password for basic_users (asks twice; reads one line when piped)",
+      "arguments": [
+        {
+          "name": [
+            "--iterations"
+          ],
+          "required": false,
+          "help": "PBKDF2-SHA256 iterations (default 600000)"
+        }
+      ]
+    },
+    {
+      "command": "redline init",
+      "help": "detect the framework and write a starter redline.toml (never overwrites without --force)",
+      "arguments": [
+        {
+          "name": [
+            "--dir"
+          ],
+          "required": false,
+          "help": "project directory (default .)"
+        },
+        {
+          "name": [
+            "--framework"
+          ],
+          "required": false,
+          "help": "skip detection (manage.py, dependencies, installed packages)"
+        },
+        {
+          "name": [
+            "--pyproject"
+          ],
+          "required": false,
+          "help": "append a [tool.redline] table to pyproject.toml instead of writing redline.toml"
+        },
+        {
+          "name": [
+            "--force"
+          ],
+          "required": false,
+          "help": "overwrite an existing redline.toml"
+        },
+        {
+          "name": [
+            "--dry-run"
+          ],
+          "required": false,
+          "help": "print what would be written"
+        }
+      ]
+    },
+    {
+      "command": "redline instrumentation",
+      "help": "show what redline is blind to: inactive integrations, truncated traces, dropped writes",
+      "arguments": [
+        {
+          "name": [
+            "--store"
+          ],
+          "required": true,
+          "help": "path to the recording store"
+        },
+        {
+          "name": [
+            "--window"
+          ],
+          "required": false,
+          "help": "seconds to look back"
+        },
+        {
+          "name": [
+            "--json"
+          ],
+          "required": false,
+          "help": "print the report as JSON"
+        }
+      ]
+    },
+    {
+      "command": "redline load",
+      "help": "run a load test (open model) against a running app",
+      "arguments": [
+        {
+          "name": [
+            "scenario"
+          ],
+          "required": true,
+          "help": "scenario file (.toml, .json or .py defining SCENARIO)"
+        },
+        {
+          "name": [
+            "--rps"
+          ],
+          "required": false,
+          "help": "constant rate (requests/s)"
+        },
+        {
+          "name": [
+            "--ramp"
+          ],
+          "required": false,
+          "help": "ramp linearly from A to B rps"
+        },
+        {
+          "name": [
+            "--steps"
+          ],
+          "required": false,
+          "help": "steps from A to B rps, +STEP each"
+        },
+        {
+          "name": [
+            "--duration"
+          ],
+          "required": false,
+          "help": "total duration"
+        },
+        {
+          "name": [
+            "--step-duration"
+          ],
+          "required": false,
+          "help": "duration of each step"
+        },
+        {
+          "name": [
+            "--poisson"
+          ],
+          "required": false,
+          "help": "Poisson arrivals (default fixed)"
+        },
+        {
+          "name": [
+            "--workers"
+          ],
+          "required": false,
+          "help": "worker processes (default \u2264 8)"
+        },
+        {
+          "name": [
+            "--base-url"
+          ],
+          "required": false,
+          "help": "override the scenario's base_url"
+        },
+        {
+          "name": [
+            "--ui-url"
+          ],
+          "required": false,
+          "help": "where the Redline UI is mounted, for the printed link (default: the scenario's ui_url, else mount_path from the project's Redline config, else /_redline)"
+        },
+        {
+          "name": [
+            "--name"
+          ],
+          "required": false,
+          "help": "run name (default: the scenario's)"
+        },
+        {
+          "name": [
+            "--store"
+          ],
+          "required": false,
+          "help": "Redline store to write the run to (default .redline/redline.db)"
+        },
+        {
+          "name": [
+            "--no-store"
+          ],
+          "required": false,
+          "help": "do not write to the store"
+        },
+        {
+          "name": [
+            "--json"
+          ],
+          "required": false,
+          "help": "also write the results as JSON"
+        },
+        {
+          "name": [
+            "--fail-p95-ms"
+          ],
+          "required": false,
+          "help": "exit 1 if p95 > X ms"
+        },
+        {
+          "name": [
+            "--fail-error-rate"
+          ],
+          "required": false,
+          "help": "exit 1 if error rate > Y"
+        },
+        {
+          "name": [
+            "--quiet",
+            "-q"
+          ],
+          "required": false,
+          "help": "only print the final table"
+        },
+        {
+          "name": [
+            "--run-id"
+          ],
+          "required": false,
+          "help": "==SUPPRESS=="
+        }
+      ],
+      "subcommands": [
+        {
+          "command": "redline load init",
+          "help": "write a scenario file",
+          "arguments": [
+            {
+              "name": [
+                "--from-openapi"
+              ],
+              "required": false,
+              "help": "OpenAPI JSON (URL or file)"
+            },
+            {
+              "name": [
+                "--from-traces"
+              ],
+              "required": false,
+              "help": "captured traffic in the store"
+            },
+            {
+              "name": [
+                "--store"
+              ],
+              "required": false,
+              "help": ""
+            },
+            {
+              "name": [
+                "--window"
+              ],
+              "required": false,
+              "help": "traffic window for --from-traces (24h)"
+            },
+            {
+              "name": [
+                "--top"
+              ],
+              "required": false,
+              "help": "endpoints to keep (--from-traces)"
+            },
+            {
+              "name": [
+                "--include-writes"
+              ],
+              "required": false,
+              "help": "also POST/PUT/PATCH/DELETE"
+            },
+            {
+              "name": [
+                "--base-url"
+              ],
+              "required": false,
+              "help": ""
+            },
+            {
+              "name": [
+                "-o",
+                "--out"
+              ],
+              "required": false,
+              "help": "output (.toml/.json, - = stdout)"
+            },
+            {
+              "name": [
+                "--force"
+              ],
+              "required": false,
+              "help": "overwrite an existing file"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "command": "redline mcp",
+      "help": "serve read-only redline tools to an AI agent over MCP (stdio)",
+      "arguments": [
+        {
+          "name": [
+            "--store"
+          ],
+          "required": true,
+          "help": "path to an existing redline store"
+        },
+        {
+          "name": [
+            "--audit"
+          ],
+          "required": false,
+          "help": "append a JSONL record of each tool call"
+        }
+      ]
+    },
+    {
+      "command": "redline schema-watch",
+      "help": "recompile SQL after schema drift and optionally raise a UI issue",
+      "arguments": [
+        {
+          "name": [
+            "paths"
+          ],
+          "required": true,
+          "help": "explicit Python files to compile"
+        },
+        {
+          "name": [
+            "--dsn"
+          ],
+          "required": true,
+          "help": "isolated development SQLAlchemy DSN"
+        },
+        {
+          "name": [
+            "--snapshot"
+          ],
+          "required": true,
+          "help": "local schema snapshot path"
+        },
+        {
+          "name": [
+            "--interval"
+          ],
+          "required": false,
+          "help": "seconds between checks; 0 (default) checks once"
+        },
+        {
+          "name": [
+            "--full"
+          ],
+          "required": false,
+          "help": "compile every statement"
+        },
+        {
+          "name": [
+            "--store"
+          ],
+          "required": false,
+          "help": "persist a schema_drift issue to this SQLite store for the UI"
+        },
+        {
+          "name": [
+            "--json"
+          ],
+          "required": false,
+          "help": ""
+        }
+      ]
+    }
+  ],
+  "check": [
+    {
+      "command": "redline check comment",
+      "help": "post a saved report as the sticky PR comment and job summary (GitHub Actions)",
+      "arguments": [
+        {
+          "name": [
+            "report"
+          ],
+          "required": true,
+          "help": "report JSON (`--json`) or a Markdown file (`--markdown`)"
+        },
+        {
+          "name": [
+            "--marker-id"
+          ],
+          "required": false,
+          "help": "identifies the sticky comment (default redline-check); use one per suite"
+        },
+        {
+          "name": [
+            "--token-env"
+          ],
+          "required": false,
+          "help": "environment variable holding the token (default GITHUB_TOKEN)"
+        },
+        {
+          "name": [
+            "--no-comment"
+          ],
+          "required": false,
+          "help": "only write the job summary"
+        },
+        {
+          "name": [
+            "--dry-run"
+          ],
+          "required": false,
+          "help": "print the comment body, send nothing"
+        }
+      ]
+    },
+    {
+      "command": "redline check compare",
+      "help": "run a suite again and compare it with a baseline (exit 1 on --fail-on verdicts, 2 usage/suite error, 3 app unreachable)",
+      "arguments": [
+        {
+          "name": [
+            "suite"
+          ],
+          "required": true,
+          "help": "suite file (.toml or .json)"
+        },
+        {
+          "name": [
+            "--base-url"
+          ],
+          "required": false,
+          "help": "override the suite's base_url"
+        },
+        {
+          "name": [
+            "--store"
+          ],
+          "required": false,
+          "help": "the app's Redline store, for server-side metrics (default: the configured storage_path when that file exists)"
+        },
+        {
+          "name": [
+            "--no-store"
+          ],
+          "required": false,
+          "help": "client-side metrics only"
+        },
+        {
+          "name": [
+            "--label"
+          ],
+          "required": false,
+          "help": "a label for this run (e.g. 'before')"
+        },
+        {
+          "name": [
+            "--quiet",
+            "-q"
+          ],
+          "required": false,
+          "help": "no progress line"
+        },
+        {
+          "name": [
+            "--baseline"
+          ],
+          "required": false,
+          "help": "baseline JSON (default <suite>.baseline.json)"
+        },
+        {
+          "name": [
+            "--baseline-id"
+          ],
+          "required": false,
+          "help": "a baseline stored in --store"
+        },
+        {
+          "name": [
+            "--json"
+          ],
+          "required": false,
+          "help": "write the full report as JSON"
+        },
+        {
+          "name": [
+            "--markdown"
+          ],
+          "required": false,
+          "help": "write a Markdown PR comment"
+        },
+        {
+          "name": [
+            "--junit"
+          ],
+          "required": false,
+          "help": "write JUnit XML (one testcase per request)"
+        },
+        {
+          "name": [
+            "--fail-on"
+          ],
+          "required": false,
+          "help": "verdicts that make the exit code 1 (default slower,changed,broken; 'none')"
+        },
+        {
+          "name": [
+            "--slower-pct"
+          ],
+          "required": false,
+          "help": "override thresholds.slower_pct"
+        },
+        {
+          "name": [
+            "--slower-ms"
+          ],
+          "required": false,
+          "help": "override thresholds.slower_ms"
+        },
+        {
+          "name": [
+            "--no-color"
+          ],
+          "required": false,
+          "help": "no ANSI colours"
+        },
+        {
+          "name": [
+            "--ruff"
+          ],
+          "required": false,
+          "help": "include Ruff JSON from PATH, or run `ruff check --select F` and include it"
+        }
+      ]
+    },
+    {
+      "command": "redline check compare-live",
+      "help": "alternate requests between two running versions (exit 1 when responses differ)",
+      "arguments": [
+        {
+          "name": [
+            "suite"
+          ],
+          "required": true,
+          "help": "check suite (read-only requests only)"
+        },
+        {
+          "name": [
+            "--old"
+          ],
+          "required": true,
+          "help": "base URL of the current version"
+        },
+        {
+          "name": [
+            "--new"
+          ],
+          "required": true,
+          "help": "base URL of the changed version"
+        },
+        {
+          "name": [
+            "--rounds"
+          ],
+          "required": false,
+          "help": "alternating rounds (1-1000)"
+        },
+        {
+          "name": [
+            "--json"
+          ],
+          "required": false,
+          "help": "also write the result as JSON"
+        }
+      ]
+    },
+    {
+      "command": "redline check findings",
+      "help": "list findings in a compare report with an agent brief each (exit 1 when any are new)",
+      "arguments": [
+        {
+          "name": [
+            "report"
+          ],
+          "required": true,
+          "help": "report JSON written by `redline check compare --json`"
+        },
+        {
+          "name": [
+            "--new-only"
+          ],
+          "required": false,
+          "help": "only findings new since the baseline"
+        },
+        {
+          "name": [
+            "--json"
+          ],
+          "required": false,
+          "help": "print findings as JSON"
+        }
+      ]
+    },
+    {
+      "command": "redline check init",
+      "help": "write a suite from recorded read-only traffic",
+      "arguments": [
+        {
+          "name": [
+            "--from-traces"
+          ],
+          "required": true,
+          "help": "recorded traffic in the store"
+        },
+        {
+          "name": [
+            "--store"
+          ],
+          "required": false,
+          "help": "Redline store (default: configured path)"
+        },
+        {
+          "name": [
+            "--route"
+          ],
+          "required": false,
+          "help": "only routes matching this pattern (fnmatch; repeatable)"
+        },
+        {
+          "name": [
+            "--limit"
+          ],
+          "required": false,
+          "help": "at most N requests (20)"
+        },
+        {
+          "name": [
+            "--base-url"
+          ],
+          "required": false,
+          "help": ""
+        },
+        {
+          "name": [
+            "-o",
+            "--out"
+          ],
+          "required": false,
+          "help": "output (.toml/.json, - = stdout)"
+        },
+        {
+          "name": [
+            "--force"
+          ],
+          "required": false,
+          "help": "overwrite an existing file"
+        }
+      ]
+    },
+    {
+      "command": "redline check ratchet",
+      "help": "fail on new query-count/latency regressions against a committed file; --update tightens it",
+      "arguments": [
+        {
+          "name": [
+            "suite"
+          ],
+          "required": true,
+          "help": "suite file (.toml or .json)"
+        },
+        {
+          "name": [
+            "--base-url"
+          ],
+          "required": false,
+          "help": "override the suite's base_url"
+        },
+        {
+          "name": [
+            "--store"
+          ],
+          "required": false,
+          "help": "the app's Redline store, for server-side metrics (default: the configured storage_path when that file exists)"
+        },
+        {
+          "name": [
+            "--no-store"
+          ],
+          "required": false,
+          "help": "client-side metrics only"
+        },
+        {
+          "name": [
+            "--label"
+          ],
+          "required": false,
+          "help": "a label for this run (e.g. 'before')"
+        },
+        {
+          "name": [
+            "--quiet",
+            "-q"
+          ],
+          "required": false,
+          "help": "no progress line"
+        },
+        {
+          "name": [
+            "--ratchet-file"
+          ],
+          "required": false,
+          "help": "committed ratchet JSON (default <suite>.ratchet.json)"
+        },
+        {
+          "name": [
+            "--update"
+          ],
+          "required": false,
+          "help": "when nothing regressed, write the file: improvements tighten it, new endpoints are added (required to create the file)"
+        },
+        {
+          "name": [
+            "--no-latency"
+          ],
+          "required": false,
+          "help": "ratchet query counts only"
+        },
+        {
+          "name": [
+            "--latency-pct"
+          ],
+          "required": false,
+          "help": ""
+        },
+        {
+          "name": [
+            "--latency-ms"
+          ],
+          "required": false,
+          "help": ""
+        },
+        {
+          "name": [
+            "--json"
+          ],
+          "required": false,
+          "help": "write the verdict as JSON"
+        },
+        {
+          "name": [
+            "--markdown"
+          ],
+          "required": false,
+          "help": "write a Markdown summary"
+        }
+      ]
+    },
+    {
+      "command": "redline check record",
+      "help": "run a suite and write a baseline",
+      "arguments": [
+        {
+          "name": [
+            "suite"
+          ],
+          "required": true,
+          "help": "suite file (.toml or .json)"
+        },
+        {
+          "name": [
+            "--base-url"
+          ],
+          "required": false,
+          "help": "override the suite's base_url"
+        },
+        {
+          "name": [
+            "--store"
+          ],
+          "required": false,
+          "help": "the app's Redline store, for server-side metrics (default: the configured storage_path when that file exists)"
+        },
+        {
+          "name": [
+            "--no-store"
+          ],
+          "required": false,
+          "help": "client-side metrics only"
+        },
+        {
+          "name": [
+            "--label"
+          ],
+          "required": false,
+          "help": "a label for this run (e.g. 'before')"
+        },
+        {
+          "name": [
+            "--quiet",
+            "-q"
+          ],
+          "required": false,
+          "help": "no progress line"
+        },
+        {
+          "name": [
+            "--out"
+          ],
+          "required": false,
+          "help": "baseline file (default <suite>.baseline.json)"
+        }
+      ]
+    },
+    {
+      "command": "redline check run",
+      "help": "record when there is no baseline file yet, else compare",
+      "arguments": [
+        {
+          "name": [
+            "suite"
+          ],
+          "required": true,
+          "help": "suite file (.toml or .json)"
+        },
+        {
+          "name": [
+            "--base-url"
+          ],
+          "required": false,
+          "help": "override the suite's base_url"
+        },
+        {
+          "name": [
+            "--store"
+          ],
+          "required": false,
+          "help": "the app's Redline store, for server-side metrics (default: the configured storage_path when that file exists)"
+        },
+        {
+          "name": [
+            "--no-store"
+          ],
+          "required": false,
+          "help": "client-side metrics only"
+        },
+        {
+          "name": [
+            "--label"
+          ],
+          "required": false,
+          "help": "a label for this run (e.g. 'before')"
+        },
+        {
+          "name": [
+            "--quiet",
+            "-q"
+          ],
+          "required": false,
+          "help": "no progress line"
+        },
+        {
+          "name": [
+            "--baseline"
+          ],
+          "required": false,
+          "help": "baseline JSON (default <suite>.baseline.json)"
+        },
+        {
+          "name": [
+            "--baseline-id"
+          ],
+          "required": false,
+          "help": "a baseline stored in --store"
+        },
+        {
+          "name": [
+            "--json"
+          ],
+          "required": false,
+          "help": "write the full report as JSON"
+        },
+        {
+          "name": [
+            "--markdown"
+          ],
+          "required": false,
+          "help": "write a Markdown PR comment"
+        },
+        {
+          "name": [
+            "--junit"
+          ],
+          "required": false,
+          "help": "write JUnit XML (one testcase per request)"
+        },
+        {
+          "name": [
+            "--fail-on"
+          ],
+          "required": false,
+          "help": "verdicts that make the exit code 1 (default slower,changed,broken; 'none')"
+        },
+        {
+          "name": [
+            "--slower-pct"
+          ],
+          "required": false,
+          "help": "override thresholds.slower_pct"
+        },
+        {
+          "name": [
+            "--slower-ms"
+          ],
+          "required": false,
+          "help": "override thresholds.slower_ms"
+        },
+        {
+          "name": [
+            "--no-color"
+          ],
+          "required": false,
+          "help": "no ANSI colours"
+        },
+        {
+          "name": [
+            "--ruff"
+          ],
+          "required": false,
+          "help": "include Ruff JSON from PATH, or run `ruff check --select F` and include it"
+        },
+        {
+          "name": [
+            "--out"
+          ],
+          "required": false,
+          "help": "baseline file to write when recording"
+        }
+      ]
+    },
+    {
+      "command": "redline check show",
+      "help": "print a saved report (JSON) again",
+      "arguments": [
+        {
+          "name": [
+            "report"
+          ],
+          "required": true,
+          "help": "report JSON written by `redline check compare --json`"
+        },
+        {
+          "name": [
+            "--fail-on"
+          ],
+          "required": false,
+          "help": ""
+        },
+        {
+          "name": [
+            "--markdown"
+          ],
+          "required": false,
+          "help": "also write the Markdown PR comment"
+        },
+        {
+          "name": [
+            "--junit"
+          ],
+          "required": false,
+          "help": "also write JUnit XML"
+        },
+        {
+          "name": [
+            "--no-color"
+          ],
+          "required": false,
+          "help": ""
+        },
+        {
+          "name": [
+            "--ruff"
+          ],
+          "required": false,
+          "help": "include Ruff JSON from PATH, or run `ruff check --select F` and include it"
+        }
+      ]
+    },
+    {
+      "command": "redline check verify",
+      "help": "did a fix remove a finding? gone/still_present/inconclusive from a saved report (exit 0 only when gone)",
+      "arguments": [
+        {
+          "name": [
+            "report"
+          ],
+          "required": true,
+          "help": "report JSON written by `redline check compare --json`"
+        },
+        {
+          "name": [
+            "--kind"
+          ],
+          "required": true,
+          "help": "issue kind to verify, e.g. n_plus_one"
+        },
+        {
+          "name": [
+            "--fingerprint"
+          ],
+          "required": false,
+          "help": "limit to one SQL/route fingerprint"
+        },
+        {
+          "name": [
+            "--min-samples"
+          ],
+          "required": false,
+          "help": "calls needed after the change to call it gone"
+        },
+        {
+          "name": [
+            "--json"
+          ],
+          "required": false,
+          "help": "print the verdict as JSON"
+        }
+      ]
+    }
+  ]
+}

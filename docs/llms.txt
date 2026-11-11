@@ -1,0 +1,90 @@
+# Redline
+
+> A request profiler, backend analyzer and load tester for Django, FastAPI, Flask and Litestar. N+1 detection with fix diffs, one-click EXPLAIN, flamegraphs, load testing and a fast web UI.
+
+Redline records real requests in Django, FastAPI, Flask and Litestar apps and reports N+1 queries, slow queries, blocking calls, and slow external or LLM calls. Agents can read its findings over MCP (`redline mcp`), get a fix brief (`redline fix-prompt`) and verify a fix (`redline check verify`). Prompt and completion text is never stored.
+
+Full text of every page: https://pythondeveloper6.github.io/redline/llms-full.txt
+Settings JSON Schema: https://pythondeveloper6.github.io/redline/reference/settings.schema.json
+CLI reference as JSON: https://pythondeveloper6.github.io/redline/reference/cli.json
+
+## Overview
+
+- [Home](https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/index.md): Django, FastAPI, Flask and Litestar.
+
+## Get started
+
+- [Getting started](https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/getting-started.md): This page takes a Django, FastAPI, Flask or Litestar project from nothing to a populated Redline UI in a few minutes, then shows you how to confirm everything is wired up and what to do next.
+- [How it works](https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/how-it-works.md): Redline is a small pipeline.
+- [Example projects](https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/examples.md): The repository ships a runnable shop project per framework under examples/.
+- [The UI](https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/the-ui.md): The web UI is a React single-page app, built ahead of time and shipped inside redline-core.
+- [Server-Timing and the badge](https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/server-timing-badge.md): Two small features put Redline's numbers where you are already looking: in the browser's developer tools, and in the corner of the page you are developing.
+
+## Guide
+
+- [N+1 detection](https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/n-plus-one.md): An **N+1** is one query to fetch a list, then one more query per item to fetch something related.
+- [EXPLAIN](https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/explain.md): Any captured SELECT can be explained from the UI with one click.
+- [Flamegraphs](https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/flamegraphs.md): A flamegraph shows where a request spent its time **in Python**, call by call.
+- [Custom spans](https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/custom-spans.md): Redline records SQL, cache, template and outbound HTTP automatically.
+- [Issues and endpoints](https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/issues-and-endpoints.md): The request list shows single requests.
+- [Refactor check](https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/refactor-check.md): You are about to change code that works.
+
+## Analysis
+
+- [Detectors overview](https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/detectors.md): Version 0.1 found four kinds of problem: N+1 queries, duplicate queries, slow queries and requests with too many queries.
+- [Performance workflows](https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/performance-workflows.md): The v0.3 development build connects findings, response comparison and regression checks.
+- [Real-world workflows](https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/real-world-workflows.md): These tools are part of the **0.5.0b1 development release**.
+- [Database](https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/database.md): The request detail page tells you what *one* request did to the database.
+- [Static N+1 scan](https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/static-scan.md): Runtime detection finds an N+1 only after something has run it, and only on a path your test traffic reached.
+- [Large and unbounded results](https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/result-size.md): A query can be perfectly indexed and still be the slowest thing in the request, because of how much it returns.
+- [Transactions and locks](https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/transactions.md): A database transaction holds a connection from the pool and, once it has written anything, row locks that other requests can queue behind.
+- [GraphQL](https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/graphql.md): GraphQL is the natural home of the N+1: a query asks for orders { customer { name } } and the default resolver loads each customer separately.
+- [Blocking in async](https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/async-blocking.md): An async def handler runs on the event loop, one thread shared by every request.
+- [Slow serializers](https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/serializers.md): Turning objects into a response is real work.
+- [External calls](https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/external-calls.md): Most backends spend more time waiting on other services than on their own database.
+- [Cache efficiency](https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/cache-efficiency.md): A cache that nobody checks tends to rot: keys that always miss, values written and never read, a hot key that expires and sends fifty requests to the database at once.
+- [Logs and exceptions](https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/logs-and-exceptions.md): A slow or failing request is a story, and the SQL timeline is only half of it.
+
+## For AI agents
+
+- [Working with agents](https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/agents.md): Redline is built so a coding agent can find a performance problem, fix it and prove the fix, using recorded data instead of guesses.
+- [LLM-call observability](https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/llm.md): Redline records calls to the Anthropic and OpenAI SDKs as llm_call spans, next to the SQL and HTTP spans of the same request, and flags patterns that waste time or money.
+
+## Load and history
+
+- [Load testing](https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/load-testing.md): Load testers such as Locust, k6 and Gatling see an application from the outside.
+- [History and releases](https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/history.md): Redline keeps individual traces for a few days.
+
+## Integrations
+
+- [Django](https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/django.md): django-redline adds Redline to a Django project: one app, one middleware and one URL mount.
+- [Django Ninja](https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/django-ninja.md): Django Ninja apps are served by django-redline; there is no separate package.
+- [FastAPI](https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/fastapi.md): fastapi-redline adds Redline to a FastAPI (or plain Starlette) application with SQLAlchemy.
+- [Flask](https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/flask.md): flask-redline is the Flask and SQLAlchemy adapter.
+- [Litestar](https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/litestar.md): litestar-redline is the Litestar and SQLAlchemy adapter.
+- [Libraries (requests, Redis, ...)](https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/integrations.md): Redline records what your framework adapter hooks automatically: the ORM, templates, the cache framework in Django, and so on.
+- [Extending](https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/extending.md): Redline has two extension points, both small typing.Protocols in redline_core:
+
+## Operations
+
+- [Configuration](https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/configuration.md): Redline has one configuration surface for every framework.
+- [Access control](https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/access-control.md): The Redline UI shows SQL, request and response bodies, headers, source lines and exception locals.
+- [Production](https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/production.md): Redline's next release targets production recording across several codebases.
+- [Upgrading](https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/upgrading.md): Redline is pre-1.0: the public API may change between minor versions, and every change is listed in the changelog.
+- [Operating Redline](https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/operating.md): When Redline runs anywhere other than a laptop, you want to know when *it* is unhealthy: dropping traces, failing to write, or misconfigured.
+- [Full-stack testing](https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/testing.md): The example projects share examples/compose.yaml.
+- [Security](https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/security.md): Redline records the most sensitive thing about your application: what it was asked to do and what it said back.
+- [Threat model](https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/threat-model.md): This is the structured threat model behind Security.
+- [Storage](https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/storage.md): Redline keeps traces in a **separate SQLite file** of its own, written by a background thread.
+- [Performance and overhead](https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/performance.md): A profiler that slows the thing it measures is worse than useless, so Redline is built to keep its cost low and explainable.
+
+## Reference
+
+- [Settings reference](https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/settings.md): Every setting, its type, default and effect.
+- [The HTTP API](https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/http-api.md): The UI is a client of a small JSON API that lives under the same mount as the page.
+- [Command line](https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/cli.md): Redline has two kinds of commands:
+- [Roadmap](https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/roadmap.md): Redline has four parts: **Profile**, **Analyze**, **Stress** and **Compare/CI**.
+- [API stability](https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/api-stability.md): Redline is **beta** (0.x).
+- [FAQ](https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/faq.md): Development Status :: 4 - Beta classifier and MIT licence.
+- [Changelog](https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/changelog.md)
+- [Contributing](https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/contributing.md)

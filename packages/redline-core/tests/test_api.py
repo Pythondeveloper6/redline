@@ -121,6 +121,8 @@ def test_endpoints_and_issues(api, seeded):
         "callsite",
         "suppressed",
         "suppressed_routes",
+        "why",
+        "impact",
         "observed_total_ms",
         "fingerprint",
     }

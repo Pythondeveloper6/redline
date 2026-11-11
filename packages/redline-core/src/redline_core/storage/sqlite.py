@@ -999,6 +999,8 @@ class SQLStore(CheckStoreMixin):
                     sample_span_ids=issue.span_ids,
                     suggestion=issue.suggestion,
                     callsite=issue.callsite,
+                    extra=dict(issue.extra),
+                    sample_count=issue.count,
                 )
             )
         out.sort(key=lambda i: (order.get(i.severity, 3), -i.occurrences, -i.last_seen))

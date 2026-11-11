@@ -1,5 +1,5 @@
 export type SpanKind = 'sql' | 'cache' | 'http_out' | 'template' | 'middleware' | 'view' | 'custom'
-  | 'serializer' | 'resolver' | 'transaction' | 'blocking' | 'pool_wait'
+  | 'serializer' | 'resolver' | 'transaction' | 'blocking' | 'pool_wait' | 'llm_call'
 export interface Frame { file: string; line: number; function: string }
 export interface Callsite { file: string; line: number; function: string; code: string | null; stack: Frame[] }
 export interface Span {
@@ -15,7 +15,7 @@ export type IssueKind = 'application_error' | 'sql_error' | 'placeholder_in_comm
   | 'blocking_in_async' | 'large_result' | 'unbounded_query' | 'inefficient_count'
   | 'slow_serializer' | 'long_transaction' | 'external_in_transaction'
   | 'slow_external' | 'duplicate_external' | 'retry_storm' | 'sql_retry_storm'
-  | 'repeated_writes' | 'deep_offset' | 'database_round_trips' | 'connection_pool_wait' | 'large_response' | 'repeated_scan' | 'large_cache_entry' | 'many_orm_instances' | 'json_decode_hotspot' | 'slow_cache_decode'
+  | 'repeated_writes' | 'deep_offset' | 'database_round_trips' | 'connection_pool_wait' | 'duplicate_llm_call' | 'serial_llm_calls' | 'llm_in_transaction' | 'llm_call_loop' | 'uncached_large_prompt' | 'large_response' | 'repeated_scan' | 'large_cache_entry' | 'many_orm_instances' | 'json_decode_hotspot' | 'slow_cache_decode'
 export type Severity = 'info' | 'warning' | 'critical'
 export interface Issue {
   id: string; kind: IssueKind; severity: Severity; title: string; detail: string
@@ -58,7 +58,10 @@ export interface EndpointStats {
   avg_queries: number; max_queries: number; avg_query_ms: number; issue_count: number
   series: { t: number; p95_ms: number; count: number }[]
 }
+export interface IssueWhy { rule: string; observed: string; threshold: string | null; grouping: string; limits: string; sampled: boolean }
 export interface IssueGroup {
+  why?: IssueWhy
+  impact?: { observed_ms: number; occurrences: number; routes: number; basis: 'sampled'; additive: false; suppressed: boolean }
   observed_total_ms?: number; fingerprint?: string | null; suppressed?: boolean; suppressed_routes?: string[]
   id: string; kind: IssueKind; severity: Severity; title: string; detail: string
   occurrences: number; first_seen: number; last_seen: number; routes: string[]
@@ -285,3 +288,10 @@ export interface CheckRunDetail extends CheckRunItem {
 }
 export interface CheckDraftBody { routes?: string[]; limit?: number }
 export type CheckStartBody = { suite_id: string; kind: CheckRunKind; baseline_id?: string; label?: string }
+
+export interface InstrumentationReport {
+  window_seconds: number; sampled: boolean; traces_sampled: number; truncated_traces: number
+  without_profile: number; dropped_writes: number; write_failures: number; capture_failures: number
+  integrations: { name: string; installed: boolean; module_loaded: boolean; instrumented: boolean }[]
+  status: string; warnings: string[]
+}

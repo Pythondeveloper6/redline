@@ -61,4 +61,8 @@ rate). See [HTTP API](http-api.md) for the exact format.
   filesystem, WAL, UI bundle, access settings and capture settings from inside the process
   environment. Run it in the real container.
 - `GET {mount}/api/meta` reports recording state and drop counters for the UI.
+- `redline instrumentation --store PATH [--window SECONDS] [--json]` and
+  `GET {mount}/api/instrumentation` (also on the Settings page) show what redline cannot see:
+  installed integrations that are not instrumented, truncated traces, traces without a
+  profile, dropped and failed writes. Counts come from a bounded sample of recent traces.
 - `redline audit-store` counts possibly unmasked keys in a store without printing values.

@@ -342,7 +342,10 @@ Definitions are on [Issues and endpoints](issues-and-endpoints.md#endpoints).
 
 ### GET api/issues
 
-Deduplicated issues. Parameters: `window`, `kind`.
+Deduplicated issues. Parameters: `window`, `kind`, `sort` (`impact` orders by sampled observed
+time; any other value is `400 invalid_sort`). Every item also has `why` (rule, observed,
+threshold, grouping, limits) and `impact` (`observed_ms`, `occurrences`, `routes`, `basis:
+"sampled"`, `additive: false`, `suppressed`).
 
 ```bash
 curl -s "localhost:8000/_redline/api/issues?kind=n_plus_one"
@@ -832,7 +835,7 @@ setting and the feature and not `read_only`) and `access: {policy, login, read_o
 
 ## Things to know
 
-- **The API is not versioned.** The development release is `0.5.0a2`: the shape may change between alpha
+- **The API is not versioned.** The development release is `0.5.0b1`: the shape may change between beta
   releases. The frontend and the core ship together, so they never disagree.
 - **Redacted values are redacted in the API too.** There is no way to ask for the
   original.
@@ -1023,3 +1026,15 @@ capability are unknown; no provider is imported or inferred from a global record
 The endpoint does not query the initialized trace database or return trace values/paths.
 Counters are per process and cumulative. This is not an application readiness endpoint.
 `api/meta` adds the same snapshot under `operational`.
+
+### GET api/instrumentation
+
+What redline cannot see, over a bounded sample of recent traces: `traces_sampled`,
+`truncated_traces`, `without_profile`, `dropped_writes`, `write_failures`, `capture_failures`,
+`integrations` (installed / loaded / instrumented) and `warnings`. No paths, URLs or payloads.
+
+### GET api/llm
+
+Sampled LLM-call usage per route and model for `window`: `calls`, `errors`, `streamed_calls`,
+`input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_creation_tokens`, plus `totals`.
+Streamed calls have no token counts. See [LLM-call observability](llm.md).

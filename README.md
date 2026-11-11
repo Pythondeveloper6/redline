@@ -31,7 +31,7 @@ load test that shows which query broke.
   <img alt="Redline showing an N+1 on order items in the Django demo shop: 30 queries from one line, with a prefetch_related diff" src="docs/assets/screenshots/django-n-plus-one-light.png">
 </picture>
 
-> **Development release: `0.5.0a2` (alpha).** This branch includes the next release's
+> **Development release: `0.5.0b1` (beta).** This branch includes the next release's
 > features; published packages can be an earlier version. Start with development or
 > staging. Production use requires validation of your actual framework, database driver,
 > traffic and process model: see the [deployment gate](docs/production.md).
@@ -222,7 +222,28 @@ Detailed APIs, support boundaries and UI paths are in [Real-world workflows](doc
 | Sharing and alerts | `redline export ID --html` writes one redacted, self-contained page; `redline digest` posts new issues to a webhook; `api/metrics` exposes recorder health for Prometheus; `redline_trace_id` links logs, Sentry events and OTLP spans to a recording |
 | Release checks | Live MySQL qualification (pymysql, aiomysql, asyncmy) in CI; fresh-venv install and old-store upgrade checks against published releases |
 
+| Explain and rank | Every finding carries `why` (rule, observed, threshold, grouping, limits); `api/issues?sort=impact` ranks by sampled observed time, never presented as additive savings |
+| Prove a fix | `redline check verify` answers gone / still present / inconclusive and whether responses stayed equal; `redline check compare-live` alternates requests between two running versions; latency budgets accept `min_samples`; `redline instrumentation` reports what redline cannot see |
+| AI agents | `redline mcp` serves read-only tools over MCP, `redline fix-prompt` writes a fix brief, `redline agent-skill` emits a Claude skill and AGENTS.md section, `llms.txt` and JSON references document everything for machines, and `redline diagnose` previews (opt-in: sends) a redacted finding. See [Working with AI agents](docs/agents.md) |
+| LLM calls | `instrument_anthropic()` / `instrument_openai()` record `llm_call` spans (model, tokens, timing; never prompt text) with findings for duplicate, serial, in-transaction, looping and uncached large-prompt calls, and `api/llm` for sampled token usage. See [LLM-call observability](docs/llm.md) |
+
 Stability promises for these and older APIs are in [API stability](docs/api-stability.md).
+
+## Built for AI agents
+
+```bash
+redline agent-skill --write ~/.claude/skills     # teach a coding agent to find, fix and verify
+redline mcp --store .redline/redline.db          # read-only tools over MCP (add to .mcp.json)
+redline fix-prompt ISSUE_ID --store .redline/redline.db > brief.md
+redline check compare check.toml --json report.json
+redline check verify report.json --kind n_plus_one   # exit 0 only when the finding is gone
+```
+
+The docs are machine-readable too: [`llms.txt`](https://pythondeveloper6.github.io/redline/llms.txt),
+[`llms-full.txt`](https://pythondeveloper6.github.io/redline/llms-full.txt), a
+[settings JSON Schema](https://pythondeveloper6.github.io/redline/reference/settings.schema.json)
+and a [CLI reference](https://pythondeveloper6.github.io/redline/reference/cli.json). Agents never
+see prompt text, request bodies or secrets, and AI diagnosis is off unless you opt in.
 
 ## Real-life investigations
 
@@ -332,6 +353,9 @@ redline check-sql app/ --dialect mssql --write-baseline sql-baseline.json
 # Explicit development target: executes module import code.
 redline check-imports myapp.main:app
 
+# What is redline blind to? (inactive integrations, truncated traces, dropped writes)
+redline instrumentation --store /path/to/redline.db
+
 # Preview only; transmission needs --endpoint and --send.
 redline export --store /path/to/redline.db
 ```
@@ -413,7 +437,7 @@ Routine CI and documentation deployment run after pushes/merges to main. Publish
 follows successful main CI with an exact-version repository opt-in and the configured
 release approvals. A local merge does not publish packages. See [RELEASING.md](RELEASING.md).
 
-Redline remains alpha. API/settings/schema changes are possible; production readiness is
+Redline is in beta. API/settings/schema changes are possible; production readiness is
 specific to a tested deployment. It has no distributed tracing, alerting or fleet-wide
 store. WebSockets are not recorded; RQ/Dramatiq integrations are not implemented. Index
 and source suggestions need review, and sampled history needs careful interpretation.

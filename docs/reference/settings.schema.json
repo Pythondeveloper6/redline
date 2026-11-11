@@ -1,0 +1,478 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Redline settings",
+  "type": "object",
+  "properties": {
+    "access": {
+      "type": "string",
+      "default": "local"
+    },
+    "access_check": {
+      "default": null
+    },
+    "ai_diagnosis": {
+      "type": "boolean",
+      "default": false
+    },
+    "ai_model": {
+      "type": "string",
+      "default": "claude-sonnet-5-5"
+    },
+    "ai_provider": {
+      "type": "string",
+      "default": "anthropic"
+    },
+    "allow_storage_in_repo": {
+      "type": "boolean",
+      "default": false
+    },
+    "allowed_hosts": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "default": []
+    },
+    "allowed_ips": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "default": []
+    },
+    "always_keep_errors": {
+      "type": "boolean",
+      "default": true
+    },
+    "always_keep_slower_than_ms": {
+      "type": "number",
+      "default": 500.0
+    },
+    "analysis_from_ui": {
+      "default": "auto"
+    },
+    "auto_instrument": {
+      "type": "string",
+      "default": "warn"
+    },
+    "badge": {
+      "default": "auto"
+    },
+    "base_url": {
+      "type": "string",
+      "nullable": true,
+      "default": null
+    },
+    "basic_users": {
+      "default": {}
+    },
+    "blocking_ms": {
+      "type": "number",
+      "default": 20.0
+    },
+    "cache_decode_ms": {
+      "type": "number",
+      "default": 50.0
+    },
+    "capture_error_details": {
+      "type": "boolean",
+      "default": true
+    },
+    "capture_locals": {
+      "type": "boolean",
+      "default": true
+    },
+    "capture_loggers": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "default": []
+    },
+    "capture_logs": {
+      "type": "boolean",
+      "default": true
+    },
+    "capture_request_body": {
+      "type": "boolean",
+      "default": true
+    },
+    "capture_response_body": {
+      "type": "boolean",
+      "default": true
+    },
+    "capture_sql_params": {
+      "default": true
+    },
+    "checks_from_ui": {
+      "default": "auto"
+    },
+    "cookie_secure": {
+      "default": "auto"
+    },
+    "deep_offset_rows": {
+      "type": "integer",
+      "default": 10000
+    },
+    "detect_blocking": {
+      "type": "boolean",
+      "default": true
+    },
+    "duplicate_threshold": {
+      "type": "integer",
+      "default": 2
+    },
+    "editor": {
+      "type": "string",
+      "default": "vscode"
+    },
+    "enabled": {
+      "type": "boolean",
+      "default": true
+    },
+    "explain_analyze": {
+      "type": "boolean",
+      "default": false
+    },
+    "extra_stores": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "default": []
+    },
+    "features": {
+      "default": {}
+    },
+    "history_retention_days": {
+      "type": "integer",
+      "nullable": true,
+      "default": 90
+    },
+    "ignore_loggers": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "default": []
+    },
+    "ignore_paths": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "default": [
+        "/static/",
+        "/media/",
+        "/favicon.ico"
+      ]
+    },
+    "ignore_sql": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "default": [
+        "^(?:EXEC(?:UTE)?\\s+)?(?:\\[?sys\\]?\\.)?\\[?sp_set_session_context\\]?\\b",
+        "^SET\\s"
+      ]
+    },
+    "instrument_engines": {
+      "type": "string",
+      "default": "explicit"
+    },
+    "json_decode_ms": {
+      "type": "number",
+      "default": 50.0
+    },
+    "large_cache_bytes": {
+      "type": "integer",
+      "default": 1000000
+    },
+    "large_response_bytes": {
+      "type": "integer",
+      "default": 1000000
+    },
+    "large_result_rows": {
+      "type": "integer",
+      "default": 1000
+    },
+    "llm_duplicate_threshold": {
+      "type": "integer",
+      "default": 2
+    },
+    "llm_loop_calls": {
+      "type": "integer",
+      "default": 8
+    },
+    "llm_prompt_cache_chars": {
+      "type": "integer",
+      "default": 4000
+    },
+    "llm_serial_min": {
+      "type": "integer",
+      "default": 3
+    },
+    "load_from_ui": {
+      "type": "boolean",
+      "default": false
+    },
+    "log_level": {
+      "type": "string",
+      "default": "INFO"
+    },
+    "long_transaction_ms": {
+      "type": "number",
+      "default": 200.0
+    },
+    "max_age_days": {
+      "type": "integer",
+      "nullable": true,
+      "default": 7
+    },
+    "max_body_bytes": {
+      "type": "integer",
+      "default": 20000
+    },
+    "max_login_attempts": {
+      "type": "integer",
+      "default": 10
+    },
+    "max_logs_per_trace": {
+      "type": "integer",
+      "default": 200
+    },
+    "max_rows": {
+      "type": "integer",
+      "nullable": true,
+      "default": 10000
+    },
+    "max_span_data_bytes": {
+      "type": "integer",
+      "default": 32768
+    },
+    "max_spans_per_trace": {
+      "type": "integer",
+      "nullable": true,
+      "default": 2000
+    },
+    "max_sql_bytes": {
+      "type": "integer",
+      "default": 65536
+    },
+    "max_tag_bytes": {
+      "type": "integer",
+      "default": 2048
+    },
+    "max_trace_bytes": {
+      "type": "integer",
+      "default": 1048576
+    },
+    "mount_path": {
+      "type": "string",
+      "nullable": true,
+      "default": null
+    },
+    "n_plus_one_threshold": {
+      "type": "integer",
+      "default": 5
+    },
+    "orm_instances_threshold": {
+      "type": "integer",
+      "default": 500
+    },
+    "pool_wait_ms": {
+      "type": "number",
+      "default": 50.0
+    },
+    "preset": {
+      "type": "string",
+      "default": "dev"
+    },
+    "profile": {
+      "default": "opt_in"
+    },
+    "profile_sample_rate": {
+      "type": "number",
+      "default": 0.0
+    },
+    "project_root": {
+      "type": "string",
+      "nullable": true,
+      "default": null
+    },
+    "read_only": {
+      "type": "boolean",
+      "default": false
+    },
+    "redact_headers": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "default": [
+        "authorization",
+        "cookie",
+        "set-cookie",
+        "x-api-key",
+        "proxy-authorization"
+      ]
+    },
+    "redact_keys": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "default": [
+        "(?i)pass(word)?|secret|token|api[_-]?key|(?<![a-z])auth(orization)?(?![a-z])|session|csrf|card|cvv|ssn|private[_-]?key|access[_-]?key|signature|credential"
+      ]
+    },
+    "redact_profiles": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "default": []
+    },
+    "redact_routes": {
+      "default": {}
+    },
+    "redact_tables": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "default": []
+    },
+    "release": {
+      "type": "string",
+      "nullable": true,
+      "default": null
+    },
+    "repeated_scans_threshold": {
+      "type": "integer",
+      "default": 2
+    },
+    "repeated_writes_threshold": {
+      "type": "integer",
+      "default": 5
+    },
+    "request_id_headers": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "default": [
+        "X-Request-ID",
+        "X-Correlation-ID",
+        "traceparent"
+      ]
+    },
+    "round_trip_count": {
+      "type": "integer",
+      "default": 10
+    },
+    "round_trip_ms": {
+      "type": "number",
+      "default": 100.0
+    },
+    "sample_rate": {
+      "type": "number",
+      "default": 1.0
+    },
+    "secret_key": {
+      "type": "string",
+      "nullable": true,
+      "default": null
+    },
+    "server_timing": {
+      "default": "auto"
+    },
+    "session_expected": {
+      "default": {
+        "NOCOUNT": "OFF"
+      }
+    },
+    "session_expected_context": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "default": []
+    },
+    "session_ttl_s": {
+      "type": "integer",
+      "default": 43200
+    },
+    "slow_external_ms": {
+      "type": "number",
+      "default": 500.0
+    },
+    "slow_query_ms": {
+      "type": "number",
+      "default": 100.0
+    },
+    "slow_serializer_ms": {
+      "type": "number",
+      "default": 50.0
+    },
+    "sql_retry_storm_threshold": {
+      "type": "integer",
+      "default": 3
+    },
+    "storage_path": {
+      "type": "string",
+      "default": ".redline/redline.db"
+    },
+    "storage_role": {
+      "type": "string",
+      "default": "web"
+    },
+    "storage_url": {
+      "type": "string",
+      "nullable": true,
+      "default": null
+    },
+    "token": {
+      "type": "string",
+      "nullable": true,
+      "default": null
+    },
+    "token_file": {
+      "type": "string",
+      "nullable": true,
+      "default": null
+    },
+    "too_many_queries": {
+      "type": "integer",
+      "default": 50
+    },
+    "trust_unix_socket": {
+      "type": "boolean",
+      "default": false
+    },
+    "trusted_proxies": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "default": []
+    },
+    "ui_enabled": {
+      "type": "boolean",
+      "default": true
+    },
+    "unbounded_rows": {
+      "type": "integer",
+      "default": 200
+    },
+    "user_resolver": {
+      "default": null
+    },
+    "writer_queue_size": {
+      "type": "integer",
+      "default": 1000
+    }
+  },
+  "additionalProperties": false
+}
