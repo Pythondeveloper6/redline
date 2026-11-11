@@ -21,6 +21,7 @@ from collections.abc import Callable, Sequence
 from typing import Any, TextIO
 
 from . import digest, instrumentation_report, operations, project_init
+from .agent import fixprompt as agent_fixprompt
 from .agent import mcp as agent_mcp
 from .check_sql import command as _cmd_sql
 from .check_sql import configure_cli as _configure_sql
@@ -1716,6 +1717,58 @@ def _cmd_check_compare_live(args: argparse.Namespace, out: TextIO, err: TextIO) 
     return EXIT_FAIL if changed else EXIT_OK
 
 
+def _configure_check_findings(p: argparse.ArgumentParser) -> None:
+    p.add_argument("report", help="report JSON written by `redline check compare --json`")
+    p.add_argument("--new-only", action="store_true", help="only findings new since the baseline")
+    p.add_argument("--json", action="store_true", help="print findings as JSON")
+
+
+def _cmd_check_findings(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
+    import json
+
+    from .agent.fixprompt import build_fix_prompt
+    from .check.report import Report, ReportError
+
+    try:
+        with open(args.report, encoding="utf-8") as fh:
+            report = Report.from_dict(json.load(fh))
+    except FileNotFoundError:
+        err.write(f"redline check findings: {args.report}: file not found\n")
+        return EXIT_USAGE
+    except (OSError, ValueError, ReportError) as exc:
+        err.write(f"redline check findings: {args.report}: {exc}\n")
+        return EXIT_USAGE
+    findings = []
+    for entry in report.requests:
+        server = entry.get("server") or {}
+        for issue in server.get("new_issues") or []:
+            group = {
+                "id": issue.get("id") or f"{issue.get('kind')}:{issue.get('fingerprint')}",
+                "kind": issue.get("kind"),
+                "title": issue.get("title"),
+                "fingerprint": issue.get("fingerprint"),
+                "routes": [entry.get("path")],
+            }
+            findings.append(
+                {
+                    "request": entry.get("name"),
+                    "kind": issue.get("kind"),
+                    "title": issue.get("title"),
+                    "fingerprint": issue.get("fingerprint"),
+                    "sample_trace_id": issue.get("sample_trace_id"),
+                    "prompt": build_fix_prompt(group),
+                }
+            )
+    if args.json:
+        out.write(json.dumps({"findings": findings}, indent=2) + "\n")
+    else:
+        for f in findings:
+            out.write(f"new {f['kind']} on {f['request']}: {f['title']}\n")
+        if not findings:
+            out.write("no new findings\n")
+    return EXIT_FAIL if findings else EXIT_OK
+
+
 def _cmd_check_show(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
     import json
 
@@ -1761,6 +1814,11 @@ CHECK_COMMANDS: dict[str, tuple[str, Callable[[argparse.ArgumentParser], None], 
         "alternate requests between two running versions (exit 1 when responses differ)",
         _configure_check_compare_live,
         _cmd_check_compare_live,
+    ),
+    "findings": (
+        "list findings in a compare report with an agent brief each (exit 1 when any are new)",
+        _configure_check_findings,
+        _cmd_check_findings,
     ),
     "verify": (
         "did a fix remove a finding? gone/still_present/inconclusive from a saved report "
@@ -1856,6 +1914,12 @@ COMMANDS: dict[str, tuple[str, Callable[[argparse.ArgumentParser], None], Handle
         "show what redline is blind to: inactive integrations, truncated traces, dropped writes",
         instrumentation_report.configure,
         instrumentation_report.command,
+        {},
+    ),
+    "fix-prompt": (
+        "write a brief an AI agent can act on to fix one finding",
+        agent_fixprompt.configure_fix_prompt,
+        agent_fixprompt.command_fix_prompt,
         {},
     ),
     "mcp": (
