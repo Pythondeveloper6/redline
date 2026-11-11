@@ -37,6 +37,7 @@ async def index() -> dict:
             "/sync/orders  (sync def endpoint, lazy-loaded tags)",
             "/boom  (500)",
             "/pricing  (outbound httpx call)",
+            "/assistant  (LLM calls: duplicate, serial and uncached-prompt findings)",
             "/orders/1?_redline=profile  (flamegraph)",
         ],
         "redline": "/_redline/",

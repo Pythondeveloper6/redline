@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "redline": {
+      "command": "redline",
+      "args": ["mcp", "--store", ".redline/redline.db", "--audit", ".redline/agent-audit.jsonl"]
+    }
+  }
+}
