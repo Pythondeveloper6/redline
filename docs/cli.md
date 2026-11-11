@@ -17,7 +17,12 @@ redline export --store DB [ID --html OUT]   OTLP preview/send, or one HTML summa
 redline digest --store DB --webhook URL    post newly seen issues to a chat webhook
 redline init                          write a starter redline.toml and update .gitignore
 redline load init ...                 write a scenario file
-redline check record|compare|run|init|show|ratchet|comment   refactor check: prove a refactor is safe
+redline check record|compare|run|init|show|ratchet|comment|verify|findings|compare-live   refactor check: prove a refactor is safe
+redline instrumentation --store DB    what redline cannot see (inactive integrations, truncated traces, drops)
+redline mcp --store DB                serve read-only tools to an AI agent over MCP (stdio)
+redline fix-prompt ISSUE --store DB   write a brief an AI agent can act on to fix one finding
+redline agent-skill [--write DIR]     print or write the redline skill / AGENTS.md section
+redline diagnose ISSUE --store DB     preview (opt-in: send) a redacted finding to an AI provider
 redline config                        print the effective configuration
 redline doctor                        check the setup
 redline hash-password                 make a password hash for access = "basic"
@@ -120,6 +125,9 @@ redline check init --from-traces [...]  write a suite from recorded read-only tr
 redline check show    REPORT.json       print a saved report again
 redline check ratchet SUITE            fail on new query-count regressions; --update tightens
 redline check comment REPORT            post a report as the sticky PR comment (GitHub Actions)
+redline check verify  REPORT --kind K   is a finding gone, still_present or inconclusive? (exit 0 only when gone)
+redline check findings REPORT [--new-only]  list findings, with an agent brief each (exit 1 when any are new)
+redline check compare-live SUITE --old URL --new URL  alternate requests between two running versions
 ```
 
 `SUITE` is a `.toml` or `.json` [suite file](refactor-check.md#the-suite-file).
@@ -167,6 +175,24 @@ redline check compare checks/orders.toml --markdown report.md --junit report.xml
 Exit codes: `0` nothing matched `--fail-on`, `1` something did, `2` a usage, suite or baseline
 error, `3` the app could not be reached at all, `130` interrupted (Ctrl-C or SIGTERM; a
 `record` then writes no baseline). More in [Outputs and exit codes](refactor-check.md#outputs-and-exit-codes).
+
+### `redline instrumentation`, `mcp`, `fix-prompt`, `agent-skill`, `diagnose`
+
+Tools for [working with AI agents](agents.md). All read a store and none changes it.
+
+| Command | Purpose | Exit codes |
+|---|---|---|
+| `redline instrumentation --store DB [--window S] [--json]` | What redline cannot see: integrations installed but not instrumented, truncated traces, traces without a profile, dropped and failed writes | `0`, `2` bad window |
+| `redline mcp --store DB [--audit FILE]` | MCP server over stdio with read-only tools (`list_issues`, `explain_issue`, `get_trace`, `instrumentation_report`, `verify_fix`, `llm_summary`) | `0`, `2` store not found |
+| `redline fix-prompt ISSUE --store DB [--window W] [--out FILE]` | Markdown brief with evidence, constraints and the verify steps for one finding | `0`, `2` unknown issue or store |
+| `redline agent-skill [--format skill\|agents] [--write DIR] [--force]` | The Claude skill or AGENTS.md section that teaches an agent to use redline | `0`, `2` file exists |
+| `redline diagnose ISSUE --store DB [--send]` | Preview the exact request to an AI provider; `--send` also needs `ai_diagnosis = true` and `REDLINE_AI_API_KEY` | `0`, `1` provider error, `2` not opted in |
+
+`redline check verify REPORT --kind KIND [--fingerprint FP] [--min-samples N] [--json]` reads a
+saved compare report; `redline check findings REPORT [--new-only] [--json]` lists findings with
+a brief each; `redline check compare-live SUITE --old URL --new URL [--rounds N] [--json OUT]`
+sends each request to both servers and flips the order every round. See
+[Refactor check](refactor-check.md#verify-a-fix).
 
 ### `redline config`
 

@@ -35,7 +35,14 @@ PROBES = {
 }
 
 PATHS = {
-    "fastapi": ["/orders", "/orders/customers", "/orders/1", "/report/duplicates", "/_redline/"],
+    "fastapi": [
+        "/orders",
+        "/orders/customers",
+        "/orders/1",
+        "/report/duplicates",
+        "/assistant",
+        "/_redline/",
+    ],
     "litestar": ["/orders", "/orders/1", "/_redline/"],
     "flask": ["/orders", "/_redline/"],
 }

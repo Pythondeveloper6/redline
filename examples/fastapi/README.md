@@ -27,6 +27,7 @@ then hit the endpoints:
 | `GET /slow` | slow endpoint spent in `asyncio.sleep` |
 | `GET /boom` | an unhandled `ZeroDivisionError` (500) with its traceback |
 | `GET /pricing` | outbound `httpx` calls as `http_out` spans (`instrument_httpx()`) |
+| `GET /assistant` | a stand-in for LLM calls (no key or network): `duplicate_llm_call`, `serial_llm_calls`, `uncached_large_prompt`, and `llm_call` spans with token counts but never prompt text |
 | `GET /orders/2?_redline=profile` | adds a flamegraph (Profile tab) |
 | `POST /checkout` | a body with `card_number`/`password` and an `Authorization` header, all redacted |
 
@@ -40,6 +41,25 @@ Apply a suggested diff straight from the UI's "Copy diff" button with `git apply
 `patch -p1` from `examples/fastapi`.
 
 See `shop/main.py` for the whole integration: one `install(...)` call and `instrument_httpx()`.
+
+## Work with an AI agent
+
+`.mcp.json` and `AGENTS.md` in this folder are ready to use with a coding agent
+(`AGENTS.md` is `redline agent-skill --format agents`). From `examples/fastapi`, after hitting
+a few endpoints:
+
+```bash
+uv run --project ../.. redline instrumentation --store .redline/redline.db   # what is redline blind to?
+uv run --project ../.. redline mcp --store .redline/redline.db               # read-only tools over MCP
+uv run --project ../.. redline fix-prompt ISSUE_ID --store .redline/redline.db > brief.md
+uv run --project ../.. redline diagnose ISSUE_ID --store .redline/redline.db # preview only, sends nothing
+curl -s 'localhost:8011/_redline/api/llm?window=1h'                          # sampled LLM tokens per route
+```
+
+Find an `ISSUE_ID` on the Issues page or from the `list_issues` tool. After a change,
+`redline check compare ... --json report.json` then
+`redline check verify report.json --kind n_plus_one` says whether the finding is `gone`,
+`still_present` or `inconclusive`. See [Working with AI agents](../../docs/agents.md).
 
 ## Try the refactor check
 

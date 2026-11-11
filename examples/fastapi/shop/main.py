@@ -8,11 +8,13 @@ from fastapi import FastAPI
 from fastapi_redline import install, instrument_httpx
 
 from .api import router
+from .assistant import router as assistant_router
 from .db import async_engine, sync_engine
 from .models import Base
 
 app = FastAPI(title="Redline demo shop")
 app.include_router(router)
+app.include_router(assistant_router)
 
 install(
     app,

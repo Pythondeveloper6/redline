@@ -23,6 +23,12 @@ load at it and see what breaks first.</p>
 ![The N+1 issue of the Django demo shop in Redline: 30 queries from one line, with a prefetch_related diff](assets/screenshots/django-n-plus-one-light.png){ .rl-shot .rl-only-light }
 ![The N+1 issue of the Django demo shop in Redline, dark theme](assets/screenshots/django-n-plus-one-dark.png){ .rl-shot .rl-only-dark }
 
+!!! tip "Built for AI agents"
+
+    Redline ships an MCP server, fix briefs, a verify-a-fix command, LLM-call observability
+    and machine-readable docs ([`llms.txt`](llms.txt)). See
+    [Working with AI agents](agents.md).
+
 !!! warning "Beta: 0.5 development release"
 
     This checkout contains the next release's features; PyPI can contain an earlier
