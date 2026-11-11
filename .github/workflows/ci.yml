@@ -50,6 +50,8 @@ jobs:
       - run: uv sync --all-packages --frozen
       - run: uv run --no-sync ruff check .
       - run: uv run --no-sync ruff format --check --diff .
+      - name: Agent docs are current (llms.txt, settings schema, CLI reference)
+        run: uv run --no-sync python scripts/build_llms.py --check
 
   core:
     name: core / py${{ matrix.python-version }}
