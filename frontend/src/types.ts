@@ -288,3 +288,10 @@ export interface CheckRunDetail extends CheckRunItem {
 }
 export interface CheckDraftBody { routes?: string[]; limit?: number }
 export type CheckStartBody = { suite_id: string; kind: CheckRunKind; baseline_id?: string; label?: string }
+
+export interface InstrumentationReport {
+  window_seconds: number; sampled: boolean; traces_sampled: number; truncated_traces: number
+  without_profile: number; dropped_writes: number; write_failures: number; capture_failures: number
+  integrations: { name: string; installed: boolean; module_loaded: boolean; instrumented: boolean }[]
+  status: string; warnings: string[]
+}
