@@ -44,6 +44,7 @@ from .access import is_local_host, route_policy
 from .conf import FEATURES, Settings, editor_url_template, resolve_release
 from .explain import ExplainError, ExplainExecutor, run_explain
 from .index_advisor import advise
+from .finding_explain import explain_issue
 from .model import ISSUE_KINDS, Trace
 from .profiler import is_available as profiler_available
 from .storage.base import FilterError, Filters, Store, parse_period, parse_window, percentile
@@ -506,7 +507,10 @@ class RedlineAPI:
             return error(400, "invalid_kind", f"kind must be one of {', '.join(_ISSUE_KINDS)}.")
         from .suppressions import matches
 
-        items = [g.to_dict() for g in self.store.issues(window, kind=kind)]
+        groups = self.store.issues(window, kind=kind)
+        items = [g.to_dict() for g in groups]
+        for item, g in zip(items, groups, strict=True):
+            item["why"] = explain_issue(g.kind, g.extra, g.sample_count)
         rules = getattr(self.store, "list_suppressions", lambda: [])()
         for item in items:
             site = item.get("callsite")
