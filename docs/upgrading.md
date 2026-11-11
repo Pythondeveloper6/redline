@@ -36,6 +36,6 @@ version at a fresh `store_path` or delete the file. See [Storage](storage.md) an
 
 ## Pre-releases
 
-Alpha builds are published as pre-releases and need `--pre`. Pin an exact version in
+Beta builds are published as pre-releases and need `--pre`. Pin an exact version in
 production (`django-redline==X.Y.ZaN`) and upgrade deliberately. Anything marked experimental
 in [API stability](api-stability.md) can change without notice.

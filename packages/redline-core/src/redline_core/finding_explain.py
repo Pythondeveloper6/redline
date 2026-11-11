@@ -6,6 +6,7 @@ occurrence count, so it never queries a database and never raises on legacy or u
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from typing import Any
 
@@ -64,10 +65,15 @@ _THRESHOLD_KEYS = (
 )
 
 
+def _num(value: Any) -> bool:
+    """Only finite numbers are ever echoed; evidence text is never trusted."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
 def _threshold(extra: Mapping[str, Any]) -> str | None:
     parts = []
     for key, fmt in _THRESHOLD_KEYS:
-        if key in extra and extra[key] is not None:
+        if _num(extra.get(key)):
             parts.append(fmt.format(extra[key]))
     return ", ".join(parts) or None
 
@@ -84,7 +90,7 @@ def explain_issue(kind: str, extra: Mapping[str, Any] | None, count: int) -> dic
     )
     observed = f"{max(int(count or 0), 0)} matching span(s) in the sampled occurrence"
     for key, label in (("offset", "OFFSET"), ("bytes", "bytes"), ("decode_ms", "decode ms")):
-        if extra.get(key) is not None:
+        if _num(extra.get(key)):
             observed += f"; {label} {extra[key]}"
     limits = _DEFAULT_LIMITS
     if extra.get("incomplete_trace"):

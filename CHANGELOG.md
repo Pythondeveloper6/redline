@@ -35,6 +35,14 @@ The project moves from alpha to beta.
 
 - Development status classifiers are now `4 - Beta`.
 
+### Security
+
+- Finding explanations echo only finite numbers from detector evidence, never free text, so
+  a hostile string in evidence cannot reach the Issues page through **Why this fired**.
+- Regression tests cover credential gating of `api/instrumentation` and `api/issues`, no
+  redirect following in `check compare-live`, and rejection of non-report files by
+  `check verify`.
+
 ## 0.5.0a2
 
 ### Added

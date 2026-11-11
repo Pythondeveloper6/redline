@@ -23,7 +23,7 @@ load at it and see what breaks first.</p>
 ![The N+1 issue of the Django demo shop in Redline: 30 queries from one line, with a prefetch_related diff](assets/screenshots/django-n-plus-one-light.png){ .rl-shot .rl-only-light }
 ![The N+1 issue of the Django demo shop in Redline, dark theme](assets/screenshots/django-n-plus-one-dark.png){ .rl-shot .rl-only-dark }
 
-!!! warning "Alpha: 0.4 development release"
+!!! warning "Beta: 0.5 development release"
 
     This checkout contains the next release's features; PyPI can contain an earlier
     version. See [Getting started](getting-started.md#install) for published and local

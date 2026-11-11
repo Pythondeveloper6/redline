@@ -20,6 +20,6 @@ from redline_core import span
 
 from .dev import install_if_dev, urls_if_dev
 
-__version__ = "0.5.0a2"
+__version__ = "0.5.0b1"
 
 __all__ = ["__version__", "install_if_dev", "span", "urls_if_dev"]
