@@ -61,6 +61,7 @@ export interface EndpointStats {
 export interface IssueWhy { rule: string; observed: string; threshold: string | null; grouping: string; limits: string; sampled: boolean }
 export interface IssueGroup {
   why?: IssueWhy
+  impact?: { observed_ms: number; occurrences: number; routes: number; basis: 'sampled'; additive: false; suppressed: boolean }
   observed_total_ms?: number; fingerprint?: string | null; suppressed?: boolean; suppressed_routes?: string[]
   id: string; kind: IssueKind; severity: Severity; title: string; detail: string
   occurrences: number; first_seen: number; last_seen: number; routes: string[]
