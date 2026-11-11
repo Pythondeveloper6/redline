@@ -21,6 +21,7 @@ from collections.abc import Callable, Sequence
 from typing import Any, TextIO
 
 from . import digest, instrumentation_report, operations, project_init
+from .agent import mcp as agent_mcp
 from .check_sql import command as _cmd_sql
 from .check_sql import configure_cli as _configure_sql
 from .schema_watch import command as _cmd_schema_watch
@@ -1855,6 +1856,12 @@ COMMANDS: dict[str, tuple[str, Callable[[argparse.ArgumentParser], None], Handle
         "show what redline is blind to: inactive integrations, truncated traces, dropped writes",
         instrumentation_report.configure,
         instrumentation_report.command,
+        {},
+    ),
+    "mcp": (
+        "serve read-only redline tools to an AI agent over MCP (stdio)",
+        agent_mcp.configure,
+        agent_mcp.command,
         {},
     ),
     "audit-store": (
