@@ -23,6 +23,7 @@ from typing import Any, TextIO
 from . import digest, instrumentation_report, operations, project_init
 from .agent import fixprompt as agent_fixprompt
 from .agent import mcp as agent_mcp
+from .agent import skill as agent_skill
 from .check_sql import command as _cmd_sql
 from .check_sql import configure_cli as _configure_sql
 from .schema_watch import command as _cmd_schema_watch
@@ -1914,6 +1915,12 @@ COMMANDS: dict[str, tuple[str, Callable[[argparse.ArgumentParser], None], Handle
         "show what redline is blind to: inactive integrations, truncated traces, dropped writes",
         instrumentation_report.configure,
         instrumentation_report.command,
+        {},
+    ),
+    "agent-skill": (
+        "print or write the redline skill / AGENTS.md section that teaches a coding agent",
+        agent_skill.configure,
+        agent_skill.command,
         {},
     ),
     "fix-prompt": (

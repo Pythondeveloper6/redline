@@ -133,6 +133,8 @@ nav:
           - External calls: external-calls.md
           - Cache efficiency: cache-efficiency.md
           - Logs and exceptions: logs-and-exceptions.md
+  - For AI agents:
+      - Working with agents: agents.md
   - Load and history:
       - Load testing: load-testing.md
       - History and releases: history.md
