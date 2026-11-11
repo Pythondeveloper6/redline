@@ -45,6 +45,7 @@ from .conf import FEATURES, Settings, editor_url_template, resolve_release
 from .explain import ExplainError, ExplainExecutor, run_explain
 from .index_advisor import advise
 from .finding_explain import explain_issue
+from .impact import rank_by_impact
 from .model import ISSUE_KINDS, Trace
 from .profiler import is_available as profiler_available
 from .storage.base import FilterError, Filters, Store, parse_period, parse_window, percentile
@@ -505,6 +506,9 @@ class RedlineAPI:
         kind = _str_param(params, "kind")
         if kind is not None and kind not in _ISSUE_KINDS:
             return error(400, "invalid_kind", f"kind must be one of {', '.join(_ISSUE_KINDS)}.")
+        sort = _str_param(params, "sort")
+        if sort not in (None, "impact"):
+            return error(400, "invalid_sort", "sort must be 'impact' or omitted.")
         from .suppressions import matches
 
         groups = self.store.issues(window, kind=kind)
@@ -532,6 +536,9 @@ class RedlineAPI:
             item["suppressed"] = bool(item["routes"]) and len(item["suppressed_routes"]) == len(
                 item["routes"]
             )
+        items = rank_by_impact(items) if sort == "impact" else items
+        for item in items:
+            item.setdefault("impact", rank_by_impact([item])[0]["impact"])
         return 200, {"items": items, "sampled": self.settings.sample_rate < 1}
 
     def explain(self, body: bytes | str | Mapping[str, Any] | None) -> Response:

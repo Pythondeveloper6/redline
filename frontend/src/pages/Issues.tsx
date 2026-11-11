@@ -19,7 +19,7 @@ export default function Issues() {
       <div className="flex flex-wrap items-center gap-2 mb-3">
         <h1 className="m-0 text-[15px] font-semibold flex-1">Issues</h1>
         <label className="inline-flex gap-1 items-center"><input type="checkbox" checked={showSuppressed} onChange={e => setShowSuppressed(e.target.checked)} />Show suppressed</label>
-        <select className="field" aria-label="Issue ordering" value={sort} onChange={e => setSort(e.target.value)}><option value="severity">Severity</option><option value="cost">Observed cumulative time</option><option value="frequency">Occurrences</option></select>
+        <select className="field" aria-label="Issue ordering" value={sort} onChange={e => setSort(e.target.value)}><option value="severity">Severity</option><option value="impact">Fix impact (sampled)</option><option value="cost">Observed cumulative time</option><option value="frequency">Occurrences</option></select>
         <select className="field" value={kind} onChange={e => setKind(e.target.value)} aria-label="Issue kind">
           <option value="">All kinds</option>{Object.entries(ISSUE_LABEL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
         </select>
@@ -33,7 +33,7 @@ export default function Issues() {
       ) : (
         <div className="space-y-3">
           <p className="text-muted">Times and occurrences describe retained traces. Issue costs can overlap and are not predicted savings.</p>
-          {d.data?.items.filter(g => showSuppressed || !g.suppressed).slice().sort((a, b) => sort === 'cost' ? (b.observed_total_ms ?? 0) - (a.observed_total_ms ?? 0) : sort === 'frequency' ? b.occurrences - a.occurrences : 0).map(g => (
+          {d.data?.items.filter(g => showSuppressed || !g.suppressed).slice().sort((a, b) => sort === 'impact' ? Number(a.suppressed ?? false) - Number(b.suppressed ?? false) || (b.impact?.observed_ms ?? 0) - (a.impact?.observed_ms ?? 0) || b.occurrences - a.occurrences : sort === 'cost' ? (b.observed_total_ms ?? 0) - (a.observed_total_ms ?? 0) : sort === 'frequency' ? b.occurrences - a.occurrences : 0).map(g => (
             <div key={g.id} className="card p-4 space-y-3">
               <div className="flex flex-wrap items-center gap-2">
                 {g.suppressed && <span className="text-muted">Suppressed</span>}
