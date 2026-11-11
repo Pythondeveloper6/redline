@@ -17,7 +17,7 @@ traces live in their own SQLite file.
 It replaces django-silk. Redline stores redacted data rather than plaintext secrets, never writes to
 your app DB or records itself, supports async, groups N+1s, and adds EXPLAIN and flamegraphs.
 
-> Status: `0.2.0a1`, alpha. Built on [`redline-core`](../redline-core).
+> Status: `0.5.0b1`, beta. Built on [`redline-core`](../redline-core).
 
 ## Install
 

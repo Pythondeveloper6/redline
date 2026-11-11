@@ -2,7 +2,7 @@
 
 [← Index](index.md)
 
-Redline is **alpha** (`0.x`). This page says which names you can build on, how they may
+Redline is **beta** (`0.x`). This page says which names you can build on, how they may
 change before 1.0, and how a change is announced. It is the authoritative list; older
 design notes cited in code comments describe how features were specified and are not a
 compatibility promise.

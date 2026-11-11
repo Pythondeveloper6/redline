@@ -4,8 +4,8 @@
 
 ## How finished is this?
 
-**Alpha, and open source.** This checkout develops `0.5.0a2` under the
-`Development Status :: 3 - Alpha` classifier and MIT licence. Published prereleases are
+**Beta, and open source.** This checkout develops `0.5.0b1` under the
+`Development Status :: 4 - Beta` classifier and MIT licence. Published prereleases are
 available on PyPI; they may lag this branch. [Getting started](getting-started.md#install)
 covers both published and local workspace installs. Profile, Analyze, Stress and Compare/CI
 have implementations. The [real-world guide](real-world-workflows.md) covers SQL failures,
@@ -69,7 +69,7 @@ solved a harder problem first.
 | Flamegraphs | cProfile call tree | pyinstrument, async-safe, exportable to speedscope |
 
 What silk has that Redline does not: a longer history, a larger user base, and
-Django-specific features this alpha lacks. If silk does what you need and your data is not
+Django-specific features this beta lacks. If silk does what you need and your data is not
 sensitive, it may be enough.
 
 ## How is it different from django-debug-toolbar?
@@ -119,7 +119,7 @@ and disk but not the per-query recording cost**.
 ## Is it safe to run in production?
 
 It can be, with the `production` preset (sampling, token access, read-only, no bodies, no
-locals), `explain_analyze` off, and retention limits. It is an alpha, and not hardened. Read
+locals), `explain_analyze` off, and retention limits. It is a beta, and not hardened. Read
 [Production](production.md), [Access control](access-control.md) and
 [Security](security.md) first. The safest posture is to run it in development and staging
 and tunnel to a loopback-only or token-protected instance when you need to look at

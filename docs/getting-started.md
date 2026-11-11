@@ -49,7 +49,7 @@ version, so use a local workspace when testing unreleased changes.
 Each adapter pins the exact core it was tested with. Pin both to the same release in
 your deployment lock file; do not mix an unreleased adapter with an older core. Review the
 [PyPI project](https://pypi.org/project/django-redline/) and release history when choosing
-a published version. Alpha releases require deployment-specific validation before use
+a published version. Beta releases require deployment-specific validation before use
 with real traffic; see [Production](production.md).
 
 Add extras to the **core** requirement:

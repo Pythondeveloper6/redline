@@ -31,7 +31,7 @@ load test that shows which query broke.
   <img alt="Redline showing an N+1 on order items in the Django demo shop: 30 queries from one line, with a prefetch_related diff" src="docs/assets/screenshots/django-n-plus-one-light.png">
 </picture>
 
-> **Development release: `0.5.0a2` (alpha).** This branch includes the next release's
+> **Development release: `0.5.0b1` (beta).** This branch includes the next release's
 > features; published packages can be an earlier version. Start with development or
 > staging. Production use requires validation of your actual framework, database driver,
 > traffic and process model: see the [deployment gate](docs/production.md).
@@ -413,7 +413,7 @@ Routine CI and documentation deployment run after pushes/merges to main. Publish
 follows successful main CI with an exact-version repository opt-in and the configured
 release approvals. A local merge does not publish packages. See [RELEASING.md](RELEASING.md).
 
-Redline remains alpha. API/settings/schema changes are possible; production readiness is
+Redline is in beta. API/settings/schema changes are possible; production readiness is
 specific to a tested deployment. It has no distributed tracing, alerting or fleet-wide
 store. WebSockets are not recorded; RQ/Dramatiq integrations are not implemented. Index
 and source suggestions need review, and sampled history needs careful interpretation.

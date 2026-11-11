@@ -9,7 +9,7 @@ Redline has two extension points, both small `typing.Protocol`s in `redline_core
 | [`FixSuggester`](#fixsuggester) | one method, `suggest(issue, spans)` | fix advice for another ORM, a house style, or a framework Redline does not know |
 | [`Store`](#the-store-protocol) | the storage interface | keeping traces somewhere other than the local SQLite file |
 
-Both are **alpha** surfaces: signatures may change before 1.0.
+Both are **beta** surfaces: signatures may change before 1.0.
 
 ## The data you will touch
 
