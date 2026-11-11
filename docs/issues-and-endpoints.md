@@ -93,6 +93,18 @@ same problem at the same line" is one group however many requests hit it.
 
 Groups are ordered by severity (critical first), then by occurrences, then by recency.
 
+### Why a finding fired, and ranking by impact
+
+Each item also carries `why`: `rule` (what the detector checks), `observed` (what the sampled
+occurrence showed), `threshold` (the configured limit, or `null`), `grouping` (how spans were
+combined into one finding) and `limits` (what the data cannot tell you; truncated traces are
+called out). The Issues page shows it under **Why this fired**.
+
+`GET api/issues?sort=impact` orders groups by sampled observed time, then occurrences, with
+suppressed groups last; any other `sort` value returns `400 invalid_sort`. Every item has an
+`impact` object with `basis: "sampled"` and `additive: false`. Concurrent or nested spans
+overlap, so impacts must not be summed into "time saved".
+
 ### Behaviour worth knowing
 
 - **The counts in a title are from the latest sample.** "N+1: 30 queries" reflects the
