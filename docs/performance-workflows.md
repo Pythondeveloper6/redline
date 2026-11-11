@@ -63,6 +63,7 @@ limit is illustrative.
 | `max_external_calls` | Maximum observed outbound HTTP calls in any timed call; a whole number |
 | `max_median_ms` | Upper bound on the current run's client-side median latency |
 | `max_p95_ms` | Upper bound on the current run's interpolated p95; use enough repeats |
+| `min_samples` | Whole number ≥ 1. Latency budgets (`max_median_ms`, `max_p95_ms`) fail with "insufficient samples" instead of judging a run with fewer timed calls |
 | `forbidden_issues` | Issue kinds that must not occur, for example `n_plus_one` |
 | `array_keys` | Match elements at a configured JSON path by an identity field |
 | `tolerances` | Allow a numeric difference at a configured JSON path |
