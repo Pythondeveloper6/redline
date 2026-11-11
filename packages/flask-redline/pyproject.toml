@@ -59,7 +59,7 @@ Changelog = "https://github.com/Pythondeveloper6/redline/blob/main/CHANGELOG.md"
 
 [dependency-groups]
 dev = [
-    "pytest>=8.3",
+    "pytest>=9.2.0",
     "flask-sqlalchemy>=3.1",
     "asgiref>=3.8",
     "pyinstrument>=5.0",
