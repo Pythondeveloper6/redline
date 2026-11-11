@@ -318,6 +318,12 @@ class RedlineAPI:
 
             health = health_snapshot(self.store, self.runtime_health)
             return (200 if health["status"] == "ok" else 503), health
+        if path == "api/instrumentation":
+            if method != "GET":
+                return _not_allowed()
+            from .instrumentation_report import build_report
+
+            return 200, build_report(self.store, self.runtime_health)
         if path == "api/endpoints":
             return self.endpoints(params) if method == "GET" else _not_allowed()
         if path == "api/issues":

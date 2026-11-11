@@ -56,6 +56,20 @@ function Value({ v }: { v: unknown }) {
   return <Scalar v={v} />
 }
 
+function InstrumentationCard() {
+  const r = useAsync(() => api.instrumentation(), [])
+  const x = r.data
+  if (!x) return null
+  return (
+    <section className="card p-3 text-[12px] space-y-1" aria-label="Instrumentation health">
+      <h2 className="m-0 text-[13px] font-semibold">What redline can see</h2>
+      <p className="m-0 text-muted">{x.traces_sampled} recent trace(s) sampled · {x.truncated_traces} truncated · {x.without_profile} without a profile · {x.dropped_writes} dropped write(s)</p>
+      <p className="m-0">{x.integrations.map(i => <span key={i.name} className="mono mr-2">{i.name}: {i.instrumented ? 'active' : i.installed ? 'inactive' : 'n/a'}</span>)}</p>
+      {x.warnings.map(w => <p key={w} className="m-0 text-warn">{w}</p>)}
+    </section>
+  )
+}
+
 export default function Settings() {
   const d = useAsync(() => api.config(), [])
   const [q, setQ] = useState('')
@@ -80,6 +94,7 @@ export default function Settings() {
         <input id="settings-filter" type="search" value={q} onChange={e => setQ(e.target.value)} placeholder="Filter settings…"
           className="h-7 w-48 rounded-md border border-line bg-surface px-2 text-[12px] outline-none focus:border-accent" />
       </div>
+      <InstrumentationCard />
       {d.error ? <LoadError error={d.error} what="the settings page" onRetry={d.reload} /> : d.loading && !data ? <Spinner /> : data && (
         <>
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[12px] text-muted">

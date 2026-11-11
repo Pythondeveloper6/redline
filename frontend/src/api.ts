@@ -1,4 +1,4 @@
-import type { CacheStat, ConfigResponse, LoginBody, CompareResult, EndpointStats, ExplainResult, ExternalStat, IndexAdvice, IssueGroup, Meta, Page, Speedscope, SqlStat, Trace, TraceFilters } from './types'
+import type { CacheStat, ConfigResponse, LoginBody, CompareResult, EndpointStats, ExplainResult, ExternalStat, IndexAdvice, InstrumentationReport, IssueGroup, Meta, Page, Speedscope, SqlStat, Trace, TraceFilters } from './types'
 import { getSnapshot } from './lib/snapshot'
 
 export class ApiError extends Error {
@@ -170,6 +170,7 @@ export const api = {
   explain: (trace_id: string, span_id: string, analyze = false) =>
     call<ExplainResult>('POST', './api/explain', { trace_id, span_id, analyze }),
   config: () => call<ConfigResponse>('GET', './api/config'),
+  instrumentation: () => call<InstrumentationReport>('GET', './api/instrumentation'),
   login: (body: LoginBody) => call<{ ok: boolean; expires_at: number }>('POST', './api/login', body),
   logout: () => call<{ ok: boolean }>('POST', './api/logout', {}),
   clear: () => call<{ deleted: number }>('DELETE', './api/traces'),

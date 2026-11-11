@@ -141,6 +141,7 @@ export async function mockFetch(method: string, url: string, body: unknown): Pro
       issues: { only_a: [...ka].filter(k => !kb.has(k)), only_b: [...kb].filter(k => !ka.has(k)), both: [...ka].filter(k => kb.has(k)) },
     })
   }
+  if (path === 'api/instrumentation') return ok({ window_seconds: 3600, sampled: true, traces_sampled: traces.length, truncated_traces: 0, without_profile: 0, dropped_writes: 0, write_failures: 0, capture_failures: 0, integrations: [{ name: 'httpx', installed: true, module_loaded: true, instrumented: true }], status: 'ok', warnings: [] })
   if (path === 'api/endpoints') return ok({ items: buildEndpoints() })
   if (path === 'api/issues') {
     const kind = u.searchParams.get('kind')

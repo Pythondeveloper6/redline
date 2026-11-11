@@ -20,7 +20,7 @@ import sys
 from collections.abc import Callable, Sequence
 from typing import Any, TextIO
 
-from . import digest, operations, project_init
+from . import digest, instrumentation_report, operations, project_init
 from .check_sql import command as _cmd_sql
 from .check_sql import configure_cli as _configure_sql
 from .schema_watch import command as _cmd_schema_watch
@@ -1849,6 +1849,12 @@ COMMANDS: dict[str, tuple[str, Callable[[argparse.ArgumentParser], None], Handle
         "post newly seen issues to a chat webhook (deduplicated, with a state file)",
         digest.configure,
         digest.command,
+        {},
+    ),
+    "instrumentation": (
+        "show what redline is blind to: inactive integrations, truncated traces, dropped writes",
+        instrumentation_report.configure,
+        instrumentation_report.command,
         {},
     ),
     "audit-store": (
