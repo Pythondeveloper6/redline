@@ -9,7 +9,7 @@ from redline_core import integration_status as status_module
 def test_status_reports_installed_loaded_and_instrumented_without_importing_providers(
     monkeypatch,
 ):
-    providers = {"httpx", "requests", "redis", "asyncpg", "psycopg", "boto3"}
+    providers = {"httpx", "requests", "redis", "asyncpg", "psycopg", "boto3", "anthropic", "openai"}
     for name in providers:
         monkeypatch.delitem(sys.modules, name, raising=False)
     monkeypatch.setattr(
@@ -38,6 +38,8 @@ def test_status_reports_installed_loaded_and_instrumented_without_importing_prov
         "asyncpg",
         "psycopg",
         "boto3",
+        "anthropic",
+        "openai",
     ]
     assert statuses[0] == {
         "name": "httpx",
@@ -47,7 +49,7 @@ def test_status_reports_installed_loaded_and_instrumented_without_importing_prov
     }
     assert statuses[1]["installed"] and not statuses[1]["instrumented"]
     assert statuses[2]["installed"] and not statuses[2]["module_loaded"]
-    assert statuses[-1]["instrumented"]
+    assert statuses[5]["name"] == "boto3" and statuses[5]["instrumented"]
     assert all(name not in sys.modules for name in providers - {"httpx"})
 
 
