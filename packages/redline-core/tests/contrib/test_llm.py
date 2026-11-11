@@ -52,6 +52,8 @@ def make_fake(monkeypatch, provider):
         class Completions:
             def create(self, **kwargs):
                 calls.append(kwargs)
+                if kwargs.get("model") == "boom":
+                    raise RuntimeError("upstream failed with " + SECRET_PROMPT)
                 if kwargs.get("stream"):
                     return iter(())
                 return types.SimpleNamespace(
@@ -141,8 +143,6 @@ def test_async_calls_are_recorded(tracer, provider):
 
 def test_errors_propagate_and_are_recorded_without_the_message(tracer, provider, monkeypatch):
     name, sync_cls, _, kwargs, _ = provider
-    if name == "openai":
-        pytest.skip("fake openai has no failing model")
     b = tracer.start()
     with pytest.raises(RuntimeError):
         sync_cls().create(**{**kwargs, "model": "boom"})
