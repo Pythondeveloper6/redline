@@ -873,6 +873,40 @@
       ]
     },
     {
+      "command": "redline diagnose",
+      "help": "preview (or, opted in, send) a redacted finding to an AI provider for diagnosis",
+      "arguments": [
+        {
+          "name": [
+            "issue_id"
+          ],
+          "required": true,
+          "help": "issue id from the UI, `redline mcp` or `fix-prompt`"
+        },
+        {
+          "name": [
+            "--store"
+          ],
+          "required": true,
+          "help": "path to the redline store"
+        },
+        {
+          "name": [
+            "--window"
+          ],
+          "required": false,
+          "help": "look-back window (default 7d)"
+        },
+        {
+          "name": [
+            "--send"
+          ],
+          "required": false,
+          "help": "really send it (needs ai_diagnosis and a key)"
+        }
+      ]
+    },
+    {
       "command": "redline digest",
       "help": "post newly seen issues to a chat webhook (deduplicated, with a state file)",
       "arguments": [

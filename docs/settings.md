@@ -365,6 +365,22 @@ model-count semantics and explicit cache-decode instrumentation are documented i
 controls do not change the server's effective configuration.
 
 
+## v0.5 LLM-call and AI-diagnosis settings
+
+| Setting | Default | Effect |
+|---|---|---|
+| `llm_duplicate_threshold` | `2` | Identical prompts to one model in a request that raise `duplicate_llm_call`; `0` disables |
+| `llm_serial_min` | `3` | Back-to-back LLM calls that raise `serial_llm_calls`; `0` disables |
+| `llm_loop_calls` | `8` | LLM calls in one request that raise `llm_call_loop`; `0` disables |
+| `llm_prompt_cache_chars` | `4000` | Anthropic prompt size that raises `uncached_large_prompt` without cache tokens; `0` disables |
+| `ai_diagnosis` | `false` | Allows `redline diagnose --send` to contact the provider. Without it the command only previews |
+| `ai_provider` | `"anthropic"` | Provider for diagnosis; the destination host is fixed per provider |
+| `ai_model` | `"claude-sonnet-5-5"` | Model used for diagnosis |
+
+The diagnosis API key is read from the `REDLINE_AI_API_KEY` environment variable only. It is not
+a setting, so it never appears in `redline config`, the API or the UI. See
+[LLM-call observability](llm.md) and [Working with AI agents](agents.md#ai-assisted-diagnosis).
+
 ## v0.4 database, privacy and job settings
 
 These settings apply to the common recorder. Adapters resolve file/environment/framework

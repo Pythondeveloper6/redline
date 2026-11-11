@@ -10,6 +10,18 @@
     "access_check": {
       "default": null
     },
+    "ai_diagnosis": {
+      "type": "boolean",
+      "default": false
+    },
+    "ai_model": {
+      "type": "string",
+      "default": "claude-sonnet-5-5"
+    },
+    "ai_provider": {
+      "type": "string",
+      "default": "anthropic"
+    },
     "allow_storage_in_repo": {
       "type": "boolean",
       "default": false

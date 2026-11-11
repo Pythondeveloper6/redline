@@ -76,12 +76,29 @@ each, which an agent step can consume. Pair it with the pytest markers
 (`@pytest.mark.redline(max_queries=…, no_n_plus_one=True)`) and the `redline check ratchet`
 query-count ratchet so a change cannot quietly add queries.
 
+## AI-assisted diagnosis
+
+```bash
+redline diagnose ISSUE_ID --store .redline/redline.db          # preview only, nothing is sent
+redline diagnose ISSUE_ID --store .redline/redline.db --send   # opted in: really sends
+```
+
+Off by default. The default run prints the exact request (destination, model and body) and
+exits. Sending needs three things together: `--send`, `ai_diagnosis = true` in the settings,
+and the key in the `REDLINE_AI_API_KEY` environment variable. The destination host is fixed
+for the provider (`api.anthropic.com`); it cannot be redirected. The body is an allowlist of
+finding fields (kind, title, evidence, SQL *shape* with literals replaced, file, line,
+function and one line of source) passed through the redactor. Request and response bodies,
+logs and LLM prompt text are never part of it. Errors report the HTTP status only, never the
+key or the provider's response body. Agents must not enable this themselves.
+
 ## Rules for agents
 
 - Never capture, log or paste prompt or completion text, tokens, passwords or request bodies.
 - Do not delete traces or run EXPLAIN ANALYZE against a production store.
 - Do not weaken a test, threshold or budget to make a finding disappear.
 - Do not push, tag or publish without the owner's approval.
+- Do not enable `ai_diagnosis` or set `REDLINE_AI_API_KEY`; only the owner opts in.
 
 ## Safe deployment recipe
 
