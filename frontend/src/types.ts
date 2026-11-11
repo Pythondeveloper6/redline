@@ -1,5 +1,5 @@
 export type SpanKind = 'sql' | 'cache' | 'http_out' | 'template' | 'middleware' | 'view' | 'custom'
-  | 'serializer' | 'resolver' | 'transaction' | 'blocking' | 'pool_wait'
+  | 'serializer' | 'resolver' | 'transaction' | 'blocking' | 'pool_wait' | 'llm_call'
 export interface Frame { file: string; line: number; function: string }
 export interface Callsite { file: string; line: number; function: string; code: string | null; stack: Frame[] }
 export interface Span {

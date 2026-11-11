@@ -14,6 +14,8 @@ _INTEGRATIONS = (
     ("asyncpg", "asyncpg", "redline_core.contrib.asyncpg", "_originals"),
     ("psycopg", "psycopg", "redline_core.contrib.psycopg", "_originals"),
     ("boto3", "boto3", "redline_core.contrib.boto3", "_wrapper"),
+    ("anthropic", "anthropic", "redline_core.contrib.anthropic", "_originals"),
+    ("openai", "openai", "redline_core.contrib.openai", "_originals"),
 )
 
 

@@ -55,6 +55,7 @@ SpanKind = Literal[
     "transaction",
     "blocking",
     "pool_wait",
+    "llm_call",
 ]
 IssueKind = Literal[
     "fresh_connection_failure",
@@ -109,6 +110,7 @@ SPAN_KINDS: tuple[str, ...] = (
     "transaction",
     "blocking",
     "pool_wait",
+    "llm_call",
 )
 ISSUE_KINDS: tuple[str, ...] = (
     "fresh_connection_failure",
