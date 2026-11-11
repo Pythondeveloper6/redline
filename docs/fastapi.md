@@ -26,6 +26,14 @@ Since 0.2 the SQLAlchemy and httpx hooks live in `redline_core.contrib` and are 
 the Flask and Litestar adapters; `fastapi_redline` re-exports them (`instrument_engine`,
 `instrument_httpx`), so existing imports keep working.
 
+## `install_if_dev()`
+
+`install_if_dev(app, **kwargs)` takes the same arguments as `install()` and returns the
+`Redline` handle, but attaches nothing (and logs a warning) when `REDLINE_ENV`, `APP_ENV`,
+`ENV`, `ENVIRONMENT`, `FLASK_ENV` or `DJANGO_ENV` is `prod` or `production`; it returns `None`
+then. `REDLINE_ALLOW_PRODUCTION=1` attaches anyway. It is only in 0.5 and later; on older
+releases use `install()` behind your own environment check.
+
 ## `install()`
 
 ```python

@@ -8,7 +8,34 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). While the
 version is below `1.0` the public API may change between minor versions.
 
-## Unreleased: 0.5.0a2
+## Unreleased: 0.5.0b1
+
+The project moves from alpha to beta.
+
+### Added
+
+- Every finding explains itself: `GET api/issues` items carry `why` (rule, observed,
+  threshold, grouping, limits), shown as **Why this fired** on the Issues page.
+- `GET api/issues?sort=impact` and a **Fix impact (sampled)** ordering rank findings by
+  sampled observed time. Impact is labelled sampled and never additive.
+- `redline check verify REPORT --kind KIND` answers whether a fix removed a finding
+  (`gone`, `still_present`, `inconclusive`), whether responses stayed equal and whether the
+  request got faster. `gone` needs enough after-change samples and complete metrics.
+- `redline check compare-live SUITE --old URL --new URL` alternates requests between two
+  running versions (order flips each round) to reduce timing drift.
+- Latency budgets accept `min_samples`; with fewer timed calls they fail as
+  "insufficient samples" instead of judging a meaningless p95.
+- `redline instrumentation`, `GET api/instrumentation` and a Settings card report what
+  redline cannot see: inactive integrations, truncated traces, traces without a profile and
+  dropped or failed writes.
+- `scripts/check_metrics_loop.py` repeats record-then-compare against the FastAPI demo to
+  look for the intermittent "server-side metrics: unavailable" report.
+
+### Changed
+
+- Development status classifiers are now `4 - Beta`.
+
+## 0.5.0a2
 
 ### Added
 
