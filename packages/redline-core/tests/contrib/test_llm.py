@@ -142,7 +142,7 @@ def test_async_calls_are_recorded(tracer, provider):
 
 
 def test_errors_propagate_and_are_recorded_without_the_message(tracer, provider, monkeypatch):
-    name, sync_cls, _, kwargs, _ = provider
+    _name, sync_cls, _, kwargs, _ = provider
     b = tracer.start()
     with pytest.raises(RuntimeError):
         sync_cls().create(**{**kwargs, "model": "boom"})
