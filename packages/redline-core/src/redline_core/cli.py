@@ -20,7 +20,7 @@ import sys
 from collections.abc import Callable, Sequence
 from typing import Any, TextIO
 
-from . import digest, instrumentation_report, operations, project_init
+from . import diagnose, digest, instrumentation_report, operations, project_init
 from .agent import fixprompt as agent_fixprompt
 from .agent import mcp as agent_mcp
 from .agent import skill as agent_skill
@@ -1921,6 +1921,12 @@ COMMANDS: dict[str, tuple[str, Callable[[argparse.ArgumentParser], None], Handle
         "print or write the redline skill / AGENTS.md section that teaches a coding agent",
         agent_skill.configure,
         agent_skill.command,
+        {},
+    ),
+    "diagnose": (
+        "preview (or, opted in, send) a redacted finding to an AI provider for diagnosis",
+        diagnose.configure,
+        diagnose.command,
         {},
     ),
     "fix-prompt": (

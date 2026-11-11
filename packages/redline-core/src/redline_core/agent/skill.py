@@ -45,6 +45,8 @@ guessing.
 - Never delete traces or run EXPLAIN ANALYZE on a production store.
 - Do not weaken a test, threshold or budget to make a finding disappear.
 - Do not push, tag or publish without the owner's explicit approval.
+- `redline diagnose` only previews unless the owner has enabled `ai_diagnosis` and set a key;
+  never enable it or set the key yourself.
 """
 
 

@@ -5495,12 +5495,29 @@ each, which an agent step can consume. Pair it with the pytest markers
 (`@pytest.mark.redline(max_queries=…, no_n_plus_one=True)`) and the `redline check ratchet`
 query-count ratchet so a change cannot quietly add queries.
 
+## AI-assisted diagnosis
+
+```bash
+redline diagnose ISSUE_ID --store .redline/redline.db          # preview only, nothing is sent
+redline diagnose ISSUE_ID --store .redline/redline.db --send   # opted in: really sends
+```
+
+Off by default. The default run prints the exact request (destination, model and body) and
+exits. Sending needs three things together: `--send`, `ai_diagnosis = true` in the settings,
+and the key in the `REDLINE_AI_API_KEY` environment variable. The destination host is fixed
+for the provider (`api.anthropic.com`); it cannot be redirected. The body is an allowlist of
+finding fields (kind, title, evidence, SQL *shape* with literals replaced, file, line,
+function and one line of source) passed through the redactor. Request and response bodies,
+logs and LLM prompt text are never part of it. Errors report the HTTP status only, never the
+key or the provider's response body. Agents must not enable this themselves.
+
 ## Rules for agents
 
 - Never capture, log or paste prompt or completion text, tokens, passwords or request bodies.
 - Do not delete traces or run EXPLAIN ANALYZE against a production store.
 - Do not weaken a test, threshold or budget to make a finding disappear.
 - Do not push, tag or publish without the owner's approval.
+- Do not enable `ai_diagnosis` or set `REDLINE_AI_API_KEY`; only the owner opts in.
 
 ## Safe deployment recipe
 
@@ -11093,6 +11110,22 @@ model-count semantics and explicit cache-decode instrumentation are documented i
 [Performance workflows](performance-workflows.md#additional-runtime-findings). Preview
 controls do not change the server's effective configuration.
 
+
+## v0.5 LLM-call and AI-diagnosis settings
+
+| Setting | Default | Effect |
+|---|---|---|
+| `llm_duplicate_threshold` | `2` | Identical prompts to one model in a request that raise `duplicate_llm_call`; `0` disables |
+| `llm_serial_min` | `3` | Back-to-back LLM calls that raise `serial_llm_calls`; `0` disables |
+| `llm_loop_calls` | `8` | LLM calls in one request that raise `llm_call_loop`; `0` disables |
+| `llm_prompt_cache_chars` | `4000` | Anthropic prompt size that raises `uncached_large_prompt` without cache tokens; `0` disables |
+| `ai_diagnosis` | `false` | Allows `redline diagnose --send` to contact the provider. Without it the command only previews |
+| `ai_provider` | `"anthropic"` | Provider for diagnosis; the destination host is fixed per provider |
+| `ai_model` | `"claude-sonnet-5-5"` | Model used for diagnosis |
+
+The diagnosis API key is read from the `REDLINE_AI_API_KEY` environment variable only. It is not
+a setting, so it never appears in `redline config`, the API or the UI. See
+[LLM-call observability](llm.md) and [Working with AI agents](agents.md#ai-assisted-diagnosis).
 
 ## v0.4 database, privacy and job settings
 

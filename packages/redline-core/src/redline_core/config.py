@@ -74,6 +74,7 @@ IGNORED_ENV = frozenset(
         "REDLINE_RELEASE",
         "REDLINE_ALLOW_PRODUCTION",
         "REDLINE_ENV",
+        "REDLINE_AI_API_KEY",
     }
 )
 _IGNORED_ENV_PREFIXES = ("REDLINE_TEST_",)
@@ -137,6 +138,9 @@ GROUPS: dict[str, tuple[str, ...]] = {
         "llm_serial_min",
         "llm_loop_calls",
         "llm_prompt_cache_chars",
+        "ai_diagnosis",
+        "ai_provider",
+        "ai_model",
         "large_response_bytes",
         "large_cache_bytes",
         "pool_wait_ms",
