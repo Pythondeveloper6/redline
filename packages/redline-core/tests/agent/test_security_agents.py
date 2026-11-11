@@ -20,13 +20,14 @@ from redline_core.storage.multiple import TraceReader
 from redline_core.storage.sqlite import SQLiteStore
 
 from ..conftest import make_trace
-from ..contrib.conftest import tracer  # noqa: F401 (fixture)
+from ..contrib.conftest import Tracer
 from ..contrib.test_llm import SECRET_PROMPT, make_fake
 
 
 @pytest.fixture
-def secret_store(tracer, monkeypatch, tmp_path):
+def secret_store(monkeypatch, tmp_path):
     """A store holding a trace from three identical, secret-bearing LLM calls."""
+    tracer = Tracer()
     sync_cls, _, _ = make_fake(monkeypatch, "anthropic")
     from redline_core.contrib import anthropic as mod
 
@@ -117,7 +118,7 @@ def test_audit_log_has_no_argument_values_and_is_private(secret_store, tmp_path)
 
 
 def test_diagnosis_never_contacts_the_network_by_default(secret_store, monkeypatch, capsys):
-    path, trace = secret_store
+    path, _trace = secret_store
 
     def boom(*a, **k):
         raise AssertionError("network used")
