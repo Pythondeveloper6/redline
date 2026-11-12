@@ -99,6 +99,9 @@ def test_agent_workflow_on_a_real_database(vendor, tmp_path):
             with TestClient(app, base_url="http://localhost") as client:
                 assert client.get("/items").json() == {"ok": True}
                 assert client.get("/assistant").json() == {"ok": True}
+                # Recordings are written by a background thread; wait for both to be stored
+                # before reading them back (otherwise the second one can still be queued).
+                assert extension.store.flush(timeout=30)
                 issues = client.get("/_redline/api/issues?window=1h&sort=impact").json()["items"]
                 kinds = {i["kind"] for i in issues}
                 assert {"n_plus_one", "duplicate_llm_call", "serial_llm_calls"} <= kinds
