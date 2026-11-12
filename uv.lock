@@ -1,5 +1,5 @@
 version = 1
-revision = 5
+revision = 3
 requires-python = ">=3.12"
 
 [manifest]
@@ -2009,10 +2009,12 @@ dev = [
     { name = "pyinstrument" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
+    { name = "pytest-cov" },
     { name = "redis" },
     { name = "requests" },
     { name = "ruff" },
     { name = "sqlalchemy", extra = ["asyncio"] },
+    { name = "starlette" },
     { name = "strawberry-graphql" },
 ]
 
@@ -2047,10 +2049,12 @@ dev = [
     { name = "pyinstrument", specifier = ">=5.0" },
     { name = "pytest", specifier = ">=9.2.0" },
     { name = "pytest-asyncio", specifier = ">=0.24" },
+    { name = "pytest-cov", specifier = ">=6.0" },
     { name = "redis", specifier = ">=5.0" },
     { name = "requests", specifier = ">=2.31" },
     { name = "ruff", specifier = ">=0.8" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0,<3.0" },
+    { name = "starlette", specifier = ">=0.37" },
     { name = "strawberry-graphql", specifier = ">=0.240" },
 ]
 

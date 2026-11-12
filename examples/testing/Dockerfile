@@ -26,6 +26,8 @@ RUN python -m playwright install --with-deps chromium
 COPY --from=frontend /packages/redline-core/src/redline_core/ui/static/ packages/redline-core/src/redline_core/ui/static/
 COPY examples/ examples/
 COPY scripts/ scripts/
+COPY benchmarks/ benchmarks/
+COPY action.yml ./
 COPY docs/ docs/
 COPY .github/ .github/
 COPY README.md CHANGELOG.md RELEASING.md SECURITY.md CONTRIBUTING.md mkdocs.yml ./

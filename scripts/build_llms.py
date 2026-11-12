@@ -170,10 +170,16 @@ def build_cli() -> str:
         for action in parser._actions:
             if isinstance(action, (argparse._HelpAction, argparse._SubParsersAction)):
                 continue
+            if action.option_strings:
+                required = bool(getattr(action, "required", False))
+            else:
+                # argparse sets `required` on positionals differently across Python versions
+                # (REMAINDER and "*" differ between 3.10 and 3.13); derive it from nargs.
+                required = action.nargs not in ("?", "*", argparse.REMAINDER)
             flags.append(
                 {
                     "name": action.option_strings or [action.dest],
-                    "required": bool(getattr(action, "required", False)),
+                    "required": required,
                     "help": (action.help or "").replace("%(default)s", str(action.default)),
                 }
             )

@@ -40,6 +40,10 @@ The command builds the current checkout, waits for service health, creates the f
   attempts, parent/request correlation, SQL/stage/row evidence and postfork writer shutdown.
 - Chromium against a real HTTP demo: Jobs/detail evidence, SQL checker, privacy preview,
   mobile overflow checks and screenshots. This is not a complete accessibility audit.
+- The AI-agent workflow on each real database: findings with reasons and impact order, the
+  LLM-call findings and usage summary, `redline instrumentation`, a fix brief, the MCP server
+  over stdio (`test_live_agents.py`), the diagnosis preview (and its refusal without opt-in), and
+  proof that prompt text never reaches any of those outputs.
 - Both feature-demo harnesses, strict docs, wheels/source distributions, package metadata,
   fresh wheel installation and import/asset smoke checks.
 
