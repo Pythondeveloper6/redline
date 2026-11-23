@@ -18,6 +18,11 @@ load test that shows which query broke.
 [![Litestar](https://img.shields.io/badge/litestar-2.12%2B-202235)](https://github.com/Pythondeveloper6/redline/tree/main/packages/litestar-redline)
 [![CI](https://github.com/Pythondeveloper6/redline/actions/workflows/ci.yml/badge.svg)](https://github.com/Pythondeveloper6/redline/actions/workflows/ci.yml)
 [![Licence: MIT](https://img.shields.io/badge/licence-MIT-e5392f?logo=opensourceinitiative&logoColor=white)](https://github.com/Pythondeveloper6/redline/blob/main/LICENSE)
+[![PyPI Downloads](https://static.pepy.tech/personalized-badge/redline-core?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/redline-core)
+[![PyPI Downloads](https://static.pepy.tech/personalized-badge/django-redline?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/django-redline)
+[![PyPI Downloads](https://static.pepy.tech/personalized-badge/fastapi-redline?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/fastapi-redline)
+[![PyPI Downloads](https://static.pepy.tech/personalized-badge/flask-redline?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/flask-redline)
+[![PyPI Downloads](https://static.pepy.tech/personalized-badge/litestar-redline?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/litestar-redline)
 
 [**Documentation**](https://pythondeveloper6.github.io/redline/) ·
 [Getting started](https://pythondeveloper6.github.io/redline/getting-started/) ·
