@@ -293,6 +293,11 @@ load_disabled`). When on, its safety rests on these rules:
 3. It is a real load: a user who may start runs can make your instance slow. Enable it only
    in environments where that is acceptable, and not in production.
 
+### Flows
+
+`flows` is accepted only from a scenario file, like the other keys below, and any request
+path starting with `//` is refused, so a path can never turn into another host.
+
 ### Identities, data files and token commands
 
 A scenario file may name identities, data files and a token provider (a command, a request or

@@ -109,6 +109,10 @@ order-id feed from `order_ids.csv` (`[[data]]` with `pick = "zipf"`, so a few or
 Run it the same way; the traces carry an `identity` tag, and only the name is recorded,
 never the key or session.
 
+`scenario_flow.toml` is a journey: list the orders, take the first id from the answer and open
+that order (`extract`, `{var:order_id}`), with `expect` checks so an error body would count as
+a failure. The CLI prints the flow and each step at the end of the run.
+
 If the generator runs on another machine (or the app in a container), it has no access to
 that store file. Either point both at one PostgreSQL store (`--store-url postgresql://...`) or,
 with `accept_remote_runs = true` on the app, register the run over HTTP:

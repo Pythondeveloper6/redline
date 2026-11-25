@@ -37,6 +37,7 @@ from collections import Counter
 from typing import Any
 
 from ..histogram import Histogram
+from .flows import ExtractError, check_expect, render_vars, render_vars_value, run_extract
 from .profile import arrival_offsets
 from .scenario import render_path
 from .variation import (
@@ -83,6 +84,54 @@ class _Acc:
         }
 
 
+class _Ctx:
+    """The per-arrival state shared by every request of a flow."""
+
+    __slots__ = ("headers", "lookup", "run_value", "variables")
+
+    def __init__(self) -> None:
+        self.headers: dict[str, str] = {}
+        self.lookup: Any = None
+        self.run_value = ""
+        self.variables: dict[str, str] = {}
+
+
+class _StepAcc:
+    __slots__ = ("count", "errors", "hist")
+
+    def __init__(self) -> None:
+        self.count = 0
+        self.errors = 0
+        self.hist = Histogram()
+
+
+class _FlowAcc:
+    """Per-flow numbers since the last flush: flows run, failed, their latency and each step."""
+
+    def __init__(self, steps: int) -> None:
+        self.count = 0
+        self.errors = 0
+        self.breakdown: Counter[str] = Counter()
+        self.hist = Histogram()
+        self.steps = [_StepAcc() for _ in range(steps)]
+
+    def to_msg(self) -> dict[str, Any]:
+        return {
+            "count": self.count,
+            "errors": self.errors,
+            "breakdown": dict(self.breakdown),
+            "hist": self.hist.to_bytes() if self.hist.count else b"",
+            "steps": [
+                {
+                    "count": s.count,
+                    "errors": s.errors,
+                    "hist": s.hist.to_bytes() if s.hist.count else b"",
+                }
+                for s in self.steps
+            ],
+        }
+
+
 def worker_main(cfg: dict[str, Any], out_q: Any, go: Any, start_at: Any, stop: Any) -> None:
     """Process entry point (must stay importable at module level for ``spawn``)."""
     signal.signal(signal.SIGINT, signal.SIG_IGN)
@@ -122,8 +171,11 @@ class _Worker:
         self.stopping = False
         seed = cfg.get("seed")
         self.rng = random.Random(None if seed is None else seed * 1_000 + self.k)
-        self.requests = [r for r in cfg["requests"] if r["weight"] > 0]
-        self.weights = [r["weight"] for r in self.requests]
+        self.items: list[tuple[str, dict[str, Any]]] = [
+            ("req", r) for r in cfg["requests"] if r["weight"] > 0
+        ] + [("flow", f) for f in cfg.get("flows") or () if f["weight"] > 0]
+        self.weights = [spec["weight"] for _, spec in self.items]
+        self.flow_window: dict[str, _FlowAcc] = {}
         self.headers = dict(cfg.get("headers") or {})
         self.run_header = cfg["run_id"]
         self.window: dict[int, _Acc] = {}
@@ -157,13 +209,21 @@ class _Worker:
         return acc
 
     def flush(self) -> None:
-        if not self.window:
+        if not self.window and not self.flow_window:
             return
         steps = {n: acc.to_msg() for n, acc in self.window.items()}
+        flows = {name: acc.to_msg() for name, acc in self.flow_window.items()}
         self.window = {}
-        self.q.put(
-            {"type": "tick", "worker": self.k, "t": time.perf_counter() - self.t0, "steps": steps}
-        )
+        self.flow_window = {}
+        msg: dict[str, Any] = {
+            "type": "tick",
+            "worker": self.k,
+            "t": time.perf_counter() - self.t0,
+            "steps": steps,
+        }
+        if flows:
+            msg["flows"] = flows
+        self.q.put(msg)
 
     def _maybe_done(self, step: int) -> None:
         if step in self.done_sent or step not in self.closed:
@@ -306,12 +366,12 @@ class _Worker:
                 acc.sent += 1
                 self.inflight += 1
                 self.inflight_by_step[index] += 1
-                req = (
-                    self.requests[0]
-                    if len(self.requests) == 1
-                    else self.rng.choices(self.requests, self.weights)[0]
+                item = (
+                    self.items[0]
+                    if len(self.items) == 1
+                    else self.rng.choices(self.items, self.weights)[0]
                 )
-                task = asyncio.create_task(self._one(at, index, req))
+                task = asyncio.create_task(self._one(at, index, item))
                 self.tasks.add(task)
                 task.add_done_callback(self.tasks.discard)
             await self._sleep_until(step_t0 + duration_s)
@@ -331,58 +391,139 @@ class _Worker:
         for step in list(self.closed):
             self._maybe_done(step)
 
-    async def _one(self, scheduled: float, step: int, req: dict[str, Any]) -> None:
+    def _new_ctx(self, step: int) -> _Ctx:
+        """What one arrival shares across all its requests: the identity, the data row
+        and the variables a flow extracts."""
+        ctx = _Ctx()
+        ctx.lookup = self.feed.new_context(self.rng) if self.feed is not None else None
+        ctx.headers = dict(self.headers)
+        if self.tokens is not None:
+            pair = self.tokens.header()
+            if pair:
+                ctx.headers[pair[0]] = pair[1]
+        ctx.run_value = f"{self.run_header};step={step}"
+        if self.picker is not None:
+            identity = self.picker.pick(self.rng)
+            ctx.headers.update(identity.request_headers())
+            ctx.run_value += f";identity={identity_tag(identity.name)}"
+            self._acc(step).identities[identity.name] += 1
+        return ctx
+
+    async def _send(
+        self, req: dict[str, Any], ctx: _Ctx, flow_tag: str = ""
+    ) -> tuple[str | None, float | None]:
+        """Send one request. Returns ``(failure, sent_at)``: ``failure`` is ``None`` for a
+        success, else the error class (a status code, an exception name, ``assertion`` or
+        ``extract``)."""
         sent_at: float | None = None
-        status: int | None = None
-        error: str | None = None
         try:
-            lookup = self.feed.new_context(self.rng) if self.feed is not None else None
-            headers = dict(self.headers)
-            if self.tokens is not None:
-                pair = self.tokens.header()
-                if pair:
-                    headers[pair[0]] = pair[1]
-            run_value = f"{self.run_header};step={step}"
-            if self.picker is not None:
-                identity = self.picker.pick(self.rng)
-                headers.update(identity.request_headers())
-                run_value += f";identity={identity_tag(identity.name)}"
-                self._acc(step).identities[identity.name] += 1
-            headers.update({k: render_data(v, lookup) for k, v in req.get("headers", {}).items()})
-            headers["X-Redline-Run"] = run_value
+            lookup, variables = ctx.lookup, ctx.variables
+            headers = dict(ctx.headers)
+            headers.update(
+                {
+                    k: render_vars(render_data(v, lookup), variables)
+                    for k, v in req.get("headers", {}).items()
+                }
+            )
+            headers["X-Redline-Run"] = ctx.run_value + flow_tag
             kwargs: dict[str, Any] = {"headers": headers}
             if req.get("has_json"):
-                kwargs["content"] = jsonlib.dumps(render_value(req["json"], lookup)).encode()
+                body = render_vars_value(render_value(req["json"], lookup), variables)
+                kwargs["content"] = jsonlib.dumps(body).encode()
                 headers.setdefault("Content-Type", "application/json")
             elif req.get("body") is not None:
-                kwargs["content"] = render_data(req["body"], lookup).encode()
-            path = render_path(req["path"], self.rng, lookup)
+                kwargs["content"] = render_vars(
+                    render_data(req["body"], lookup), variables
+                ).encode()
+            path = render_path(req["path"], self.rng, lookup, variables)
             async with self.sem:
                 sent_at = time.perf_counter()
                 response = await self.client.request(req["method"], path, **kwargs)
-            status = response.status_code
+            elapsed_ms = (time.perf_counter() - sent_at) * 1000.0
         except asyncio.CancelledError:
-            error = "Cancelled"
             raise
+        except ExtractError:
+            return "extract", sent_at
         except Exception as exc:
-            error = type(exc).__name__
+            return type(exc).__name__, sent_at
+        status = response.status_code
+        expect = req.get("expect_status")
+        if not (status in expect if expect else status < 400):
+            return str(status), sent_at
+        rules = req.get("expect") or ()
+        if rules and check_expect(rules, response.headers, response.content) is not None:
+            return "assertion", sent_at
+        if req.get("max_ms") and elapsed_ms > req["max_ms"]:
+            return "assertion", sent_at
+        specs = req.get("extract")
+        if specs:
+            try:
+                ctx.variables.update(run_extract(specs, response.headers, response.content))
+            except ExtractError:
+                return "extract", sent_at
+        return None, sent_at
+
+    async def _one(self, scheduled: float, step: int, item: tuple[str, dict[str, Any]]) -> None:
+        kind, spec = item
+        sent_at: float | None = None
+        failure: str | None = None
+        try:
+            ctx = self._new_ctx(step)
+            if kind == "req":
+                failure, sent_at = await self._send(spec, ctx)
+            else:
+                failure, sent_at = await self._flow(scheduled, spec, ctx)
+        except asyncio.CancelledError:
+            failure = "Cancelled"
+            raise
+        except Exception as exc:  # never leave the in-flight count behind
+            failure = type(exc).__name__
         finally:
             end = time.perf_counter()
             acc = self._acc(step)
             acc.hist.record((end - scheduled) * 1000.0)
             if sent_at is not None:
                 acc.svc.record((end - sent_at) * 1000.0)
-            if error is None and status is not None:
-                expect = req.get("expect_status")
-                good = status in expect if expect else status < 400
-                if good:
-                    acc.ok += 1
-                else:
-                    acc.errors += 1
-                    acc.breakdown[str(status)] += 1
+            if failure is None:
+                acc.ok += 1
             else:
                 acc.errors += 1
-                acc.breakdown[error or "Error"] += 1
+                acc.breakdown[failure or "Error"] += 1
             self.inflight -= 1
             self.inflight_by_step[step] -= 1
             self._maybe_done(step)
+
+    async def _flow(
+        self, scheduled: float, flow: dict[str, Any], ctx: _Ctx
+    ) -> tuple[str | None, float | None]:
+        """Run a flow's steps in order; the first failure ends it and counts once."""
+        name, n_steps = flow["name"], len(flow["steps"])
+        first_sent: float | None = None
+        failure: str | None = None
+        for index, req in enumerate(flow["steps"]):
+            tag = f";flow={identity_tag(flow['name'])};fstep={index + 1}"
+            started = time.perf_counter()
+            failure, sent_at = await self._send(req, ctx, tag)
+            if first_sent is None:
+                first_sent = sent_at
+            # looked up each time: a flush between steps swaps the accumulator out
+            stats = self._flow_acc(name, n_steps)
+            step_stats = stats.steps[index]
+            step_stats.count += 1
+            step_stats.hist.record((time.perf_counter() - started) * 1000.0)
+            if failure is not None:
+                step_stats.errors += 1
+                stats.breakdown[failure] += 1
+                break
+        stats = self._flow_acc(name, n_steps)
+        stats.count += 1
+        stats.hist.record((time.perf_counter() - scheduled) * 1000.0)
+        if failure is not None:
+            stats.errors += 1
+        return failure, first_sent
+
+    def _flow_acc(self, name: str, steps: int) -> _FlowAcc:
+        acc = self.flow_window.get(name)
+        if acc is None:
+            acc = self.flow_window[name] = _FlowAcc(steps)
+        return acc

@@ -52,7 +52,7 @@ __all__ = [
 ]
 
 #: Scenario keys that can run code or read files: refused from the UI and the HTTP API.
-LOCAL_ONLY_KEYS = ("auth", "identities", "identities_file", "identity_mode", "data")
+LOCAL_ONLY_KEYS = ("auth", "identities", "identities_file", "identity_mode", "data", "flows")
 
 IDENTITY_MODES = ("round_robin", "random", "sticky")
 PICK_MODES = ("sequential", "random", "zipf")

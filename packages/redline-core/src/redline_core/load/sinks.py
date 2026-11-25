@@ -67,27 +67,37 @@ def redact_config(config: Mapping[str, Any], redactor: Any = None) -> dict[str, 
         out["headers"] = headers(out["headers"])
     if isinstance(out.get("base_url"), str):
         out["base_url"] = r.url(out["base_url"])
+
+    def request(item: Any) -> Any:
+        if not isinstance(item, Mapping):
+            return item
+        item = dict(item)
+        if "headers" in item:
+            item["headers"] = headers(item["headers"])
+        if isinstance(item.get("path"), str):
+            item["path"] = r.url(item["path"])
+        if isinstance(item.get("name"), str):  # defaults to "METHOD path"
+            item["name"] = r.text(item["name"])
+        if "json" in item:
+            item["json"] = r.mapping(item["json"])
+        if isinstance(item.get("body"), str):
+            hdrs = item.get("headers")
+            hdrs = hdrs if isinstance(hdrs, Mapping) else {}
+            ctype = next((v for k, v in hdrs.items() if k.lower() == "content-type"), None)
+            item["body"] = r.body(item["body"], ctype)[0]
+        return item
+
     requests = out.get("requests")
     if isinstance(requests, (list, tuple)):
-        items = []
-        for item in requests:
-            if isinstance(item, Mapping):
-                item = dict(item)
-                if "headers" in item:
-                    item["headers"] = headers(item["headers"])
-                if isinstance(item.get("path"), str):
-                    item["path"] = r.url(item["path"])
-                if isinstance(item.get("name"), str):  # defaults to "METHOD path"
-                    item["name"] = r.text(item["name"])
-                if "json" in item:
-                    item["json"] = r.mapping(item["json"])
-                if isinstance(item.get("body"), str):
-                    hdrs = item.get("headers")
-                    hdrs = hdrs if isinstance(hdrs, Mapping) else {}
-                    ctype = next((v for k, v in hdrs.items() if k.lower() == "content-type"), None)
-                    item["body"] = r.body(item["body"], ctype)[0]
-            items.append(item)
-        out["requests"] = items
+        out["requests"] = [request(item) for item in requests]
+    flows = out.get("flows")
+    if isinstance(flows, (list, tuple)):
+        out["flows"] = [
+            {**f, "steps": [request(s) for s in f.get("steps", ())]}
+            if isinstance(f, Mapping)
+            else f
+            for f in flows
+        ]
     identities = out.get("identities")
     if isinstance(identities, (list, tuple)):
         # identity headers and cookies are credentials by nature: keep only the names

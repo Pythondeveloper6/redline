@@ -226,6 +226,13 @@ def run(
     status, message = engine.execute()
     steps = engine.finished_steps
     summary = analyze(steps)
+    if engine.flow_stats:
+        by_name = {f.name: f for f in sc.flows}
+        summary["flows"] = {
+            name: stats.to_dict(by_name[name])
+            for name, stats in engine.flow_stats.items()
+            if stats.count
+        }
     if engine.identity_counts:
         summary["identities"] = _identity_summary(engine.identity_counts)
     if engine.stopped_reason:
@@ -245,6 +252,68 @@ def run(
         summary=summary,
         message=message,
     )
+
+
+def _request_cfg(r: Any) -> dict[str, Any]:
+    """One request as the plain dict a worker process receives."""
+    return {
+        "method": r.method,
+        "path": r.path,
+        "weight": r.weight,
+        "headers": dict(r.headers),
+        "json": r.json,
+        "has_json": r.has_json,
+        "body": r.body,
+        "expect_status": list(r.expect_status) if r.expect_status else None,
+        "expect": [dict(rule) for rule in r.expect],
+        "max_ms": r.max_ms,
+        "extract": {k: dict(v) for k, v in r.extract.items()},
+    }
+
+
+class _FlowStats:
+    """Run-wide numbers of one flow, merged from the workers' ticks."""
+
+    def __init__(self, steps: int) -> None:
+        self.count = self.errors = 0
+        self.breakdown: Counter[str] = Counter()
+        self.hist = Histogram()
+        self.steps = [[0, 0, Histogram()] for _ in range(steps)]  # count, errors, hist
+
+    def add(self, m: Mapping[str, Any]) -> None:
+        self.count += m["count"]
+        self.errors += m["errors"]
+        self.breakdown.update(m["breakdown"])
+        if m["hist"]:
+            self.hist.merge(Histogram.from_bytes(m["hist"]))
+        for mine, theirs in zip(self.steps, m["steps"], strict=False):
+            mine[0] += theirs["count"]
+            mine[1] += theirs["errors"]
+            if theirs["hist"]:
+                mine[2].merge(Histogram.from_bytes(theirs["hist"]))
+
+    def to_dict(self, flow: Any) -> dict[str, Any]:
+        h = self.hist
+        return {
+            "count": self.count,
+            "errors": self.errors,
+            "error_rate": round(self.errors / self.count, 4) if self.count else 0.0,
+            "p50_ms": round(h.percentile(50), 3),
+            "p95_ms": round(h.percentile(95), 3),
+            "p99_ms": round(h.percentile(99), 3),
+            "error_breakdown": dict(self.breakdown),
+            "steps": [
+                {
+                    "step": i + 1,
+                    "name": flow.steps[i].name,
+                    "count": c,
+                    "errors": err,
+                    "p50_ms": round(hist.percentile(50), 3),
+                    "p95_ms": round(hist.percentile(95), 3),
+                }
+                for i, (c, err, hist) in enumerate(self.steps)
+            ],
+        }
 
 
 def _identity_summary(counts: Counter[str]) -> dict[str, Any]:
@@ -268,7 +337,7 @@ def _preflight(sc: Scenario) -> None:
         load_identities(sc.identities, sc.identities_file, sc.base_dir)
     if sc.data:
         feed = DataFeed(sc.data, 0, 1)
-        for r in sc.requests:
+        for r in [*sc.requests, *(s for f in sc.flows for s in f.steps)]:
             refs = data_refs(r.path)
             for _, text in _strings_of(
                 {"headers": r.headers, "json": r.json if r.has_json else None, "body": r.body}
@@ -301,6 +370,7 @@ class _Engine:
         self.window = _Window()
         self.stopped_reason: str | None = None
         self.identity_counts: Counter[str] = Counter()
+        self.flow_stats = {f.name: _FlowStats(len(f.steps)) for f in sc.flows}
         self.start_epoch = 0.0
         self.exited: set[int] = set()
         self.errors: dict[int, str] = {}
@@ -319,18 +389,14 @@ class _Engine:
             "max_inflight": sc.max_inflight,
             "poisson": sc.profile.poisson,
             "seed": sc.seed,
-            "requests": [
+            "requests": [_request_cfg(r) for r in sc.requests],
+            "flows": [
                 {
-                    "method": r.method,
-                    "path": r.path,
-                    "weight": r.weight,
-                    "headers": dict(r.headers),
-                    "json": r.json,
-                    "has_json": r.has_json,
-                    "body": r.body,
-                    "expect_status": list(r.expect_status) if r.expect_status else None,
+                    "name": f.name,
+                    "weight": f.weight,
+                    "steps": [_request_cfg(s) for s in f.steps],
                 }
-                for r in sc.requests
+                for f in sc.flows
             ],
             "steps": [(p.index, p.target_rps, p.start_s, p.duration_s) for p in self.plans],
             "_crash_after_s": sc.extra.get("_crash_after_s"),
@@ -483,6 +549,10 @@ class _Engine:
                 self.window.add(m)
                 if m.get("identities"):
                     self.identity_counts.update(m["identities"])
+            for name, fm in (msg.get("flows") or {}).items():
+                stats = self.flow_stats.get(name)
+                if stats is not None:
+                    stats.add(fm)
         elif kind == "step_done":
             agg = self.aggs.get(msg["step"])
             if agg is not None:

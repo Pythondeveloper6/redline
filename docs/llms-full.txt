@@ -5893,6 +5893,7 @@ stop_on = { error_rate = 0.05, p95_ms = 2000 }
 | `identities`, `identities_file`, `identity_mode` | none | Many users instead of one: see [Identities](#identities) |
 | `data` | none | CSV / JSON Lines files that fill `{data:source.column}`: see [Data feeds](#data-feeds) |
 | `auth` | none | A token provider refreshed during the run: see [Token refresh](#token-refresh) |
+| `flows` | none | Weighted journeys of chained requests: see [Flows](#flows). `requests` may then be empty |
 
 Durations accept a number of seconds or strings such as `"20s"`, `"2m"`.
 
@@ -5908,6 +5909,9 @@ Durations accept a number of seconds or strings such as `"20s"`, `"2m"`.
 | `json` | none | A JSON body; sets `Content-Type: application/json` |
 | `body` | none | A raw string body |
 | `expect_status` | any status below 400 | A list of acceptable status codes. Anything else counts as an error |
+| `expect` | none | Rules the response must satisfy: see [Response checks](#response-checks) |
+| `max_ms` | none | A success slower than this counts as an `assertion` failure |
+| `extract` | none | Values to read from the response for later steps of a [flow](#flows) |
 
 ### Placeholders
 
@@ -5923,6 +5927,54 @@ Rendered separately for every request:
 
 Any other `{...}` in a path is an **error**, so an OpenAPI path such as `/orders/{id}` can
 never be sent by accident.
+
+### Flows
+
+Real traffic is journeys: list, open one item from that list, save it. A random detail id
+often does not exist or is not the caller's, so much of the load turns into cheap 403 and 404
+responses. A flow is an ordered list of requests that one arrival runs:
+
+```toml
+[[flows]]
+name = "browse"
+weight = 3
+
+[[flows.steps]]
+path = "/items"
+extract = { id = "$.items[0].id" }          # a JSON path (shorthand), or ...
+# extract = { tok = { header = "X-Next" }, n = { regex = "id=(\\d+)", group = 1 } }
+
+[[flows.steps]]
+path = "/items/{var:id}"                    # {var:name} works in the path, headers, JSON and body
+expect = [{ json = "$.name" }]
+```
+
+One arrival starts one flow, so the open model stays intact. The latency of a flow is
+measured from its scheduled start to the end of its last step, and each step has its own
+numbers. A failed step ends the flow and is counted **once** as a flow error, with the class
+of the failing step (a status code, an exception, `assertion`, or `extract` when a value the
+next step needs was not in the response). The identity and data row stay the same for the
+whole flow. The run summary has a `flows` entry (runs, errors, p50/p95/p99, per-step counts and
+percentiles) that the CLI prints, and the app's traces carry `flow` and `fstep` tags next to
+`run_id` and `step`, so the bottleneck table gets rows for every step of the journey. Plain
+requests and flows can be mixed; each arrival picks one by weight.
+
+### Response checks
+
+Under load many apps answer `200` with an error body, an empty list or a truncated payload;
+by default those count as successes. Add `expect` to a request (one rule or a list):
+
+| Rule | Passes when |
+|---|---|
+| `{ json = "$.items[0].id" }` | the JSON path exists (`exists = false` to require it absent) |
+| `{ json = "$.status", equals = "ok" }` | the value equals this |
+| `{ contains = "text" }` / `{ not_contains = "text" }` | the body does / does not contain it |
+| `{ min_bytes = 200 }` | the body is at least this large |
+| `{ header = "Content-Type", contains = "json" }` | the header exists (and `equals` / `contains` match) |
+
+A failed rule is counted as its own error class, `assertion`, in the error breakdown, and
+`max_ms` does the same for a response slower than an agreed limit. Failure reasons never
+include body or header values.
 
 ### Identities
 
@@ -10073,6 +10125,11 @@ load_disabled`). When on, its safety rests on these rules:
 2. It is gated by the same access policy, by `read_only` and by the `load` feature switch.
 3. It is a real load: a user who may start runs can make your instance slow. Enable it only
    in environments where that is acceptable, and not in production.
+
+### Flows
+
+`flows` is accepted only from a scenario file, like the other keys below, and any request
+path starting with `//` is refused, so a path can never turn into another host.
 
 ### Identities, data files and token commands
 

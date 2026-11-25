@@ -547,6 +547,16 @@ def _print_final(printer: _Printer, result: Any) -> None:
             breakdown[key] = breakdown.get(key, 0) + n
     if breakdown:
         printer.line("errors: " + ", ".join(f"{k} ×{v}" for k, v in sorted(breakdown.items())))
+    for name, flow in (s.get("flows") or {}).items():
+        printer.line(
+            f"flow {name}: ran {flow['count']}  errors {flow['errors']}  "
+            f"p95 {fmt_ms(flow['p95_ms'])}"
+        )
+        for fs in flow["steps"]:
+            printer.line(
+                f"  {fs['step']}. {fs['name']}: {fs['count']} ×  errors {fs['errors']}  "
+                f"p95 {fmt_ms(fs['p95_ms'])}"
+            )
     if s.get("knee_step") is not None:
         printer.line(f"knee: step {s['knee_step']} – {s.get('knee_reason')}")
     else:
