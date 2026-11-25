@@ -229,7 +229,7 @@ Detailed APIs, support boundaries and UI paths are in [Real-world workflows](doc
 
 | Explain and rank | Every finding carries `why` (rule, observed, threshold, grouping, limits); `api/issues?sort=impact` ranks by sampled observed time, never presented as additive savings |
 | Prove a fix | `redline check verify` answers gone / still present / inconclusive and whether responses stayed equal; `redline check compare-live` alternates requests between two running versions; latency budgets accept `min_samples`; `redline instrumentation` reports what redline cannot see |
-| AI agents | `redline mcp` serves read-only tools over MCP, `redline fix-prompt` writes a fix brief, `redline agent-skill` emits a Claude skill and AGENTS.md section, `llms.txt` and JSON references document everything for machines, and `redline diagnose` previews (opt-in: sends) a redacted finding. See [Working with AI agents](docs/agents.md) |
+| AI agents | `redline mcp` serves over 40 tools over MCP (findings, traces, load runs, scenarios, SQL Server plans, SQL lints, doctor, check reports; starting or deleting load runs is opt-in behind `--allow-load` / `--allow-delete-runs`), `redline fix-prompt` writes a fix brief, `redline agent-skill` emits a Claude skill and AGENTS.md section, `llms.txt` and JSON references document everything for machines, and `redline diagnose` previews (opt-in: sends) a redacted finding. See [Working with AI agents](docs/agents.md) |
 | LLM calls | `instrument_anthropic()` / `instrument_openai()` record `llm_call` spans (model, tokens, timing; never prompt text) with findings for duplicate, serial, in-transaction, looping and uncached large-prompt calls, and `api/llm` for sampled token usage. See [LLM-call observability](docs/llm.md) |
 
 Stability promises for these and older APIs are in [API stability](docs/api-stability.md).
@@ -238,7 +238,7 @@ Stability promises for these and older APIs are in [API stability](docs/api-stab
 
 ```bash
 redline agent-skill --write ~/.claude/skills     # teach a coding agent to find, fix and verify
-redline mcp --store .redline/redline.db          # read-only tools over MCP (add to .mcp.json)
+redline mcp --store .redline/redline.db          # tools over MCP, read-only by default (add to .mcp.json)
 redline fix-prompt ISSUE_ID --store .redline/redline.db > brief.md
 redline check compare check.toml --json report.json
 redline check verify report.json --kind n_plus_one   # exit 0 only when the finding is gone

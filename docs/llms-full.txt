@@ -5521,7 +5521,8 @@ link to a UI that exists where the event happens.
 # Working with AI agents
 
 Redline is built so a coding agent can find a performance problem, fix it and prove the fix,
-using recorded data instead of guesses. Everything here is read-only unless stated.
+using recorded data instead of guesses. Everything here is read-only unless stated; the few
+tools that send load or delete data stay off until the operator turns them on.
 
 ## Machine-readable docs
 
@@ -5556,17 +5557,74 @@ read-only. Example client entry:
 { "mcpServers": { "redline": { "command": "redline", "args": ["mcp", "--store", ".redline/redline.db"] } } }
 ```
 
+Every tool takes a JSON-schema-checked argument object. Results are bounded in size, and
+credentials in URLs, tokens, header and cookie values and identity values are never returned
+(only their names).
+
+**Findings and traces**
+
 | Tool | Returns |
 |---|---|
 | `list_issues` | Findings ranked by sampled impact, each with `why`, callsite and suggestion |
 | `explain_issue` | One finding in full |
+| `fix_prompt` | A Markdown brief for fixing one finding, with constraints and how to verify |
+| `diagnose_preview` | Exactly what `redline diagnose --send` would transmit; never sends |
+| `list_traces` | Recorded requests, filterable by route, method, status, duration, queries, issues |
 | `get_trace` | A bounded request summary: timings, issues, slowest spans (no bodies or logs) |
-| `instrumentation_report` | What redline cannot see: inactive integrations, truncated traces, drops |
-| `verify_fix` | gone / still_present / inconclusive from a saved compare report |
+| `compare_traces` | Two requests side by side: time by kind, SQL that appeared or vanished |
+| `list_endpoints` | Per-route latency percentiles, error rate and query counts |
+| `search_sql` | Normalised SQL statements with counts and timings |
+| `index_advice` | Index suggestions from the recorded workload (offline) |
+| `cache_summary`, `external_summary`, `job_summary` | Cache hit rates, outbound call latency, background task outcomes |
+| `history`, `compare_periods`, `list_releases` | Latency history, before/after comparison of two periods, release markers |
 | `llm_summary` | Sampled LLM-call tokens and counts per route and model |
+| `instrumentation_report` | What redline cannot see: inactive integrations, truncated traces, drops |
 
-Bad input produces an error result the model can read; the server keeps running. Output is
-bounded in size. With `--audit`, each call is appended as a JSONL record containing the tool
+**Load runs**
+
+| Tool | Returns |
+|---|---|
+| `list_load_runs` | Recent runs with status, knee step, max OK rps and verdict |
+| `get_load_run` | One run: steps with latency percentiles and errors, the scenario (header, cookie and identity values removed) and its summary |
+| `load_run_summary` | The analysis: knee, `flows`, `recovery`, `drift`, `identities` (names and counts), `limiting_resource`, `resources` |
+| `load_run_bottlenecks` | Per step, the queries and routes that slowed most, with callsites |
+| `load_run_metrics` | CPU, memory, GC, threads and connection-pool numbers per step and the likely limiting resource (`GET api/runs/ID/metrics`) |
+| `validate_scenario` | Parses a scenario (object or `.json`/`.toml` file in the working directory) and returns errors or a summary; never runs it |
+| `generate_scenario_from_openapi` | A scenario from an OpenAPI document; writes get weight 0; header values are not returned |
+| `generate_scenario_from_traces` | A scenario weighted by the traffic recorded in the store |
+| `generate_scenario_from_stages` | A staged (spike, soak, recovery) scenario from `10:30s,200:20s,10:60s` or a stage list |
+
+**Database, SQL and checks**
+
+| Tool | Returns |
+|---|---|
+| `database_capabilities` | What the plan login may do (`GET api/database/capabilities`). The MCP server holds no database connection, so it answers `supported: false` unless a connection is registered in its process |
+| `analyze_sql_plan` | Analyses a pasted SQL Server XML plan (operator tree, findings, suggested indexes); nothing is executed and the plan is not echoed back |
+| `lint_sql`, `scan_sql_source`, `scan_sql_project` | Offline SQL lints for a statement, Python source text, or a directory inside the working directory |
+| `analyze_source`, `analyze_project` | Static performance review of Python source or a directory |
+| `doctor` | The setup checks of `redline doctor` for the working directory (`database` and `production` add the permission probe and the production checklist) |
+| `check_report` | Summary of a saved `redline check compare --json` report |
+| `check_findings` | Findings new in a saved report, each with a fix brief |
+| `verify_fix` | gone / still_present / inconclusive from a saved compare report |
+
+**State-changing tools (off by default)**
+
+| Tool | Needs | What it does |
+|---|---|---|
+| `start_load_run` | `--allow-load --load-target URL` | Starts a background load run against the operator's fixed target; one run at a time; scenarios that read local files or import code (`data`, `identities_file`, `metric_sources`) are refused |
+| `stop_load_run` | `--allow-load` | Asks a running load run to stop gracefully |
+| `delete_load_run` | `--allow-delete-runs` | Deletes a finished run and its steps |
+
+```bash
+redline mcp --store .redline/redline.db --allow-load --load-target http://127.0.0.1:8000
+```
+
+Without the flags these tools are neither listed nor callable. The target is fixed by the
+operator: a `base_url` in an agent's scenario is ignored, so an agent cannot aim load at
+another host. The server itself still opens the store read-only; a started run is a separate
+`redline load` process that writes its own results.
+
+Bad input produces an error result the model can read; the server keeps running. With `--audit`, each call is appended as a JSONL record containing the tool
 name, argument *names* and timing, never argument values. The file is created with mode 0600.
 
 ## The fix loop
@@ -5623,8 +5681,8 @@ key or the provider's response body. Agents must not enable this themselves.
 ## Safe deployment recipe
 
 Run the app with `read_only = true` and `explain_analyze = false`, point `redline mcp` at a
-*copy* or read-only mount of the store, and keep `--audit` on. The MCP process cannot write to
-the store at all.
+*copy* or read-only mount of the store, and keep `--audit` on. Without `--allow-load` and
+`--allow-delete-runs` the MCP process cannot write to the store or send traffic at all.
 
 ---
 

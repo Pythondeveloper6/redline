@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-__all__ = ["build_fix_prompt"]
+__all__ = ["build_fix_prompt", "new_findings"]
 
 MAX_CHARS = 12_000
 
@@ -77,6 +77,32 @@ def build_fix_prompt(group: Mapping[str, Any]) -> str:
 
     text = Redactor().text("\n".join(lines))
     return text if len(text) <= MAX_CHARS else text[:MAX_CHARS] + "\n…(truncated)"
+
+
+def new_findings(requests: Any) -> list[dict[str, Any]]:
+    """Findings that are new in a compare report's request entries, each with a fix brief."""
+    findings = []
+    for entry in requests:
+        server = entry.get("server") or {}
+        for issue in server.get("new_issues") or []:
+            group = {
+                "id": issue.get("id") or f"{issue.get('kind')}:{issue.get('fingerprint')}",
+                "kind": issue.get("kind"),
+                "title": issue.get("title"),
+                "fingerprint": issue.get("fingerprint"),
+                "routes": [entry.get("path")],
+            }
+            findings.append(
+                {
+                    "request": entry.get("name"),
+                    "kind": issue.get("kind"),
+                    "title": issue.get("title"),
+                    "fingerprint": issue.get("fingerprint"),
+                    "sample_trace_id": issue.get("sample_trace_id"),
+                    "prompt": build_fix_prompt(group),
+                }
+            )
+    return findings
 
 
 def configure_fix_prompt(parser: Any) -> None:

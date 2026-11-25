@@ -1561,6 +1561,27 @@
           ],
           "required": false,
           "help": "append a JSONL record of each tool call"
+        },
+        {
+          "name": [
+            "--allow-load"
+          ],
+          "required": false,
+          "help": "also offer start_load_run and stop_load_run (sends real traffic to --load-target)"
+        },
+        {
+          "name": [
+            "--load-target"
+          ],
+          "required": false,
+          "help": "the only URL a started load run may target (required with --allow-load)"
+        },
+        {
+          "name": [
+            "--allow-delete-runs"
+          ],
+          "required": false,
+          "help": "also offer delete_load_run (removes a finished run from the store)"
         }
       ]
     },
