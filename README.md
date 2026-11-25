@@ -167,7 +167,7 @@ mode. Django uses its framework permission gate.
 | Application bottlenecks | Event-loop blocking, slow serializers, long transactions, HTTP calls inside transactions, large responses, many ORM instances, pool checkout waits, JSON/cache decoding hotspots |
 | External calls and caches | Slow/duplicate outbound calls and retry storms; cache hit/miss patterns, stampedes and large entries, where instrumentation supplies evidence |
 | GraphQL | Strawberry/Graphene integrations and resolver context for captured repeated queries |
-| Custom instrumentation | Context-manager/decorator/async spans and application tags; optional client/database integrations |
+| Custom instrumentation | Context-manager/decorator/async spans and application tags; optional client/database integrations, including SQL sent through raw driver cursors (`instrument_dbapi`) |
 | Profiling | Opt-in request flamegraphs and speedscope download; requires the `profile` extra |
 
 Read [the UI guide](docs/the-ui.md), [detector reference](docs/detectors.md),
@@ -180,8 +180,8 @@ apply code changes or database indexes automatically.
 | Capability | What it adds |
 |---|---|
 | EXPLAIN | Eligible captured read queries, plan findings and index suggestions; executable/actual plans require a separate opt-in |
-| Database/workload view | Cross-recording SQL search, workload index advice, catalog evidence and unused-index observations where the database supports them |
-| Load testing | CLI scenarios and an opt-in UI builder, stepped offered load, latency/error charts, saturation/knee detection and query/endpoint bottlenecks per step |
+| Database/workload view | Cross-recording SQL search, workload index advice with its evidence, catalog evidence and unused-index observations where the database supports them; a SQL Server permission probe that names the exact `GRANT`, an optional separate plan login (`explain_url`) and pasted-plan analysis; raw-SQL N+1 loops rewritten into one batched query |
+| Load testing | CLI scenarios and an opt-in UI builder; open-model offered load as constant, ramp, steps or custom **stages** (spike, soak) with recovery and drift analysis; many **identities**, skewed **data feeds** and **token refresh**; chained **flows** with value extraction, response checks, **think time** and sessions; first-byte timing, held streams and WebSockets; several generator hosts (`redline load agent`); resource metrics and a likely limiting resource; saturation/knee detection and query/endpoint bottlenecks per step; runs registered in a shared PostgreSQL store or over HTTP |
 | Refactor checks | Record a read-only baseline, replay against a changed app, compare response structure, latency/query/N+1 behavior, emit a verdict and CI reports |
 | Test and CI gates | Pytest query/issue/outbound budgets, SQL-error/session-leak/round-trip assertions; refactor-check JUnit and Markdown results |
 | Static N+1 scan | Template/DRF serializer checks that complement runtime evidence |
