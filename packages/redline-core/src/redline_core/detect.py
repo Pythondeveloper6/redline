@@ -58,6 +58,24 @@ if TYPE_CHECKING:
 logger = logging.getLogger("redline")
 
 
+def _parent_table(trace: Trace, repeated: list[Span]) -> str | None:
+    """The table of the SQL statement that ran just before the repeated ones, if it is a
+    different table: the "parent query" a join could replace the loop with."""
+    first = min(repeated, key=lambda s: s.start_ms)
+    ids = {s.id for s in repeated}
+    own = set(sqlmod.tables(str(first.data.get("sql", ""))))
+    before = [
+        s
+        for s in trace.spans
+        if s.kind == "sql" and s.id not in ids and s.start_ms < first.start_ms
+    ]
+    for span in sorted(before, key=lambda s: s.start_ms, reverse=True):
+        for table in sqlmod.tables(str(span.data.get("sql", ""))):
+            if table not in own:
+                return table
+    return None
+
+
 @runtime_checkable
 class FixSuggester(Protocol):
     """Proposes a fix for an issue; returns ``None`` when it has nothing useful to say."""
@@ -228,6 +246,10 @@ class Detector:
             spans = [by_id[i] for i in issue.span_ids if i in by_id]
             if not spans and issue.id in samples:
                 spans = [samples[issue.id]]
+            if issue.kind == "n_plus_one" and spans:
+                parent = _parent_table(trace, spans)
+                if parent:
+                    issue.extra.setdefault("parent_table", parent)
             # a detector's own suggestion is kept unless a suggester has a better one
             issue.suggestion = self._suggest(issue, spans) or issue.suggestion
         order = {"critical": 0, "warning": 1, "info": 2}

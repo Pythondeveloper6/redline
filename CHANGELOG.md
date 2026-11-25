@@ -12,6 +12,11 @@ version is below `1.0` the public API may change between minor versions.
 
 ### Added
 
+- N+1 findings in raw SQL (`text()` or driver SQL) get a real rewrite instead of a hint: a diff
+  at the callsite that replaces the per-row SELECT with one `IN` query over all the keys,
+  chunked to the database's parameter limit (stated per vendor) and grouped back by the key,
+  with the join alternative named when the parent query is in the trace. Dynamic statements get
+  the batched statement as a code block.
 - Load scenarios can run journeys and check responses. `[[flows]]` chain requests: a step
   `extract`s a value (a JSON path, a header or a regular expression) and later steps use it as
   `{var:name}`; one arrival starts one flow, a failed step ends it and counts once, and the

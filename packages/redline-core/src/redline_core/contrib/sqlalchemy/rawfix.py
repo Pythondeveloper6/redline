@@ -1,0 +1,269 @@
+"""Fix diffs for an N+1 written in raw SQL (``text()`` or driver SQL), not ORM relationships.
+
+The detector already knows the repeated statement, the column compared to a bound parameter
+(the one that varies) and the callsite of the loop. When the loop is a plain
+``for x in items:`` whose body assigns ``rows = conn.execute(text("..."), {...}).all()``, the
+source is rewritten as one query over all the keys, chunked to the database's parameter
+limit, grouped back by the key::
+
+    ids = list({order.id for order in orders})
+    rows_by_key = {}
+    for i in range(0, len(ids), 1000):
+        for row in conn.execute(text("... WHERE order_id IN :ids").bindparams(...), {...}):
+            rows_by_key.setdefault(row.order_id, []).append(row)
+    for order in orders:
+        items = rows_by_key.get(order.id, [])
+
+Anything else (a dynamic statement, a ``LIMIT`` per parent, a loop over a call result, a
+result shape other than ``.all()`` / ``.fetchall()``) gets the same batched statement as a code
+block without a diff and with lower confidence. Nothing is ever executed or written.
+"""
+
+from __future__ import annotations
+
+import ast
+import difflib
+import json
+import re
+from dataclasses import dataclass
+
+__all__ = ["PARAM_LIMITS", "RawFix", "build_raw_fix", "param_limit"]
+
+#: Most bound parameters one statement may carry, by vendor (documented driver/server limits).
+PARAM_LIMITS = {"sqlite": 32_766, "postgresql": 32_767, "mysql": 65_535, "mssql": 2_100}
+_DEFAULT_LIMIT = 1_000
+CHUNK = 1_000
+
+_SELECT = re.compile(
+    r"^(?P<select>\s*SELECT\s+)(?P<cols>.+?)(?P<from>\s+FROM\s+[\w.\"`\[\]]+(?:\s+(?:AS\s+)?\w+)?"
+    r"\s+WHERE\s+)(?P<col>[\w.\"`\[\]]+)\s*=\s*:(?P<param>\w+)(?P<tail>.*)$",
+    re.IGNORECASE | re.DOTALL,
+)
+_UNBATCHABLE = re.compile(r"\b(LIMIT|OFFSET|TOP|FETCH)\b", re.IGNORECASE)
+
+
+def param_limit(vendor: str) -> int:
+    return PARAM_LIMITS.get(vendor, _DEFAULT_LIMIT)
+
+
+@dataclass
+class RawFix:
+    summary: str
+    code: str
+    diff: str | None
+    confidence: str
+
+
+def _bare(column: str) -> str:
+    return column.split(".")[-1].strip('"`[]')
+
+
+def batched_sql(sql: str) -> tuple[str, str, str, bool] | None:
+    """``(batched statement, key column, original bind name, key added)`` or ``None`` when
+    the statement cannot be batched (not ``SELECT ... WHERE col = :p``, or has a per-parent
+    ``LIMIT``). ``key added`` is true when the key column was not selected and was appended,
+    which gives each row one extra trailing column."""
+    if _UNBATCHABLE.search(sql):
+        return None
+    m = _SELECT.match(sql.strip())
+    if m is None:
+        return None
+    col = _bare(m.group("col"))
+    cols = m.group("cols").strip()
+    added = False
+    if (
+        cols != "*"
+        and not cols.endswith(".*")
+        and not re.search(rf"(?<![\w.]){re.escape(col)}(?![\w])", cols)
+    ):
+        cols = f"{cols}, {m.group('col')}"  # the key must come back to group by
+        added = True
+    new = f"{m.group('select')}{cols}{m.group('from')}{m.group('col')} IN :_ids{m.group('tail')}"
+    return new.strip(), col, m.group("param"), added
+
+
+def _text_literal(call: ast.Call) -> str | None:
+    """The SQL of ``text("...")``/``sa.text("...")`` when it is one plain string literal."""
+    func = call.func
+    name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+    if name != "text" or len(call.args) != 1 or call.keywords:
+        return None
+    arg = call.args[0]
+    if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+        return arg.value
+    return None
+
+
+def _find_loop_statement(
+    tree: ast.Module, line: int
+) -> tuple[ast.For, ast.Assign, ast.Call, str, ast.AST] | None:
+    """The ``for`` loop whose direct body assigns ``x = <recv>.execute(text(LIT), {...}).all()``
+    on ``line``: ``(loop, assign, execute call, receiver source, params dict)``."""
+    best = None
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.For) or node.orelse:
+            continue
+        for stmt in node.body:
+            if not isinstance(stmt, ast.Assign) or len(stmt.targets) != 1:
+                continue
+            if not (stmt.lineno <= line <= (stmt.end_lineno or stmt.lineno)):
+                continue
+            if not isinstance(stmt.targets[0], ast.Name):
+                continue
+            value = stmt.value
+            if not (
+                isinstance(value, ast.Call)
+                and isinstance(value.func, ast.Attribute)
+                and value.func.attr in ("all", "fetchall")
+                and not value.args
+                and isinstance(value.func.value, ast.Call)
+            ):
+                continue
+            execute = value.func.value
+            if not (isinstance(execute.func, ast.Attribute) and execute.func.attr == "execute"):
+                continue
+            if best is None or node.lineno > best[0].lineno:
+                best = (node, stmt, execute, "", execute.args[1] if len(execute.args) > 1 else None)
+    return best  # type: ignore[return-value]
+
+
+def build_raw_fix(
+    *,
+    source: str,
+    tree: ast.Module,
+    display: str,
+    line: int,
+    vendor: str,
+    table: str,
+    column: str,
+    parent_table: str | None = None,
+) -> RawFix | None:
+    """The batched rewrite for the raw-SQL loop at ``line`` of ``source``, or ``None``."""
+    found = _find_loop_statement(tree, line)
+    limit = param_limit(vendor)
+    limit_note = (
+        f"{vendor if vendor != 'other' else 'the database'} allows about {limit:,} bound "
+        f"parameters per statement, so the keys go in chunks of {min(CHUNK, limit):,}"
+    )
+    if found is None:
+        return None
+    loop, assign, execute, _, params = found
+    if not execute.args:
+        return None
+    first = execute.args[0]
+    if not (isinstance(first, ast.Call) and (sql := _text_literal(first)) is not None):
+        return None
+    batch = batched_sql(sql)
+    if batch is None:
+        return None
+    new_sql, key_col, bind, key_added = batch
+    # the value that varies: params = {"bind": <expr using the loop variable>}
+    if not isinstance(params, ast.Dict):
+        return None
+    key_expr: ast.AST | None = None
+    others: list[tuple[str, str]] = []
+    for k, v in zip(params.keys, params.values, strict=False):
+        if not (isinstance(k, ast.Constant) and isinstance(k.value, str)):
+            return None
+        if k.value == bind:
+            key_expr = v
+        else:
+            others.append((k.value, ast.unparse(v)))
+    if key_expr is None:
+        return None
+    target = loop.target
+    loop_names = {n.id for n in ast.walk(target) if isinstance(n, ast.Name)}
+    if any(
+        isinstance(n, ast.Name) and n.id in loop_names
+        for _, text_value in others
+        for n in ast.walk(ast.parse(text_value, mode="eval"))
+    ):
+        return None  # another parameter also varies per row: not a single-key batch
+    if not any(isinstance(n, ast.Name) and n.id in loop_names for n in ast.walk(key_expr)):
+        return None
+    if not isinstance(loop.iter, (ast.Name, ast.Attribute, ast.Subscript)):
+        return None  # iterating a call result twice would run it twice
+    receiver = ast.unparse(execute.func.value)  # type: ignore[attr-defined]
+    lines = source.splitlines(keepends=True)
+    indent = " " * loop.col_offset
+    inner = indent + "    "
+    key_src = ast.unparse(key_expr)
+    iter_src = ast.unparse(loop.iter)
+    target_src = ast.unparse(target)
+    extra = "".join(f", {k!r}: {v}" for k, v in others)
+    chunk = min(CHUNK, limit)
+    block = [
+        f"{indent}_ids = list({{{key_src} for {target_src} in {iter_src}}})\n",
+        f"{indent}_rows_by_key = {{}}\n",
+        f"{indent}for _i in range(0, len(_ids), {chunk}):\n",
+        f"{inner}for _row in {receiver}.execute(\n",
+        f'{inner}    text({json.dumps(new_sql)}).bindparams(bindparam("_ids", expanding=True)),\n',
+        f'{inner}    {{"_ids": _ids[_i : _i + {chunk}]{extra}}},\n',
+        f"{inner}):\n",
+        f"{inner}    _rows_by_key.setdefault(_row.{key_col}, []).append(_row)\n",
+    ]
+    body_indent = " " * assign.col_offset
+    replacement = (
+        f"{body_indent}{ast.unparse(assign.targets[0])} = _rows_by_key.get({key_src}, [])\n"
+    )
+    start = loop.lineno - 1
+    a0, a1 = assign.lineno - 1, (assign.end_lineno or assign.lineno)
+    new_lines = [*lines[:start], *block, *lines[start:a0], replacement, *lines[a1:]]
+    new_lines = _ensure_sqlalchemy_names(tree, new_lines, ("text", "bindparam"), shift=len(block))
+    diff = "".join(
+        d if d.endswith("\n") else d + "\n"
+        for d in difflib.unified_diff(
+            lines, new_lines, fromfile=f"a/{display}", tofile=f"b/{display}", n=3
+        )
+    )
+    code = (
+        "".join(block)
+        + f"# in the loop: {ast.unparse(assign.targets[0])} = _rows_by_key.get({key_src}, [])\n"
+    )
+    summary = (
+        f"Replace the per-row SELECT on {table}.{column} with one IN query over all the keys "
+        f"and group the rows back by {key_col}. Limit: {limit_note}."
+    )
+    if key_added:
+        summary += (
+            f" {key_col} is added to the select list to group by, so each row gains that column."
+        )
+    if parent_table:
+        summary += (
+            f" The parent query on {parent_table} is in the same trace: joining {table} to it "
+            f"in that query is the alternative (join on {table}.{column})."
+        )
+    return RawFix(
+        summary=summary, code=code, diff=diff or None, confidence="high" if diff else "medium"
+    )
+
+
+def _ensure_sqlalchemy_names(
+    tree: ast.Module, lines: list[str], names: tuple[str, ...], shift: int
+) -> list[str]:
+    """Make ``names`` importable from ``sqlalchemy`` (adds to a single-line import or adds a
+    new ``from sqlalchemy import ...`` after the imports). ``shift`` is the rows inserted
+    after the imports, which does not move the import block."""
+    have: set[str] = set()
+    target: ast.ImportFrom | None = None
+    last_import = 0
+    for node in tree.body:
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            last_import = node.end_lineno or node.lineno
+            if isinstance(node, ast.ImportFrom) and node.module == "sqlalchemy" and not node.level:
+                have.update(a.asname or a.name for a in node.names if a.name in names)
+                if node.lineno == node.end_lineno and "(" not in lines[node.lineno - 1]:
+                    target = node
+    missing = [n for n in names if n not in have]
+    if not missing:
+        return lines
+    out = list(lines)
+    if target is not None:
+        text = out[target.lineno - 1].rstrip("\r\n")
+        out[target.lineno - 1] = text + ", " + ", ".join(missing) + "\n"
+        return out
+    out.insert(last_import, f"from sqlalchemy import {', '.join(missing)}\n")
+    return out
+
+
+__all__ += ["batched_sql"]
