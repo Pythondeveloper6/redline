@@ -377,7 +377,10 @@ redline check record checks/orders.toml --label before
 redline check compare checks/orders.toml --markdown report.md --junit report.xml
 ```
 
-Set the correct `--store` and target base URL for the application you are testing.
+Set the correct `--store` and target base URL for the application you are testing. When the
+generator runs on another host, write to the shared PostgreSQL store with `--store-url`, or
+register the run with the application over HTTP with `--register-url` (the application needs
+`accept_remote_runs`); `--require-recording` stops the run if the application does not record it.
 Online SQL compilation and schema snapshots are explicit development-database operations;
 see [the workflow guide](docs/real-world-workflows.md#explicit-online-compilation-and-schema-drift).
 OTLP export currently sends selected recording summaries, not a complete distributed

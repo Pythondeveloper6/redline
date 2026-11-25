@@ -24,6 +24,11 @@ path = "/report/duplicates"
 weight = 1
 
 [[requests]]
+name = "audit count (raw cursor)"
+path = "/audit/raw"
+weight = 1
+
+[[requests]]
 name = "audit search (slow query)"
 path = "/audit/search?q={random_choice:refund|login|export|invoice}"
 weight = 1
