@@ -53,6 +53,7 @@ CLI reference as JSON: https://pythondeveloper6.github.io/redline/reference/cli.
 ## Load and history
 
 - [Load testing](https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/load-testing.md): Load testers such as Locust, k6 and Gatling see an application from the outside.
+- [A full performance test](https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/full-performance-test.md): How the pieces fit together, in the order you would use them.
 - [History and releases](https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/history.md): Redline keeps individual traces for a few days.
 
 ## Integrations
