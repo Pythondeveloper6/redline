@@ -12,6 +12,23 @@ version is below `1.0` the public API may change between minor versions.
 
 ### Added
 
+- The MCP server (`redline mcp`) now covers the whole package, so an agent can run a full
+  performance investigation. New tools: `list_load_runs`, `get_load_run`, `load_run_summary`
+  (flows, recovery, drift, identities, limiting resource, resources), `load_run_bottlenecks`,
+  `load_run_metrics`; `validate_scenario` and `generate_scenario_from_openapi` / `_traces` /
+  `_stages` (scenarios are parsed or built, never run); `analyze_sql_plan` (a pasted SQL Server
+  plan), `database_capabilities`, `lint_sql`, `scan_sql_source`, `scan_sql_project`,
+  `analyze_source`, `analyze_project`, `doctor`, `check_report`, `check_findings`, `fix_prompt`,
+  `diagnose_preview`; and `list_traces`, `list_endpoints`, `compare_traces`, `search_sql`,
+  `index_advice`, `cache_summary`, `external_summary`, `job_summary`, `history`,
+  `compare_periods`, `list_releases`.
+- Tools that change state are opt-in: `start_load_run` and `stop_load_run` need
+  `redline mcp --allow-load --load-target URL` (the target is fixed by the operator and one run
+  at a time is allowed), `delete_load_run` needs `--allow-delete-runs`. Without the flags they
+  are neither listed nor callable.
+- MCP tool arguments are checked against each tool's JSON schema (types, enums, ranges,
+  lengths); results are bounded, and credentials in URLs, token-like values, header, cookie and
+  identity values are masked.
 - A load run reports which resource ran out. While a registered run sends it traffic, each app
   worker samples its own CPU, memory, GC pauses, threads and connection pool once a second
   (`run_metrics`, off in the `production` preset); the run summary carries `resources` per
