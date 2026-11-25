@@ -36,10 +36,11 @@ import math
 import multiprocessing as mp
 import os
 import queue as queue_mod
+import threading
 import time
 import uuid
 from collections import Counter
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -220,6 +221,9 @@ def run(
     name: str | None = None,
     on_event: EventCallback | None = None,
     probe: Callable[[], Any] | None = None,
+    agents: Sequence[str] | None = None,
+    agent_token: str | None = None,
+    agent_verify: bool | str = True,
 ) -> RunResult:
     """Run a load test and return its :class:`RunResult` (blocking).
 
@@ -228,7 +232,9 @@ def run(
     gracefully with status ``stopped``. ``on_event(kind, data)`` receives live events:
     ``("start", RunMeta)``, ``("second", dict)``, ``("step", StepResult)``,
     ``("stopping", reason)``. ``probe`` is called once after the run is registered and
-    before any load; when it raises, the run ends ``failed`` with its message.
+    before any load; when it raises, the run ends ``failed`` with its message. ``agents`` are
+    the URLs of ``redline load agent`` services (with their ``agent_token``) that run workers
+    on other hosts; without ``workers`` the controller itself then runs none.
 
     Workers are started with the *spawn* method, so a script calling this must guard its
     entry point with ``if __name__ == "__main__":``.
@@ -245,8 +251,32 @@ def run(
 
     _preflight(sc)
     plans = prof.plan()
-    n_workers = workers or sc.workers or default_workers()
-    n_workers = max(1, min(n_workers, math.ceil(prof.max_rps)))
+    remote_plan: list[tuple[Any, int]] = []
+    if agents:
+        from .agent import RemoteAgent
+
+        if not agent_token:
+            raise ScenarioError("agents need a token (--agent-token-file or REDLINE_AGENT_TOKEN)")
+        for url in agents:
+            handle = RemoteAgent(url, agent_token, verify=agent_verify)
+            handle.info()  # reachable, token accepted, clock offset measured
+            remote_plan.append((handle, min(handle.cpus, 8)))
+        local = workers if workers is not None else (sc.workers or 0)
+    else:
+        local = workers or sc.workers or default_workers()
+    cap = max(1, math.ceil(prof.max_rps))
+    total = local + sum(c for _, c in remote_plan)
+    while total > cap:  # never more workers than requests per second: trim the largest group
+        sizes = [local, *(c for _, c in remote_plan)]
+        biggest = max(range(len(sizes)), key=lambda i: sizes[i])
+        if sizes[biggest] <= (0 if biggest == 0 else 1):
+            break
+        if biggest == 0:
+            local -= 1
+        else:
+            remote_plan[biggest - 1] = (remote_plan[biggest - 1][0], sizes[biggest] - 1)
+        total -= 1
+    n_workers = max(1, total)
     run_id = run_id or uuid.uuid4().hex
     run_name = name or sc.name
     config = redact_config(sc.to_dict())  # what sinks/results keep: never raw secrets
@@ -280,7 +310,9 @@ def run(
                 message=message,
             )
 
-    engine = _Engine(sc, plans, n_workers, run_id, stop_event, sinks, emit)
+    engine = _Engine(
+        sc, plans, n_workers, run_id, stop_event, sinks, emit, local_n=local, remote=remote_plan
+    )
     status, message = engine.execute()
     steps = engine.finished_steps
     summary = analyze(steps, engine.seconds, {p.index: p.start_s for p in plans})
@@ -444,7 +476,19 @@ class _Engine:
         stop_event: Any,
         sinks: MultiSink,
         emit: EventCallback,
+        *,
+        local_n: int | None = None,
+        remote: Sequence[tuple[Any, int]] = (),
     ) -> None:
+        self.local_n = n_workers if local_n is None else local_n
+        #: ``[(agent, [global worker numbers])]``: local workers come first
+        self.remote: list[tuple[Any, list[int]]] = []
+        first = self.local_n
+        for handle, count in remote:
+            self.remote.append((handle, list(range(first, first + count))))
+            first += count
+        self.pumps: list[threading.Thread] = []
+        self.gen_cpu: dict[int, float] = {}
         self.sc = sc
         self.plans = plans
         self.n = n_workers
@@ -514,7 +558,7 @@ class _Engine:
                 name=f"redline-load-{k}",
                 daemon=True,
             )
-            for k in range(self.n)
+            for k in range(self.local_n)
         ]
         status, message = "done", None
         interrupted = 0
@@ -522,10 +566,14 @@ class _Engine:
             for p in self.procs:
                 p.start()
             try:
-                status, message = self._wait_ready()
+                failure = self._prepare_agents()
+                status, message = ("failed", failure) if failure else self._wait_ready()
                 if status == "done":
-                    self.start_epoch = time.time() + START_DELAY_S
+                    delay = START_DELAY_S + (1.5 if self.remote else 0.0)
+                    self.start_epoch = time.time() + delay
                     self.start_at.value = self.start_epoch
+                    for handle, _ in self.remote:
+                        handle.start(self.start_epoch)
                     self.go.set()
                     status, message = self._loop()
             except KeyboardInterrupt:
@@ -540,6 +588,96 @@ class _Engine:
             self._shutdown(force=interrupted > 1 or status == "failed")
         self._finalize_remaining()
         return status, message
+
+    def _remote_cfg(self, k: int) -> dict[str, Any]:
+        """A worker's config for an agent: identities and data rows inline (the agent reads no
+        files), no parent pid, and no token command or callable."""
+        from .variation import load_data_rows, load_identities
+
+        sc = self.sc
+        if sc.auth is not None and sc.auth.provider != "request":
+            raise ScenarioError(
+                "an agent cannot run a token command or callable; use auth.provider = 'request'",
+                "auth",
+            )
+        cfg = self._worker_cfg(k)
+        cfg.pop("parent_pid", None)
+        cfg.pop("_crash_after_s", None)
+        cfg["base_dir"] = None
+        if sc.identities or sc.identities_file:
+            cfg["identities"] = [
+                {"name": i.name, "headers": dict(i.headers), "cookies": dict(i.cookies)}
+                for i in load_identities(sc.identities, sc.identities_file, sc.base_dir)
+            ]
+            cfg["identities_file"] = None
+        if sc.data:
+            cfg["data_rows"] = {d.name: load_data_rows(d) for d in sc.data}
+        return cfg
+
+    def _prepare_agents(self) -> str | None:
+        """Send each agent its workers (in parallel), then start streaming their events."""
+        if not self.remote:
+            return None
+        results: dict[int, str | None] = {}
+
+        def prepare(i: int, handle: Any, idxs: list[int]) -> None:
+            try:
+                handle.prepare(self.run_id, [self._remote_cfg(k) for k in idxs])
+                results[i] = None
+            except Exception as exc:
+                results[i] = f"{type(exc).__name__}: {exc}"
+
+        threads = [
+            threading.Thread(target=prepare, args=(i, h, idxs), daemon=True)
+            for i, (h, idxs) in enumerate(self.remote)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        failed = [r for r in results.values() if r]
+        if failed:
+            for handle, _ in self.remote:
+                handle.stop()
+            return failed[0]
+        for handle, idxs in self.remote:
+            for k in idxs:
+                self.q.put({"type": "ready", "worker": k, "pid": 0})
+            pump = threading.Thread(
+                target=self._pump_agent, args=(handle, idxs), name="redline-agent-pump", daemon=True
+            )
+            pump.start()
+            self.pumps.append(pump)
+        return None
+
+    def _pump_agent(self, handle: Any, idxs: list[int]) -> None:
+        """Feed an agent's worker messages into the engine's queue until it is finished."""
+        from .agent import decode_event
+
+        after, failures = 0, 0
+        while True:
+            try:
+                batch = handle.events(after, 2.0)
+                failures = 0
+            except Exception as exc:
+                failures += 1
+                if failures >= 3:
+                    self.q.put(
+                        {"type": "error", "worker": idxs[0], "message": f"agent lost: {exc}",
+                         "traceback": ""}
+                    )  # fmt: skip
+                    return
+                time.sleep(0.5)
+                continue
+            for event in batch["events"]:
+                self.q.put(decode_event(event))
+            after = batch["next"]
+            if batch["finished"]:
+                return
+
+    def _stop_agents(self) -> None:
+        for handle, _ in self.remote:
+            threading.Thread(target=handle.stop, daemon=True).start()
 
     def _wait_ready(self) -> tuple[str, str | None]:
         ready: set[int] = set()
@@ -575,6 +713,7 @@ class _Engine:
         if not self.stop.is_set():
             self.stopped_reason = self.stopped_reason or reason
             self.stop.set()
+            self._stop_agents()
             self.emit("stopping", reason)
 
     def _dead_workers(self) -> str | None:
@@ -632,6 +771,10 @@ class _Engine:
         kind = msg["type"]
         k = msg.get("worker", -1)
         if kind == "tick":
+            cpu = msg.get("cpu_pct")
+            for step in msg["steps"]:
+                if isinstance(cpu, (int, float)):
+                    self.gen_cpu[step] = max(self.gen_cpu.get(step, 0.0), float(cpu))
             for step, m in msg["steps"].items():
                 agg = self.aggs.get(step)
                 if agg is not None:
@@ -700,6 +843,7 @@ class _Engine:
             streams=_plain(agg.streams),
             websockets=_plain(agg.websockets),
             sessions=_plain(agg.sessions),
+            generator_cpu_pct=self.gen_cpu.get(plan.index),
         )
         if result.sent == 0 and result.dropped == 0 and partial:
             return
@@ -739,6 +883,12 @@ class _Engine:
     def _shutdown(self, *, force: bool) -> None:
         self.stop.set()
         self.go.set()  # release workers still waiting to start
+        if self.remote:
+            self._stop_agents()
+            for pump in self.pumps:  # their last ticks and exits are still on the way
+                pump.join(timeout=1.0 if force else 8.0)
+            for handle, _ in self.remote:
+                handle.close()
         deadline = time.monotonic() + (0.5 if force else self.sc.timeout_s + EXIT_GRACE_S)
         # keep draining so workers never block on a full pipe while exiting
         while any(p.is_alive() for p in self.procs) and time.monotonic() < deadline:

@@ -233,6 +233,8 @@ class _Worker:
         ] + [("flow", f) for f in cfg.get("flows") or () if f["weight"] > 0]
         self.weights = [spec["weight"] for _, spec in self.items]
         self.flow_window: dict[str, _FlowAcc] = {}
+        self._last_wall = time.perf_counter()
+        self._last_cpu = time.process_time()
         self.open_streams = 0
         self.open_ws = 0
         self.open_sessions = 0
@@ -256,7 +258,9 @@ class _Worker:
             else None
         )
         sources = [DataSource(**d) for d in cfg.get("data") or ()]
-        self.feed = DataFeed(sources, self.k, self.n) if sources else None
+        self.feed = (
+            DataFeed(sources, self.k, self.n, rows=cfg.get("data_rows")) if sources else None
+        )
         spec = parse_auth(cfg.get("auth"))
         self.tokens = TokenManager(spec, cfg.get("base_url")) if spec else None
         self.auth_error: str | None = None
@@ -275,12 +279,17 @@ class _Worker:
         flows = {name: acc.to_msg() for name, acc in self.flow_window.items()}
         self.window = {}
         self.flow_window = {}
+        now_wall, now_cpu = time.perf_counter(), time.process_time()
+        wall = now_wall - self._last_wall
         msg: dict[str, Any] = {
             "type": "tick",
             "worker": self.k,
-            "t": time.perf_counter() - self.t0,
+            "t": now_wall - self.t0,
             "steps": steps,
         }
+        if wall >= 0.2:  # a CPU share over a tiny window is noise
+            msg["cpu_pct"] = round((now_cpu - self._last_cpu) / wall * 100.0, 1)
+            self._last_wall, self._last_cpu = now_wall, now_cpu
         if flows:
             msg["flows"] = flows
         self.q.put(msg)

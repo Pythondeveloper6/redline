@@ -315,9 +315,9 @@ the [FAQ](faq.md)).
 
 Read this table with its omissions in mind. If you need cross-service traces, alerting, or
 fleet dashboards, use Sentry or Logfire (Redline can sit beside them). If you need a mature,
-scriptable, distributed load generator, use Locust or k6: Redline's load tester is HTTP-only
-and scenario-file driven, and its value is the correlation with what happened inside the
-server. Where this table says "No" for another tool it means "not as a built-in feature", and
+scriptable, large-scale distributed load generator, use Locust or k6: Redline's load tester is
+scenario-file driven (HTTP, held streams and WebSockets, optionally spread over a few
+generator hosts), and its value is the correlation with what happened inside the server. Where this table says "No" for another tool it means "not as a built-in feature", and
 tools change: check theirs.
 
 ## Requirements
@@ -6122,6 +6122,41 @@ A failed rule is counted as its own error class, `assertion`, in the error break
 `max_ms` does the same for a response slower than an agreed limit. Failure reasons never
 include body or header values.
 
+### Several generator hosts (agents)
+
+A generator on the machine under test distorts both sides, and one host caps the offered
+rate. Run `redline load agent` on other hosts and point the controller at them:
+
+```bash
+# on each generator host (token file mode 0600; use TLS or a private network)
+redline load agent --listen 0.0.0.0:7700 --token-file agent.token --cert agent.pem --key agent.key
+
+# on the controller
+redline load scenario.toml --steps 100:1000:100 \
+    --agents https://gen1.internal:7700,https://gen2.internal:7700 \
+    --agent-token-file agent.token --agent-ca ca.pem
+```
+
+The controller computes the step plan once and gives each agent its share of the workers
+(up to 8 each, never more than the peak rps), numbered globally, so the union of all hosts'
+arrivals is exactly the planned rate. One shared start time is converted to each agent's clock
+from a measured offset, and every agent's per-second numbers (counters and latency histograms)
+stream back and merge exactly like local workers', so steps line up to the second. The
+controller runs no workers itself unless you also pass `--workers`. Stopping the run (Ctrl-C,
+`stop_on`) stops the agents; an agent that disappears fails the run with a clear message.
+
+What the controller sends is the scenario's requests plus its identities and data rows
+**inline** (an agent reads no files), so the config, including credentials, crosses the
+network: use TLS (`--cert`/`--key`, verified with `--agent-ca`) or a private network. An agent
+needs a token (at least 8 characters), listens on `127.0.0.1` unless told otherwise, refuses
+`auth.provider` `command` and `python` (use `request`), blocks link-local and metadata targets,
+and can be limited with `--allow-target URL_PREFIX`.
+
+Each worker also reports its own CPU use. A step where a generator worker was above 90% of a
+core is marked `generator_limited` (and listed in `summary.generator.limited_steps`): the
+generator, not the app, may have capped the rate there, so add agents before believing the
+knee.
+
 ### Streams and WebSockets
 
 Every request is timed to its **first byte** (headers received) as well as to its **last byte**.
@@ -6275,6 +6310,8 @@ SCENARIO = {
 | `--rps N` | constant rate |
 | `--ramp A:B` | ramp from A to B rps over `--duration` |
 | `--stages RPS:DURATION,...` | ordered stages, for example `10:1m,200:30s,10:3m` (spike) or `40:30m` (soak) |
+| `--agents URL,URL` | run workers on remote `redline load agent` hosts; the controller runs none unless `--workers` is given |
+| `--agent-token-file PATH`, `--agent-ca PATH` | the agents' token (else `REDLINE_AGENT_TOKEN`) and the CA bundle that verifies their TLS certificates |
 | `--steps A:B:STEP` | steps from A to B rps, STEP apart, each `--step-duration` |
 | `--duration 60s` | total duration (default 30 s for constant and ramp) |
 | `--step-duration 30s` | length of each step |
@@ -10385,6 +10422,15 @@ scenario file** you run yourself, never from the UI or `POST api/runs` (`400`). 
 command runs without a shell. Identity and token values are masked in the stored run config;
 only the identity name reaches the app (as the `identity` trace tag) and the run summary.
 
+### Remote generator agents
+
+`redline load agent` is a service that generates load for whoever holds its token, so treat
+the token like a deploy key. It refuses to start without one, listens on `127.0.0.1` by
+default, supports TLS (`--cert`/`--key`) and target allow-lists (`--allow-target`), blocks
+link-local and cloud-metadata targets, never runs a token command or Python callable, and
+reads no files (identities and data rows are sent inline). The scenario it receives includes
+credentials, so use TLS or a private network between controller and agents.
+
 ### Registering runs over HTTP
 
 `accept_remote_runs` lets a load generator on another host register its run
@@ -10614,6 +10660,7 @@ security review yet.
 | A UI or API caller makes the generator run a command or read a file | Elevation of privilege | scenario keys `auth`, `identities`, `identities_file` and `data` are refused from `POST api/runs` (400) and only read from a scenario file; the token command runs without a shell | a scenario file is trusted like any script you run |
 | Identity or token secrets stored or logged | Information disclosure | only the identity name is recorded; header, cookie, token-command and token-request credentials are masked in the stored config; the token is never put in a log, message or error | the secret still lives in the generator process |
 | The plan login's credentials leak, or a plan upload attacks the parser | Information disclosure / DoS | `explain_url` is masked in config and API output; plan upload rejects DTDs and entities (`<!`), caps size (5 MB), elements (20,000) and depth, and never executes anything; the probe only calls `HAS_PERMS_BY_NAME` | the plan login is a second credential to protect |
+| A caller drives a remote generator against internal targets or runs code on it | Elevation of privilege / SSRF | an agent needs a token (constant-time compare, 8+ characters), listens on loopback by default, can be limited with `--allow-target`, blocks link-local and metadata addresses, refuses token commands and callables and file-based identities, validates every worker config | whoever holds the agent token can aim load at any other allowed host; protect the token and use TLS |
 | Arbitrary SQL through EXPLAIN | Elevation of privilege | EXPLAIN takes trace/span ids, never SQL; `is_explainable` on stored text; rolled back | under `explain_analyze` a planted `SELECT` calling a side-effecting function would run (in a rolled-back transaction) |
 | Store file stolen from disk or backups | Information disclosure | redaction, retention, file permissions | no at-rest encryption |
 | Crafted request data makes redaction slow | Denial of service | redaction patterns are linear-time; error, header and identifier texts are cut before they are scanned | free-text capture still costs CPU proportional to the capture budgets |
@@ -13420,7 +13467,8 @@ model, corrects for coordinated omission, finds the knee, and shows which query 
 got slower at each step. See [Load testing](load-testing.md).
 
 It is deliberately smaller than Locust or k6: HTTP only, scenario files instead of
-scripting, no browsers (it can hold streams and WebSocket connections open). If you need those, use them
+scripting, no browsers (it can hold streams and WebSocket connections open). It can spread
+a run over several hosts with `redline load agent`. If you need those, use them
 and tag the requests with `X-Redline-Run` so Redline can still correlate.
 
 ## Does it slow my application down?

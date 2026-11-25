@@ -1255,6 +1255,27 @@
         },
         {
           "name": [
+            "--agents"
+          ],
+          "required": false,
+          "help": "run workers on remote `redline load agent` hosts (https://host:7700,...); the controller then runs no workers itself unless --workers is given"
+        },
+        {
+          "name": [
+            "--agent-token-file"
+          ],
+          "required": false,
+          "help": "file holding the agents' token (else REDLINE_AGENT_TOKEN)"
+        },
+        {
+          "name": [
+            "--agent-ca"
+          ],
+          "required": false,
+          "help": "CA bundle to verify the agents' TLS certificates"
+        },
+        {
+          "name": [
             "--base-url"
           ],
           "required": false,
@@ -1375,6 +1396,54 @@
         }
       ],
       "subcommands": [
+        {
+          "command": "redline load agent",
+          "help": "run a remote load generator for a controller",
+          "arguments": [
+            {
+              "name": [
+                "--listen"
+              ],
+              "required": false,
+              "help": "address to listen on (default 127.0.0.1:7700; use 0.0.0.0 only on a private network)"
+            },
+            {
+              "name": [
+                "--token-file"
+              ],
+              "required": false,
+              "help": "file holding the bearer token controllers must send (else REDLINE_AGENT_TOKEN)"
+            },
+            {
+              "name": [
+                "--max-workers"
+              ],
+              "required": false,
+              "help": "worker processes (default \u2264 8)"
+            },
+            {
+              "name": [
+                "--allow-target"
+              ],
+              "required": false,
+              "help": "only generate load against URLs starting with this (repeatable)"
+            },
+            {
+              "name": [
+                "--cert"
+              ],
+              "required": false,
+              "help": "serve HTTPS with this certificate"
+            },
+            {
+              "name": [
+                "--key"
+              ],
+              "required": false,
+              "help": "private key for --cert"
+            }
+          ]
+        },
         {
           "command": "redline load init",
           "help": "write a scenario file",

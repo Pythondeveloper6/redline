@@ -314,6 +314,15 @@ scenario file** you run yourself, never from the UI or `POST api/runs` (`400`). 
 command runs without a shell. Identity and token values are masked in the stored run config;
 only the identity name reaches the app (as the `identity` trace tag) and the run summary.
 
+### Remote generator agents
+
+`redline load agent` is a service that generates load for whoever holds its token, so treat
+the token like a deploy key. It refuses to start without one, listens on `127.0.0.1` by
+default, supports TLS (`--cert`/`--key`) and target allow-lists (`--allow-target`), blocks
+link-local and cloud-metadata targets, never runs a token command or Python callable, and
+reads no files (identities and data rows are sent inline). The scenario it receives includes
+credentials, so use TLS or a private network between controller and agents.
+
 ### Registering runs over HTTP
 
 `accept_remote_runs` lets a load generator on another host register its run

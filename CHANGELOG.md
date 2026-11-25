@@ -12,6 +12,12 @@ version is below `1.0` the public API may change between minor versions.
 
 ### Added
 
+- Load runs can span several generator hosts. `redline load agent` runs workers for a
+  controller (`redline load ... --agents https://gen1:7700,https://gen2:7700`); the controller
+  sends each agent its share of one global step plan and a shared start time (clock offsets are
+  measured), merges the agents' per-second histograms exactly like local workers', and reports
+  generator CPU per step, marking a step `generator_limited` when a worker was above 90% of a
+  core. Agents need a token, support TLS and target allow-lists, and never run a token command.
 - A flow can model a user: `think_s` (a number or `[min, max]` range) pauses between its steps
   and `own_connection` gives each session its own connection. Each step reports the peak number
   of sessions in flight, so 20 arrivals per second with 5 s of think time shows about 100.

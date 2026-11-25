@@ -416,6 +416,41 @@ A failed rule is counted as its own error class, `assertion`, in the error break
 `max_ms` does the same for a response slower than an agreed limit. Failure reasons never
 include body or header values.
 
+### Several generator hosts (agents)
+
+A generator on the machine under test distorts both sides, and one host caps the offered
+rate. Run `redline load agent` on other hosts and point the controller at them:
+
+```bash
+# on each generator host (token file mode 0600; use TLS or a private network)
+redline load agent --listen 0.0.0.0:7700 --token-file agent.token --cert agent.pem --key agent.key
+
+# on the controller
+redline load scenario.toml --steps 100:1000:100 \
+    --agents https://gen1.internal:7700,https://gen2.internal:7700 \
+    --agent-token-file agent.token --agent-ca ca.pem
+```
+
+The controller computes the step plan once and gives each agent its share of the workers
+(up to 8 each, never more than the peak rps), numbered globally, so the union of all hosts'
+arrivals is exactly the planned rate. One shared start time is converted to each agent's clock
+from a measured offset, and every agent's per-second numbers (counters and latency histograms)
+stream back and merge exactly like local workers', so steps line up to the second. The
+controller runs no workers itself unless you also pass `--workers`. Stopping the run (Ctrl-C,
+`stop_on`) stops the agents; an agent that disappears fails the run with a clear message.
+
+What the controller sends is the scenario's requests plus its identities and data rows
+**inline** (an agent reads no files), so the config, including credentials, crosses the
+network: use TLS (`--cert`/`--key`, verified with `--agent-ca`) or a private network. An agent
+needs a token (at least 8 characters), listens on `127.0.0.1` unless told otherwise, refuses
+`auth.provider` `command` and `python` (use `request`), blocks link-local and metadata targets,
+and can be limited with `--allow-target URL_PREFIX`.
+
+Each worker also reports its own CPU use. A step where a generator worker was above 90% of a
+core is marked `generator_limited` (and listed in `summary.generator.limited_steps`): the
+generator, not the app, may have capped the rate there, so add agents before believing the
+knee.
+
 ### Streams and WebSockets
 
 Every request is timed to its **first byte** (headers received) as well as to its **last byte**.
@@ -569,6 +604,8 @@ SCENARIO = {
 | `--rps N` | constant rate |
 | `--ramp A:B` | ramp from A to B rps over `--duration` |
 | `--stages RPS:DURATION,...` | ordered stages, for example `10:1m,200:30s,10:3m` (spike) or `40:30m` (soak) |
+| `--agents URL,URL` | run workers on remote `redline load agent` hosts; the controller runs none unless `--workers` is given |
+| `--agent-token-file PATH`, `--agent-ca PATH` | the agents' token (else `REDLINE_AGENT_TOKEN`) and the CA bundle that verifies their TLS certificates |
 | `--steps A:B:STEP` | steps from A to B rps, STEP apart, each `--step-duration` |
 | `--duration 60s` | total duration (default 30 s for constant and ramp) |
 | `--step-duration 30s` | length of each step |

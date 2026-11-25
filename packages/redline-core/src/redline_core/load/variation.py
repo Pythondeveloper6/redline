@@ -310,9 +310,16 @@ def load_data_rows(source: DataSource) -> list[dict[str, str]]:
 class DataFeed:
     """Rows of the scenario's data sources, picked per request (seeded)."""
 
-    def __init__(self, sources: Sequence[DataSource], worker: int, workers: int) -> None:
+    def __init__(
+        self,
+        sources: Sequence[DataSource],
+        worker: int,
+        workers: int,
+        rows: Mapping[str, list[dict[str, str]]] | None = None,
+    ) -> None:
         self.sources = {s.name: s for s in sources}
-        self.rows = {s.name: load_data_rows(s) for s in sources}
+        # ``rows`` come inline when a controller sent them (an agent reads no files)
+        self.rows = {s.name: (rows[s.name] if rows else load_data_rows(s)) for s in sources}
         self.worker = worker
         self.workers = max(1, workers)
         self._n: dict[str, int] = {s.name: 0 for s in sources}

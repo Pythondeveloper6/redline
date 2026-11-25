@@ -114,6 +114,20 @@ def _configure_load(p: argparse.ArgumentParser) -> None:
     p.add_argument("--step-duration", type=_duration, metavar="30s", help="duration of each step")
     p.add_argument("--poisson", action="store_true", help="Poisson arrivals (default fixed)")
     p.add_argument("--workers", type=int, metavar="N", help="worker processes (default ≤ 8)")
+    p.add_argument(
+        "--agents",
+        metavar="URL,URL",
+        help="run workers on remote `redline load agent` hosts (https://host:7700,...); the "
+        "controller then runs no workers itself unless --workers is given",
+    )
+    p.add_argument(
+        "--agent-token-file",
+        metavar="PATH",
+        help="file holding the agents' token (else REDLINE_AGENT_TOKEN)",
+    )
+    p.add_argument(
+        "--agent-ca", metavar="PATH", help="CA bundle to verify the agents' TLS certificates"
+    )
     p.add_argument("--base-url", metavar="URL", help="override the scenario's base_url")
     p.add_argument(
         "--ui-url",
@@ -466,6 +480,26 @@ def _cmd_load(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
         err.write("redline load: --workers must be ≥ 1\n")
         return EXIT_USAGE
 
+    agents, agent_token = None, None
+    if args.agents:
+        agents = [a.strip() for a in str(args.agents).split(",") if a.strip()]
+        if not all(a.startswith(("http://", "https://")) for a in agents):
+            err.write("redline load: --agents takes http(s) URLs\n")
+            return EXIT_USAGE
+        agent_token = os.environ.get("REDLINE_AGENT_TOKEN")
+        if args.agent_token_file:
+            try:
+                with open(args.agent_token_file, encoding="utf-8") as fh:
+                    agent_token = fh.read().strip()
+            except OSError as exc:
+                err.write(f"redline load: cannot read --agent-token-file: {exc.strerror or exc}\n")
+                return EXIT_USAGE
+        if not agent_token:
+            err.write(
+                "redline load: agents need a token (--agent-token-file or REDLINE_AGENT_TOKEN)\n"
+            )
+            return EXIT_USAGE
+
     import uuid
 
     run_id = args.run_id or uuid.uuid4().hex
@@ -510,6 +544,9 @@ def _cmd_load(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
             sink=sinks,
             stop_event=stop if store_path else None,
             workers=args.workers,
+            agents=agents,
+            agent_token=agent_token,
+            agent_verify=args.agent_ca or True,
             run_id=run_id,
             name=args.name,
             on_event=printer,
@@ -636,6 +673,77 @@ def _print_final(printer: _Printer, result: Any) -> None:
     max_ok = s.get("max_ok_rps")
     printer.line(f"max ok rps: {max_ok:g}" if max_ok is not None else "max ok rps: -")
     printer.line(f"verdict: {s['verdict']} ({s.get('verdict_detail')})")
+
+
+# ============================================================================ load agent
+def _configure_agent(p: argparse.ArgumentParser) -> None:
+    p.add_argument(
+        "--listen",
+        default="127.0.0.1:7700",
+        metavar="HOST:PORT",
+        help="address to listen on (default 127.0.0.1:7700; use 0.0.0.0 only on a private network)",
+    )
+    p.add_argument(
+        "--token-file",
+        metavar="PATH",
+        help="file holding the bearer token controllers must send (else REDLINE_AGENT_TOKEN)",
+    )
+    p.add_argument("--max-workers", type=int, metavar="N", help="worker processes (default ≤ 8)")
+    p.add_argument(
+        "--allow-target",
+        action="append",
+        default=[],
+        metavar="URL_PREFIX",
+        help="only generate load against URLs starting with this (repeatable)",
+    )
+    p.add_argument("--cert", metavar="PEM", help="serve HTTPS with this certificate")
+    p.add_argument("--key", metavar="PEM", help="private key for --cert")
+
+
+def _cmd_agent(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
+    from .load.agent import AgentError, serve
+
+    token = os.environ.get("REDLINE_AGENT_TOKEN")
+    if args.token_file:
+        try:
+            with open(args.token_file, encoding="utf-8") as fh:
+                token = fh.read().strip()
+        except OSError as exc:
+            err.write(f"redline load agent: cannot read --token-file: {exc.strerror or exc}\n")
+            return EXIT_USAGE
+    if not token:
+        err.write("redline load agent: a token is required (--token-file or REDLINE_AGENT_TOKEN)\n")
+        return EXIT_USAGE
+    if bool(args.cert) != bool(args.key):
+        err.write("redline load agent: --cert and --key go together\n")
+        return EXIT_USAGE
+    try:
+        server = serve(
+            args.listen,
+            token,
+            max_workers=args.max_workers,
+            allow_targets=tuple(args.allow_target),
+            certfile=args.cert,
+            keyfile=args.key,
+        )
+    except (AgentError, OSError, ValueError) as exc:
+        err.write(f"redline load agent: {exc}\n")
+        return EXIT_USAGE
+    host, port = server.address
+    scheme = "https" if args.cert else "http"
+    out.write(
+        f"redline load agent listening on {scheme}://{host}:{port} ({server.max_workers} workers)\n"
+    )
+    if not args.cert and host not in ("127.0.0.1", "::1", "localhost"):
+        out.write("warning: no TLS; the token and scenario cross the network in clear text\n")
+    out.flush()
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.close()
+    return EXIT_OK
 
 
 # ============================================================================ load init
@@ -2286,7 +2394,10 @@ COMMANDS: dict[str, tuple[str, Callable[[argparse.ArgumentParser], None], Handle
         "run a load test (open model) against a running app",
         _configure_load,
         _cmd_load,
-        {"init": ("write a scenario file", _configure_init, _cmd_init)},
+        {
+            "init": ("write a scenario file", _configure_init, _cmd_init),
+            "agent": ("run a remote load generator for a controller", _configure_agent, _cmd_agent),
+        },
     ),
     "check": (
         "refactor check: record a baseline of read-only requests, then compare a new version",

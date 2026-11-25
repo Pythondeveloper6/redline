@@ -50,6 +50,7 @@ DRIFT_MIN_SAMPLES = 15
 DRIFT_P95_GROWTH = 1.25
 DRIFT_P95_MIN_MS = 5.0
 DRIFT_ERROR_GROWTH = 0.01
+GENERATOR_LIMITED_CPU = 90.0
 KNEE_P95_FACTOR = 2.0
 KNEE_ERROR_RATE = 0.01
 KNEE_ACHIEVED_RATIO = 0.9
@@ -82,6 +83,9 @@ class StepResult:
     streams: dict[str, Any] = field(default_factory=dict)
     websockets: dict[str, Any] = field(default_factory=dict)
     sessions: dict[str, Any] = field(default_factory=dict)
+    #: Highest CPU use of any generator worker during the step; at or above
+    #: :data:`GENERATOR_LIMITED_CPU` the generator, not the app, may have capped the rate.
+    generator_cpu_pct: float | None = None
 
     @property
     def completed(self) -> int:
@@ -131,6 +135,9 @@ class StepResult:
             out["websockets"] = dict(self.websockets)
         if self.sessions:
             out["sessions"] = dict(self.sessions)
+        if self.generator_cpu_pct is not None:
+            out["generator_cpu_pct"] = _r(self.generator_cpu_pct, 1)
+            out["generator_limited"] = self.generator_cpu_pct >= GENERATOR_LIMITED_CPU
         if include_hist:
             out["hist"] = base64.b64encode(self.hist.to_bytes()).decode("ascii")
             out["service_hist"] = base64.b64encode(self.service_hist.to_bytes()).decode("ascii")
@@ -326,6 +333,12 @@ def analyze(
             else:
                 totals["messages"] = sum(p.get("messages", 0) for p in parts)
             extra[key] = totals
+    cpus = {s.step: s.generator_cpu_pct for s in steps if s.generator_cpu_pct is not None}
+    if cpus:
+        extra["generator"] = {
+            "max_cpu_pct": _r(max(cpus.values()), 1),
+            "limited_steps": sorted(k for k, v in cpus.items() if v >= GENERATOR_LIMITED_CPU),
+        }
     held = [s for s in steps if s.sessions]
     if held:
         extra["sessions"] = {
