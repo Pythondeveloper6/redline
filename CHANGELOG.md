@@ -59,6 +59,14 @@ The project moves from alpha to beta.
   `instrument_google_cloud_storage()` and `instrument_azure_blob()`. Each imports its library
   lazily, returns `False` when it is missing, never records payloads, object names or error
   messages, and is covered by `auto_instrument` and `redline instrumentation`.
+- New finding `unattributed_time`: a Django, FastAPI, Flask or Litestar request with at least
+  `unattributed_time_ratio` (default 0.5) of its time, and at least `unattributed_time_ms`
+  (default 100), covered by no span. It names the profiler's project frame when the trace has a
+  profile. Wrapper spans (`view`, `middleware`, `transaction`) do not count as coverage; jobs and
+  traces with dropped spans are skipped.
+- Load runs: `api/runs/{id}/bottlenecks` gains an item of kind `other` (key `other:uncovered`)
+  with the per-request time no span covers, per step. Existing `sql` and `route` items are
+  unchanged.
 
 ### Changed
 

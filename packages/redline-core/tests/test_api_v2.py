@@ -188,7 +188,8 @@ def test_runs_read_and_delete(api, store):
     detail = ok(api.dispatch("GET", f"api/runs/{run.id}"))
     assert detail["steps"][0]["p50_ms"] > 0 and "summary" in detail
     b = ok(api.dispatch("GET", f"api/runs/{run.id}/bottlenecks"))
-    assert b["steps"] == [{"step": 0, "target_rps": 5}] and len(b["items"]) == 2
+    assert b["steps"] == [{"step": 0, "target_rps": 5}] and len(b["items"]) == 3
+    assert sorted(i["kind"] for i in b["items"]) == ["other", "route", "sql"]
     err(api.dispatch("DELETE", f"api/runs/{run.id}"), 409, "run_active")
     store.finish_run(run.id, "stopped")
     assert ok(api.dispatch("DELETE", f"api/runs/{run.id}")) == {"deleted": 1}

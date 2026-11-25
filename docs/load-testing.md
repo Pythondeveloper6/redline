@@ -364,6 +364,7 @@ with the run, step by step, with their per-fingerprint and per-route summaries:
 |---|---|
 | `sql` | mean time per execution of each query, by step |
 | `route` | mean time per request of each endpoint, by step |
+| `other` | mean time per request that no span covers (the gap between the spans, see [unattributed time](detectors.md#unattributed-time)), by step. Read from the run's 2000 latest requests; absent when every request is fully covered |
 
 Each item shows its mean and p95 at every step and a **growth** factor: the last step's
 mean divided by the first's (floored at 0.01 ms to avoid dividing by nothing). Items are
@@ -377,6 +378,7 @@ to open a sample trace, with its callsite.
 | One SQL statement's time grows 100x | a missing index or a lock; run [EXPLAIN](explain.md) on a sample |
 | Every statement grows together; routes grow | the database or its pool is saturated. Look for `pool_wait` spans ([Transactions and locks](transactions.md#pool-waits)) |
 | SQL flat, routes grow | the app itself: CPU, GIL, [blocking in async](async-blocking.md), or a downstream call |
+| The `other` row grows with the routes | time redline cannot see: CPU, or a client with no span ([wrap it](extending.md#instrumenting-a-client)) |
 | `dropped` rises with flat server latency | the generator is the limit. More workers, or another machine |
 | Errors with no matching traces | requests are rejected before the app records them (proxy, worker queue) |
 

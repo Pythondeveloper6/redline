@@ -684,7 +684,15 @@ def test_run_bottlenecks_growth(store):
         {"step": 1, "target_rps": 20},
         {"step": 2, "target_rps": 40},
     ]
-    sql, route = b.items
+    sql, route = (i for i in b.items if i["kind"] != "other")
+    # the request time no span covers is one extra, additive item
+    [other] = [i for i in b.items if i["kind"] == "other"]
+    assert other["key"] == "other:uncovered" and other["callsite"] is None
+    assert other["label"] == "Other (time not covered by any span)"
+    # the SQL spans start together, so each request covers one query's duration
+    assert [p["mean_ms"] for p in other["per_step"]] == [17.0, 170.0, 2090.0]
+    assert [p["count"] for p in other["per_step"]] == [2, 2, 2]
+    assert other["growth"] == round(2090 / 17, 2)
     assert sql["kind"] == "sql" and sql["key"].startswith("sql:")
     assert sql["label"] == 'SELECT * FROM "items" WHERE "order_id" = ?'
     assert [p["mean_ms"] for p in sql["per_step"]] == [3.0, 30.0, 410.0]
@@ -713,3 +721,20 @@ def test_run_bottlenecks_edge_cases(store):
     assert sql["growth"] == 500.0
     store.save(n1_trace(tags={"run_id": "single", "step": "0"}))
     assert all(i["growth"] == 1.0 for i in store.run_bottlenecks("single").items)
+
+
+def test_run_bottlenecks_other_row_omitted_when_covered_and_survives_bad_bodies(store):
+    store.save_run(Run(id="covered"))
+    # one span spanning the whole request: nothing is left over
+    full = make_trace(
+        duration_ms=50,
+        spans=[sql_span("SELECT 1 FROM t", duration_ms=50)],
+        tags={"run_id": "covered", "step": "0"},
+    )
+    store.save(full)
+    assert [i["kind"] for i in store.run_bottlenecks("covered").items] == ["route", "sql"]
+    # a stored body that cannot be read only loses that request's contribution
+    store.save(make_trace(duration_ms=80, tags={"run_id": "covered", "step": "1"}))
+    store._write_now([("UPDATE traces SET body = 'not json' WHERE duration_ms = 80", ())])
+    kinds = [i["kind"] for i in store.run_bottlenecks("covered").items]
+    assert "other" not in kinds
