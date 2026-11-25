@@ -40,6 +40,11 @@ def test_status_reports_installed_loaded_and_instrumented_without_importing_prov
         "boto3",
         "anthropic",
         "openai",
+        "pymongo",
+        "kafka",
+        "pika",
+        "google_cloud_storage",
+        "azure_blob",
     ]
     assert statuses[0] == {
         "name": "httpx",

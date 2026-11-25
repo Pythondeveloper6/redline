@@ -63,7 +63,7 @@ CLI reference as JSON: https://pythondeveloper6.github.io/redline/reference/cli.
 - [Flask](https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/flask.md): flask-redline is the Flask and SQLAlchemy adapter.
 - [Litestar](https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/litestar.md): litestar-redline is the Litestar and SQLAlchemy adapter.
 - [Libraries (requests, Redis, ...)](https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/integrations.md): Redline records what your framework adapter hooks automatically: the ORM, templates, the cache framework in Django, and so on.
-- [Extending](https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/extending.md): Redline has two extension points, both small typing.Protocols in redline_core:
+- [Extending](https://raw.githubusercontent.com/Pythondeveloper6/redline/main/docs/extending.md): Redline has two extension points, both small typing.Protocols in redline_core, and a helper for making any other client visible:
 
 ## Operations
 

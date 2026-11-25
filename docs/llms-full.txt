@@ -7870,6 +7870,11 @@ They share a few rules:
 | requests | `instrument_requests()` | `http_out` spans | `requests` |
 | boto3 | `instrument_boto3()` | `http_out` spans per SDK operation | `boto3` |
 | redis-py | `instrument_redis()` | `cache` spans | `redis` |
+| pymongo | `instrument_pymongo()` | `custom` spans per collection call (`client="mongodb"`) | none |
+| kafka-python | `instrument_kafka()` | `custom` publish spans (`client="kafka"`) | none |
+| pika | `instrument_pika()` | `custom` publish spans (`client="amqp"`) | none |
+| Google Cloud Storage | `instrument_google_cloud_storage()` | `custom` upload/download spans (`client="gcs"`) | none |
+| Azure Blob Storage | `instrument_azure_blob()` | `custom` upload/download/delete spans (`client="azure_blob"`) | none |
 | asyncpg | `instrument_asyncpg()` | `sql` spans | `asyncpg` |
 | psycopg 3 | `instrument_psycopg()` | `sql` spans | `psycopg` |
 | Marshmallow | `instrument_marshmallow()` | `serializer` spans | none |
@@ -8006,6 +8011,35 @@ schemas (`fields.Nested`) are part of their parent's time. Feeds the
 [slow serializer detector](serializers.md). Marshmallow has no extra: the call
 returns `False` if marshmallow is not installed.
 
+## Data stores, queues and object storage
+
+```python
+from redline_core.contrib.pymongo import instrument_pymongo
+from redline_core.contrib.kafka import instrument_kafka
+from redline_core.contrib.pika import instrument_pika
+from redline_core.contrib.google_cloud_storage import instrument_google_cloud_storage
+from redline_core.contrib.azure_blob import instrument_azure_blob
+```
+
+These record `custom` spans built with [`instrument_client_method`](extending.md#instrumenting-a-client).
+Each span has `client`, `op`, `target`, `payload_bytes` and `error` in its data. Every function
+imports its library only when called and returns `False` if it is not installed, so an app
+without the library is unaffected. Filters, documents, message keys and bodies, object names,
+URLs and credentials are never captured, and an error is recorded as its class name.
+
+| Integration | What a span covers | Target | Size |
+|---|---|---|---|
+| pymongo | `Collection` writes, `find_one`, `count_documents`, `distinct`, `bulk_write`, and each network batch of a `find()` cursor (`op="find"`) | `database.collection` | none |
+| kafka-python | `KafkaProducer.send` (`op="publish"`). `send` only enqueues, so the span is the time the caller waited, not delivery | topic | value, when bytes |
+| pika | `BlockingChannel.basic_publish` (`op="publish"`) | `exchange/routing_key` | body |
+| Google Cloud Storage | `Blob.upload_from_*` and `download_*` | bucket | upload data (`upload_from_string`) and downloaded bytes or text |
+| Azure Blob Storage | `BlobClient.upload_blob`, `download_blob`, `delete_blob`, sync and `aio`. `download_blob` covers starting the download; the stream is read later | container | upload data |
+
+For any other client, wrap it yourself with `instrument_client_method`
+([Extending](extending.md#instrumenting-a-client)). `auto_instrument="on"` also instruments
+these when they are installed; the default `"warn"` lists them if installed and inactive.
+Asynchronous drivers (motor, aiokafka) are not covered; wrap their coroutine methods with the helper.
+
 ## GraphQL
 
 Strawberry and Graphene resolvers are described on their own page:
@@ -8107,14 +8141,16 @@ storms. This avoids treating reads of different object keys as identical request
 
 [← Index](index.md)
 
-Redline has two extension points, both small `typing.Protocol`s in `redline_core`:
+Redline has two extension points, both small `typing.Protocol`s in `redline_core`, and a
+helper for making any other client visible:
 
 | Extension | You write | Use it for |
 |---|---|---|
 | [`FixSuggester`](#fixsuggester) | one method, `suggest(issue, spans)` | fix advice for another ORM, a house style, or a framework Redline does not know |
 | [`Store`](#the-store-protocol) | the storage interface | keeping traces somewhere other than the local SQLite file |
+| [`instrument_client_method`](#instrumenting-a-client) | one call per client method | spans for a database, queue or storage client Redline has no integration for |
 
-Both are **beta** surfaces: signatures may change before 1.0.
+All three are **beta** surfaces: signatures may change before 1.0.
 
 ## The data you will touch
 
@@ -8254,6 +8290,53 @@ project root. The file path in `Callsite.file` is relative to `project_root`.
 
 Only produce a diff when you are **sure** you found the right expression. A wrong diff is
 worse than a hint. Use `confidence` honestly: `high` means "relation and line identified".
+
+## Instrumenting a client
+
+Time spent in a client Redline cannot see shows up as [unattributed time](detectors.md#unattributed-time)
+on the request. `instrument_client_method` makes it visible: it wraps one method of a client
+class (or one object) and records every call as a span with the client name, the operation,
+a target, the duration, a payload size and, on failure, the exception class.
+
+```python
+from redline_core import instrument_client_method
+from redline_core.extending import payload_size
+
+restore = instrument_client_method(
+    acme_sdk.Client,                     # a class (all instances) or one object
+    "put",
+    client="acme",                       # span data["client"]
+    operation="write",                   # a string, or a callable (self, args, kwargs) -> str
+    target=lambda self, args, kwargs: args[0],                      # e.g. the table name
+    payload_bytes=lambda self, args, kwargs: payload_size(args[1]),  # request size
+    result_bytes=payload_size,           # response size, from the return value
+)
+# restore() puts the original method back
+```
+
+| Property | Behaviour |
+|---|---|
+| Span | kind `custom` (override with `kind=`), name `acme write orders`, data `client`, `op`, `target`, `payload_bytes`, `error`, and `result_bytes` when given |
+| Sizes | `payload_size(value)` measures only bytes-like and text values; anything else is `None` rather than serialized to be measured |
+| Errors | the exception class name only, never its message; the exception is re-raised unchanged |
+| Safety | a hook that raises is ignored (the call still runs and is recorded); the target is redacted and capped at 200 characters |
+| Async | coroutine functions are wrapped as coroutines |
+| Idempotent | wrapping an already wrapped method does nothing; the undo function restores the original and does nothing if another patch replaced yours |
+| Cost | outside a traced request, one `ContextVar` read per call |
+
+Use it on instance methods; static and class methods are not supported. For code you cannot
+patch, `client_span` is the context-manager form:
+
+```python
+from redline_core import client_span
+
+with client_span("acme", "scan", target="orders") as info:
+    rows = acme_client.scan("orders")
+    info["payload_bytes"] = len(rows)
+```
+
+The first-party [pymongo, Kafka, pika, Google Cloud Storage and Azure Blob integrations](integrations.md#data-stores-queues-and-object-storage)
+are built on this helper.
 
 ## The `Store` protocol
 
@@ -10868,7 +10951,7 @@ See [How it works: sampling](how-it-works.md#sampling).
 | `capture_logs` | `bool` | `True` | Keep the log records emitted during a request. See [Logs and exceptions](logs-and-exceptions.md) |
 | `log_level` | `str` (`DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`; case-insensitive) | `"INFO"` | An extra minimum level for records stored in a trace. Capture follows your application's own logger levels (Redline never adds a root handler or changes a level), so a record your logging configuration drops is never captured; `log_level` can only raise the bar further |
 | `max_logs_per_trace` | `int` | `200` | Cap per trace; extras are counted, not stored |
-| `auto_instrument` | `"off"`, `"warn"` or `"on"` | `"warn"` | Outbound-call integrations (httpx, requests, redis, boto3). `"warn"`: at install, log one warning naming installed but uninstrumented ones; `"on"`: instrument every installed one at install; `"off"`: neither. See [Integrations](integrations.md#zero-config-coverage) |
+| `auto_instrument` | `"off"`, `"warn"` or `"on"` | `"warn"` | Client integrations (httpx, requests, redis, boto3, pymongo, kafka-python, pika, google-cloud-storage, azure-storage-blob). `"warn"`: at install, log one warning naming installed but uninstrumented ones; `"on"`: instrument every installed one at install; `"off"`: neither. See [Integrations](integrations.md#zero-config-coverage) |
 | `capture_locals` | `bool` | `True` | Keep the local variables of project frames in an exception (names matching `redact_keys` are masked). See [Logs and exceptions](logs-and-exceptions.md#exceptions-with-locals) |
 | `capture_error_details` | `bool` | `True` | Capture exception messages and formatted tracebacks. When false, errors retain type/codes without formatting message or traceback text; exception locals are also disabled. SQL messages additionally require SQL parameter capture for that statement. Shared-dev and production default to false |
 
@@ -12770,7 +12853,7 @@ with `_`, and any module not listed here, even if it is importable.
 
 | Surface | Public names |
 |---|---|
-| `redline_core` | everything in `redline_core.__all__`: `configure`, `get_recorder`, `Recorder`, `Settings`, `SettingsError`, `span`, `record_span`, `record_query`, `tag`, `job`, `stage`, `row_outcome`, `start_trace`, `finish_trace`, `current`, the model types (`Trace`, `Span`, `SpanContext`, `TraceBuilder`, `Issue`, `Suggestion`, `Callsite`, `Frame`) and the extension points `Detector`, `FixSuggester`, `GenericSuggester` |
+| `redline_core` | everything in `redline_core.__all__`: `configure`, `get_recorder`, `Recorder`, `Settings`, `SettingsError`, `span`, `record_span`, `record_query`, `tag`, `job`, `stage`, `row_outcome`, `start_trace`, `finish_trace`, `current`, the model types (`Trace`, `Span`, `SpanContext`, `TraceBuilder`, `Issue`, `Suggestion`, `Callsite`, `Frame`) and the extension points `Detector`, `FixSuggester`, `GenericSuggester` and the client helpers `instrument_client_method`, `client_span` |
 | `redline_core.testing` | the pytest helpers documented in [Performance workflows](performance-workflows.md) |
 | `redline_core.contrib.*` | the `instrument_*` / `uninstrument_*` functions of each integration documented in [Integrations](integrations.md) |
 | `redline_core.storage` | `SQLiteStore` construction from a path and the `Store` protocol for custom stores ([Storage](storage.md)); the SQL schema itself is internal |

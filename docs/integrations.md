@@ -25,6 +25,11 @@ They share a few rules:
 | requests | `instrument_requests()` | `http_out` spans | `requests` |
 | boto3 | `instrument_boto3()` | `http_out` spans per SDK operation | `boto3` |
 | redis-py | `instrument_redis()` | `cache` spans | `redis` |
+| pymongo | `instrument_pymongo()` | `custom` spans per collection call (`client="mongodb"`) | none |
+| kafka-python | `instrument_kafka()` | `custom` publish spans (`client="kafka"`) | none |
+| pika | `instrument_pika()` | `custom` publish spans (`client="amqp"`) | none |
+| Google Cloud Storage | `instrument_google_cloud_storage()` | `custom` upload/download spans (`client="gcs"`) | none |
+| Azure Blob Storage | `instrument_azure_blob()` | `custom` upload/download/delete spans (`client="azure_blob"`) | none |
 | asyncpg | `instrument_asyncpg()` | `sql` spans | `asyncpg` |
 | psycopg 3 | `instrument_psycopg()` | `sql` spans | `psycopg` |
 | Marshmallow | `instrument_marshmallow()` | `serializer` spans | none |
@@ -160,6 +165,35 @@ Patches `Schema.dump`. Only the **outermost** `dump` becomes a `serializer` span
 schemas (`fields.Nested`) are part of their parent's time. Feeds the
 [slow serializer detector](serializers.md). Marshmallow has no extra: the call
 returns `False` if marshmallow is not installed.
+
+## Data stores, queues and object storage
+
+```python
+from redline_core.contrib.pymongo import instrument_pymongo
+from redline_core.contrib.kafka import instrument_kafka
+from redline_core.contrib.pika import instrument_pika
+from redline_core.contrib.google_cloud_storage import instrument_google_cloud_storage
+from redline_core.contrib.azure_blob import instrument_azure_blob
+```
+
+These record `custom` spans built with [`instrument_client_method`](extending.md#instrumenting-a-client).
+Each span has `client`, `op`, `target`, `payload_bytes` and `error` in its data. Every function
+imports its library only when called and returns `False` if it is not installed, so an app
+without the library is unaffected. Filters, documents, message keys and bodies, object names,
+URLs and credentials are never captured, and an error is recorded as its class name.
+
+| Integration | What a span covers | Target | Size |
+|---|---|---|---|
+| pymongo | `Collection` writes, `find_one`, `count_documents`, `distinct`, `bulk_write`, and each network batch of a `find()` cursor (`op="find"`) | `database.collection` | none |
+| kafka-python | `KafkaProducer.send` (`op="publish"`). `send` only enqueues, so the span is the time the caller waited, not delivery | topic | value, when bytes |
+| pika | `BlockingChannel.basic_publish` (`op="publish"`) | `exchange/routing_key` | body |
+| Google Cloud Storage | `Blob.upload_from_*` and `download_*` | bucket | upload data (`upload_from_string`) and downloaded bytes or text |
+| Azure Blob Storage | `BlobClient.upload_blob`, `download_blob`, `delete_blob`, sync and `aio`. `download_blob` covers starting the download; the stream is read later | container | upload data |
+
+For any other client, wrap it yourself with `instrument_client_method`
+([Extending](extending.md#instrumenting-a-client)). `auto_instrument="on"` also instruments
+these when they are installed; the default `"warn"` lists them if installed and inactive.
+Asynchronous drivers (motor, aiokafka) are not covered; wrap their coroutine methods with the helper.
 
 ## GraphQL
 

@@ -16,6 +16,16 @@ _INTEGRATIONS = (
     ("boto3", "boto3", "redline_core.contrib.boto3", "_wrapper"),
     ("anthropic", "anthropic", "redline_core.contrib.anthropic", "_originals"),
     ("openai", "openai", "redline_core.contrib.openai", "_originals"),
+    ("pymongo", "pymongo", "redline_core.contrib.pymongo", "_originals"),
+    ("kafka", "kafka", "redline_core.contrib.kafka", "_originals"),
+    ("pika", "pika", "redline_core.contrib.pika", "_originals"),
+    (
+        "google_cloud_storage",
+        "google.cloud.storage",
+        "redline_core.contrib.google_cloud_storage",
+        "_originals",
+    ),
+    ("azure_blob", "azure.storage.blob", "redline_core.contrib.azure_blob", "_originals"),
 )
 
 

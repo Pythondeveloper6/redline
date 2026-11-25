@@ -50,6 +50,15 @@ The project moves from alpha to beta.
   (settings `ai_diagnosis`, `ai_provider`, `ai_model`).
 - The FastAPI demo gains `GET /assistant` (LLM-call findings without a key or network), a
   `.mcp.json` and an `AGENTS.md`.
+- `instrument_client_method` and `client_span` (`redline_core`, `redline_core.extending`) record a
+  call to any client library as a span with client, operation, target, duration, payload size
+  and error class, so a database, queue or storage client without an integration is no longer
+  invisible. See [Extending](docs/extending.md#instrumenting-a-client).
+- First-party, opt-in integrations built on it: `instrument_pymongo()`, `instrument_kafka()`
+  (kafka-python `KafkaProducer.send`), `instrument_pika()` (`basic_publish`),
+  `instrument_google_cloud_storage()` and `instrument_azure_blob()`. Each imports its library
+  lazily, returns `False` when it is missing, never records payloads, object names or error
+  messages, and is covered by `auto_instrument` and `redline instrumentation`.
 
 ### Changed
 
