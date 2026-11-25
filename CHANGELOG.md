@@ -8,7 +8,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). While the
 version is below `1.0` the public API may change between minor versions.
 
-## Unreleased: 0.5.0b1
+## Unreleased: 0.5.0b2
+
+### Added
+
+- SQL sent through a raw driver cursor is recorded. `engine.raw_connection().cursor()` on an
+  instrumented SQLAlchemy engine returns a recording proxy, and
+  `redline_core.contrib.dbapi.instrument_dbapi(module)` does the same for a driver used with
+  no engine (`sqlite3`, `psycopg2`, `pymysql` ...). Spans carry `source="raw_cursor"`;
+  an `executemany` is one span with a `batch_size`. SQLAlchemy's own use of
+  `raw_connection` is not double-counted.
+
+## 0.5.0b1 (2026-11-12)
 
 The project moves from alpha to beta.
 

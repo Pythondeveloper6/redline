@@ -30,6 +30,7 @@ except ImportError:  # no greenlet: sync-only install (e.g. a Flask app), so no 
 
 from redline_core import record_query
 from redline_core.blocking import note_sync_call
+from redline_core.contrib._rawcursor import wrap_connection
 from redline_core.recorder import _capture_failure, current, record_span
 from redline_core.transactions import begin_transaction, end_transaction
 
@@ -446,6 +447,11 @@ def _instrument_pool(sync_engine: Engine, alias: str) -> None:
         if binding is None or start is None:
             return dbapi_conn
         try:
+            if not _called_by_sqlalchemy(sys._getframe(1)):
+                dbapi_conn = wrap_connection(dbapi_conn, vendor_of(sync_engine), binding[0])
+        except Exception:
+            _observer_failed()
+        try:
             duration = _perf() - start
             if duration >= POOL_WAIT_MIN:
                 builder = current()
@@ -468,6 +474,13 @@ def _instrument_pool(sync_engine: Engine, alias: str) -> None:
         return dbapi_conn
 
     sync_engine.raw_connection = raw_connection  # type: ignore[method-assign]
+
+
+def _called_by_sqlalchemy(frame: Any) -> bool:
+    """True when ``Engine.raw_connection`` was called by SQLAlchemy itself (its own events
+    already record that traffic); false for application code asking for a raw connection."""
+    name = frame.f_globals.get("__name__", "") if frame is not None else ""
+    return name == "sqlalchemy" or name.startswith("sqlalchemy.")
 
 
 def _pool_stat(pool: Any, name: str) -> int | None:

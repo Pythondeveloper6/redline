@@ -27,6 +27,7 @@ They share a few rules:
 | redis-py | `instrument_redis()` | `cache` spans | `redis` |
 | asyncpg | `instrument_asyncpg()` | `sql` spans | `asyncpg` |
 | psycopg 3 | `instrument_psycopg()` | `sql` spans | `psycopg` |
+| Raw DB-API driver | `instrument_dbapi(module)` | `sql` spans (`source="raw_cursor"`) | any DB-API driver |
 | Marshmallow | `instrument_marshmallow()` | `serializer` spans | none |
 | Strawberry | `RedlineExtension` | `resolver` spans | `strawberry` |
 | Graphene | `RedlineMiddleware` | `resolver` spans | `graphene` |
@@ -147,6 +148,25 @@ patching both would record each query twice.
     Use exactly one capture path per database driver: the ORM's (Django, SQLAlchemy) *or*
     the driver-level one (asyncpg, psycopg). If you instrument SQLAlchemy and asyncpg and
     use SQLAlchemy's asyncpg dialect, every query is recorded twice.
+
+## Raw DB-API cursors
+
+SQL that bypasses the engine is recorded too. With an instrumented SQLAlchemy engine,
+`engine.raw_connection()` called from your code returns a thin proxy: `cursor().execute`,
+`executemany` and `callproc` become `sql` spans with `source="raw_cursor"`. An `executemany`
+is one span with a `batch_size`, not one span per row.
+
+For a driver used with no engine at all, opt in once at startup:
+
+```python
+import sqlite3
+from redline_core.contrib.dbapi import instrument_dbapi
+
+instrument_dbapi(sqlite3)  # patches sqlite3.connect; undo with uninstrument_dbapi(sqlite3)
+```
+
+Limits: statements run through `connection.connection.cursor()` of a SQLAlchemy
+`Connection` and connections opened before `instrument_dbapi` was called are not recorded.
 
 ## Marshmallow
 
