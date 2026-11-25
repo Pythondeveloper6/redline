@@ -533,3 +533,65 @@ def test_configured_storage_url_is_used_when_no_store_is_given(tmp_path, monkeyp
     assert cli._run_store_target(args, None) == "mine.db"
     args = parser.parse_args(["load", "x", "--no-store"])
     assert cli._run_store_target(args, None) is None
+
+
+# ---------------------------------------------------------------------------- register over HTTP
+def test_register_url_must_be_http(tmp_path, capsys):
+    sc = write_scenario(tmp_path, "http://127.0.0.1:1")
+    assert cli.main(["load", sc, "--register-url", "ftp://x"]) == 2
+    assert "http" in capsys.readouterr().err
+
+
+def test_register_url_preflight_failure_is_reported_without_the_token(
+    tmp_path, capsys, monkeypatch, http_server
+):
+    _, url = http_server  # a server that is not a Redline application
+    token_file = tmp_path / "token"
+    token_file.write_text("tok-very-secret-123\n")
+    sc = write_scenario(tmp_path, url)
+    code = cli.main(
+        ["load", sc, "--register-url", url + "/_redline", "--token-file", str(token_file)]
+    )
+    captured = capsys.readouterr()
+    assert code == 2
+    assert "tok-very-secret-123" not in captured.out + captured.err
+
+
+def test_register_url_run_is_registered_with_the_application(
+    tmp_path, capsys, monkeypatch, http_server
+):
+    import httpx
+
+    from redline_core.api import RedlineAPI
+    from redline_core.conf import Settings
+    from redline_core.load import sinks
+
+    _, url = http_server
+    store = SQLiteStore(str(tmp_path / "app.db"), background=False)
+    app = RedlineAPI(store, Settings(accept_remote_runs=True))
+
+    def handler(request):
+        path = request.url.path.removeprefix("/_redline/")
+        body = json.loads(request.content) if request.content else None
+        status, payload = app.dispatch(request.method, path, body=body)
+        return httpx.Response(status, json=payload)
+
+    real = sinks.HttpSink
+
+    class Wired(real):
+        def __init__(self, base, token=None, **kw):
+            super().__init__(
+                base, token, client=httpx.Client(transport=httpx.MockTransport(handler))
+            )
+
+    monkeypatch.setattr(sinks, "HttpSink", Wired)
+    monkeypatch.chdir(tmp_path)
+    sc = write_scenario(tmp_path, url)
+    code = cli.main(
+        ["load", sc, "--register-url", "http://app/_redline", "--rps", "5", "--duration", "2s"]
+    )
+    assert code == 0
+    runs = store.list_runs()
+    assert len(runs) == 1 and runs[0].status == "done" and runs[0].steps
+    assert "http://app/_redline/#/load/" in capsys.readouterr().out
+    store.close()

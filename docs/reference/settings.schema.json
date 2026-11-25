@@ -3,6 +3,10 @@
   "title": "Redline settings",
   "type": "object",
   "properties": {
+    "accept_remote_runs": {
+      "type": "boolean",
+      "default": false
+    },
     "access": {
       "type": "string",
       "default": "local"

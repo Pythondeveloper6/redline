@@ -156,6 +156,7 @@ See [Flamegraphs](flamegraphs.md). Needs `redline-core[profile]`.
 | `editor` | `"vscode"`, `"cursor"`, `"pycharm"`, `"idea"`, `"sublime"`, `"none"`, or a template string | `"vscode"` | Where callsite links open. A template contains `{file}` (absolute path) and `{line}`. See [Open in editor](the-ui.md#open-in-editor) |
 | `server_timing` | `"auto"` or `bool` | `"auto"` | Add a `Server-Timing` header (trace id, query count and time) to recorded responses. `auto` means on when the framework is in debug mode. See [Server-Timing and the badge](server-timing-badge.md) |
 | `badge` | `"auto"` or `bool` | `"auto"` | Inject the floating badge into HTML responses. `auto` means on when the framework is in debug mode (FastAPI, Flask and Litestar: the app's `debug` flag) |
+| `accept_remote_runs` | `bool` | `False` | Accept load runs registered over HTTP by a generator on another host (`POST api/runs/register`, `.../steps`, `.../finish`). Refused while `read_only` is on |
 | `load_from_ui` | `bool` | `False` | Allow starting a [load run](load-testing.md#starting-a-run-from-the-ui) from the UI (`POST api/runs`). Needs `redline-core[load]`. Off whenever `read_only` is on or the `load` feature is off |
 | `checks_from_ui` | `"auto"` or `bool` | `"auto"` | Allow starting [refactor-check](refactor-check.md) baseline and compare runs from the UI (`POST api/checks/runs`). `auto` means on only while the framework is in debug mode; `true` and `false` force it. Needs `redline-core[load]` (httpx). Off whenever `read_only` is on or the `checks` feature is off; the `production` preset sets it to `false`. Reading suites and reports is not affected |
 
@@ -255,6 +256,7 @@ exactly what `redline_core.conf.PRESETS` applies:
 | `read_only` | off | on | off | on |
 | `badge` / `server_timing` | `auto` | `auto` | `auto` | off |
 | `load_from_ui` | off | off | off | off |
+| `accept_remote_runs` | off | off | off | off |
 | `checks_from_ui` / `analysis_from_ui` | `auto` | off | `auto` | off |
 | `explain_analyze` | off | off | off | off |
 | `profile` | `off` | `off` | `off` | `off` |

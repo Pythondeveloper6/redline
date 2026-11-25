@@ -105,6 +105,8 @@ cookie and `X-CSRFToken`.
 | 403 | `forbidden` | The policy refused: not a loopback client or `Host` under `local`, a client outside `allowed_ips`, a loopback peer with forwarding headers and no `trusted_proxies`, `framework` with a hook that returned false (or no hook), `custom` returned false, or your dependency raised `403` |
 | 403 | `open_refused` | `access = "open"` without `REDLINE_ALLOW_OPEN=1` |
 | 403 | `csrf_failed` | The CSRF check failed (see above; on Django also Django's own check) |
+| 403 | `remote_runs_disabled` | `POST api/runs/register` (or `.../steps`, `.../finish`) while `accept_remote_runs` is off |
+| 403 | `run_not_remote` | `.../steps` or `.../finish` for a run that was not registered over HTTP |
 | 403 | `load_disabled` | `POST api/runs` while `load_from_ui` is off |
 | 403 | `checks_from_ui_disabled` | `POST api/checks/runs` while `checks_from_ui` is off (or `auto` outside debug mode) |
 | 403 | `read_only` | A state-changing call while `read_only` is on |
@@ -626,6 +628,9 @@ Load-test runs ([Load testing](load-testing.md)).
 | `GET api/runs/{id}/bottlenecks` | what got slower, per step |
 | `POST api/runs` | start a run (`202`) |
 | `POST api/runs/{id}/stop` | stop a run: `{"stopped": true}` |
+| `POST api/runs/register` | a remote generator registers a run (`201`); needs `accept_remote_runs` |
+| `POST api/runs/{id}/steps` | the generator reports one finished step (`hist` is a base64 histogram) |
+| `POST api/runs/{id}/finish` | the generator ends the run with `done`, `stopped` or `failed` |
 | `DELETE api/runs/{id}` | delete a finished run: `{"deleted": 1}` |
 
 Runs started from the UI go through the same validation as a scenario file. A run's

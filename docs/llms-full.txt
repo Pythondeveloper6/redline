@@ -5773,6 +5773,23 @@ uses. The default is `.redline/redline.db` in the working directory, and `--stor
 elsewhere, so run the command from the app's directory or pass the path. The UI then lists
 it under **Load**.
 
+### Generator and application on different machines
+
+When the generator runs on another host (or the app runs in a container) there is no shared
+file, and a run written to a local file would tag none of the app's traces. Two options:
+
+- **Shared store.** Point both at the same PostgreSQL database:
+  `redline load scenario.toml --store-url postgresql://...` (or set `storage_url` in the
+  project's config, which `redline load` picks up when `--store` is not given). The URL's
+  password is never printed.
+- **Register over HTTP.** With no shared store, the generator tells the application about
+  the run: `redline load scenario.toml --register-url https://app.example/_redline`.
+  The application must enable `accept_remote_runs` (off by default, and always off while
+  `read_only` is on). The Redline access token is read from `REDLINE_TOKEN` or
+  `--token-file`, never from the command line. The generator checks the application is
+  reachable and accepts the token before the first request, and a run registered this way
+  can only be changed over HTTP by its own generator.
+
 ## Profiles
 
 A profile says how the rate changes over time.
@@ -5922,6 +5939,9 @@ SCENARIO = {
 | `--ui-url PATH\|URL` | where the Redline UI is mounted, for the printed link (overrides the scenario's `ui_url`) |
 | `--name TEXT` | run name |
 | `--store PATH` | store to write the run to (default `.redline/redline.db`) |
+| `--store-url URL` | write the run to a shared PostgreSQL store (`postgresql://...`) |
+| `--register-url URL` | register the run with the application over HTTP (needs `accept_remote_runs` there) |
+| `--token-file PATH` | file holding the Redline access token for `--register-url` (else `REDLINE_TOKEN`) |
 | `--no-store` | do not write to a store |
 | `--json OUT` | also write the results as JSON |
 | `--fail-p95-ms X` | exit 1 if the run-wide p95 exceeds X ms |
@@ -7872,6 +7892,7 @@ They share a few rules:
 | redis-py | `instrument_redis()` | `cache` spans | `redis` |
 | asyncpg | `instrument_asyncpg()` | `sql` spans | `asyncpg` |
 | psycopg 3 | `instrument_psycopg()` | `sql` spans | `psycopg` |
+| Raw DB-API driver | `instrument_dbapi(module)` | `sql` spans (`source="raw_cursor"`) | any DB-API driver |
 | Marshmallow | `instrument_marshmallow()` | `serializer` spans | none |
 | Strawberry | `RedlineExtension` | `resolver` spans | `strawberry` |
 | Graphene | `RedlineMiddleware` | `resolver` spans | `graphene` |
@@ -7992,6 +8013,25 @@ patching both would record each query twice.
     Use exactly one capture path per database driver: the ORM's (Django, SQLAlchemy) *or*
     the driver-level one (asyncpg, psycopg). If you instrument SQLAlchemy and asyncpg and
     use SQLAlchemy's asyncpg dialect, every query is recorded twice.
+
+## Raw DB-API cursors
+
+SQL that bypasses the engine is recorded too. With an instrumented SQLAlchemy engine,
+`engine.raw_connection()` called from your code returns a thin proxy: `cursor().execute`,
+`executemany` and `callproc` become `sql` spans with `source="raw_cursor"`. An `executemany`
+is one span with a `batch_size`, not one span per row.
+
+For a driver used with no engine at all, opt in once at startup:
+
+```python
+import sqlite3
+from redline_core.contrib.dbapi import instrument_dbapi
+
+instrument_dbapi(sqlite3)  # patches sqlite3.connect; undo with uninstrument_dbapi(sqlite3)
+```
+
+Limits: statements run through `connection.connection.cursor()` of a SQLAlchemy
+`Connection` and connections opened before `instrument_dbapi` was called are not recorded.
 
 ## Marshmallow
 
@@ -10916,6 +10956,7 @@ See [Flamegraphs](flamegraphs.md). Needs `redline-core[profile]`.
 | `editor` | `"vscode"`, `"cursor"`, `"pycharm"`, `"idea"`, `"sublime"`, `"none"`, or a template string | `"vscode"` | Where callsite links open. A template contains `{file}` (absolute path) and `{line}`. See [Open in editor](the-ui.md#open-in-editor) |
 | `server_timing` | `"auto"` or `bool` | `"auto"` | Add a `Server-Timing` header (trace id, query count and time) to recorded responses. `auto` means on when the framework is in debug mode. See [Server-Timing and the badge](server-timing-badge.md) |
 | `badge` | `"auto"` or `bool` | `"auto"` | Inject the floating badge into HTML responses. `auto` means on when the framework is in debug mode (FastAPI, Flask and Litestar: the app's `debug` flag) |
+| `accept_remote_runs` | `bool` | `False` | Accept load runs registered over HTTP by a generator on another host (`POST api/runs/register`, `.../steps`, `.../finish`). Refused while `read_only` is on |
 | `load_from_ui` | `bool` | `False` | Allow starting a [load run](load-testing.md#starting-a-run-from-the-ui) from the UI (`POST api/runs`). Needs `redline-core[load]`. Off whenever `read_only` is on or the `load` feature is off |
 | `checks_from_ui` | `"auto"` or `bool` | `"auto"` | Allow starting [refactor-check](refactor-check.md) baseline and compare runs from the UI (`POST api/checks/runs`). `auto` means on only while the framework is in debug mode; `true` and `false` force it. Needs `redline-core[load]` (httpx). Off whenever `read_only` is on or the `checks` feature is off; the `production` preset sets it to `false`. Reading suites and reports is not affected |
 
@@ -11015,6 +11056,7 @@ exactly what `redline_core.conf.PRESETS` applies:
 | `read_only` | off | on | off | on |
 | `badge` / `server_timing` | `auto` | `auto` | `auto` | off |
 | `load_from_ui` | off | off | off | off |
+| `accept_remote_runs` | off | off | off | off |
 | `checks_from_ui` / `analysis_from_ui` | `auto` | off | `auto` | off |
 | `explain_analyze` | off | off | off | off |
 | `profile` | `off` | `off` | `off` | `off` |
@@ -11318,6 +11360,8 @@ cookie and `X-CSRFToken`.
 | 403 | `forbidden` | The policy refused: not a loopback client or `Host` under `local`, a client outside `allowed_ips`, a loopback peer with forwarding headers and no `trusted_proxies`, `framework` with a hook that returned false (or no hook), `custom` returned false, or your dependency raised `403` |
 | 403 | `open_refused` | `access = "open"` without `REDLINE_ALLOW_OPEN=1` |
 | 403 | `csrf_failed` | The CSRF check failed (see above; on Django also Django's own check) |
+| 403 | `remote_runs_disabled` | `POST api/runs/register` (or `.../steps`, `.../finish`) while `accept_remote_runs` is off |
+| 403 | `run_not_remote` | `.../steps` or `.../finish` for a run that was not registered over HTTP |
 | 403 | `load_disabled` | `POST api/runs` while `load_from_ui` is off |
 | 403 | `checks_from_ui_disabled` | `POST api/checks/runs` while `checks_from_ui` is off (or `auto` outside debug mode) |
 | 403 | `read_only` | A state-changing call while `read_only` is on |
@@ -11839,6 +11883,9 @@ Load-test runs ([Load testing](load-testing.md)).
 | `GET api/runs/{id}/bottlenecks` | what got slower, per step |
 | `POST api/runs` | start a run (`202`) |
 | `POST api/runs/{id}/stop` | stop a run: `{"stopped": true}` |
+| `POST api/runs/register` | a remote generator registers a run (`201`); needs `accept_remote_runs` |
+| `POST api/runs/{id}/steps` | the generator reports one finished step (`hist` is a base64 histogram) |
+| `POST api/runs/{id}/finish` | the generator ends the run with `done`, `stopped` or `failed` |
 | `DELETE api/runs/{id}` | delete a finished run: `{"deleted": 1}` |
 
 Runs started from the UI go through the same validation as a scenario file. A run's

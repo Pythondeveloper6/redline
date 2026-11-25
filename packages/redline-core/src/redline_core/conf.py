@@ -88,6 +88,7 @@ PRESETS: dict[str, dict[str, Any]] = {
         "read_only": True,
         "max_age_days": 3,
         "load_from_ui": False,
+        "accept_remote_runs": False,
         "checks_from_ui": False,
         "analysis_from_ui": False,
         "features": {"replay": False, "replay_writes": False},
@@ -127,6 +128,7 @@ PRESETS: dict[str, dict[str, Any]] = {
         "badge": False,
         "server_timing": False,
         "load_from_ui": False,
+        "accept_remote_runs": False,
         "checks_from_ui": False,
         "analysis_from_ui": False,
         "explain_analyze": False,
@@ -311,6 +313,10 @@ class Settings:
     # history & load testing
     history_retention_days: int | None = 90
     load_from_ui: bool = False
+    #: Accept load runs registered over HTTP by a generator on another host
+    #: (``POST api/runs/register``, ``.../steps``, ``.../finish``). Off by default and in the
+    #: ``production`` and ``staging`` presets; refused while ``read_only`` is on.
+    accept_remote_runs: bool = False
     #: Start refactor-check runs (baseline / compare) from the UI; ``"auto"`` = only while
     #: the framework is in debug mode (``CONTRACT.md`` §19.5).
     checks_from_ui: bool | str = "auto"
@@ -561,6 +567,7 @@ def _validate(s: Settings) -> None:
         "capture_locals",
         "capture_error_details",
         "load_from_ui",
+        "accept_remote_runs",
         "read_only",
         "ui_enabled",
         "trust_unix_socket",

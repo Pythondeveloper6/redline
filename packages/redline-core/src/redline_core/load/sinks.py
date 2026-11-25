@@ -26,9 +26,11 @@ from ..redact import MASK
 from .analysis import StepResult
 
 __all__ = [
+    "HttpSink",
     "JsonSink",
     "MemorySink",
     "MultiSink",
+    "RegisterError",
     "RunMeta",
     "RunSink",
     "StoreSink",
@@ -271,3 +273,114 @@ class MultiSink:
 
     def finish(self, run_id: str, status: str, summary: dict[str, Any]) -> None:
         self._each("finish", run_id, status, summary)
+
+
+class RegisterError(RuntimeError):
+    """The application refused or could not be reached for a remote run registration."""
+
+
+class HttpSink:
+    """Registers the run with the application over HTTP instead of writing a store.
+
+    For a generator on another host (or an application in a container) with no shared
+    store. The application must run with ``accept_remote_runs`` on; ``base`` is where its
+    Redline UI is mounted (``https://app.example/_redline``) and ``token`` is the Redline
+    access token. The token goes only in the ``Authorization`` header and is never logged.
+    """
+
+    def __init__(
+        self,
+        base: str,
+        token: str | None = None,
+        *,
+        client: Any = None,
+        timeout: float = 10.0,
+    ) -> None:
+        self.base = base.rstrip("/")
+        self._token = token
+        if client is None:
+            import httpx
+
+            client = httpx.Client(timeout=timeout)
+        self._client = client
+
+    def _call(self, method: str, path: str, body: Mapping[str, Any] | None = None) -> Any:
+        headers = {"Authorization": f"Bearer {self._token}"} if self._token else {}
+        try:
+            response = self._client.request(
+                method, f"{self.base}/{path}", json=body, headers=headers
+            )
+        except Exception as exc:
+            raise RegisterError(
+                f"cannot reach the application at {self.base}: {type(exc).__name__}"
+            ) from None
+        if response.status_code >= 400:
+            code = ""
+            try:
+                code = response.json().get("error", {}).get("code", "")
+            except Exception:
+                pass
+            hint = {
+                "remote_runs_disabled": " (turn on the accept_remote_runs setting)",
+                "read_only": " (the application is read-only)",
+                "feature_disabled": " (the load feature is switched off)",
+            }.get(code, "")
+            raise RegisterError(
+                f"the application answered HTTP {response.status_code} {code}".rstrip() + hint
+            )
+        return response
+
+    def preflight(self) -> None:
+        """Fail early: the application is reachable and accepts this token."""
+        response = self._call("GET", "api/meta")
+        try:
+            meta = response.json()
+        except Exception:
+            meta = None
+        if not isinstance(meta, Mapping) or "version" not in meta:
+            raise RegisterError(
+                f"{self.base} does not look like a Redline mount (api/meta has no version)"
+            )
+
+    def start(self, meta: RunMeta) -> None:
+        row = meta.to_dict()
+        self._call(
+            "POST",
+            "api/runs/register",
+            {
+                "id": row["id"],
+                "name": row.get("name") or "",
+                "created_at": row["created_at"],
+                "config": row.get("config") or {},
+            },
+        )
+
+    def step(self, run_id: str, step: StepResult) -> None:
+        import base64
+
+        row = StoreSink.step_row(step)
+        self._call(
+            "POST",
+            f"api/runs/{run_id}/steps",
+            {
+                "step": row.step,
+                "target_rps": row.target_rps,
+                "started_at": row.started_at,
+                "ended_at": row.ended_at,
+                "achieved_rps": row.achieved_rps,
+                "sent": row.sent,
+                "ok": row.ok,
+                "errors": row.errors,
+                "dropped": row.dropped,
+                "hist": base64.b64encode(row.hist.to_bytes()).decode("ascii"),
+                "error_breakdown": row.error_breakdown,
+            },
+        )
+
+    def finish(self, run_id: str, status: str, summary: dict[str, Any]) -> None:
+        try:
+            self._call("POST", f"api/runs/{run_id}/finish", {"status": status, "summary": summary})
+        finally:
+            close = getattr(self._client, "close", None)
+            if callable(close):
+                close()

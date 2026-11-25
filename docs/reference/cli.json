@@ -1276,6 +1276,27 @@
         },
         {
           "name": [
+            "--store-url"
+          ],
+          "required": false,
+          "help": "write the run to a shared PostgreSQL store (postgresql://...) instead of a file; also taken from the project's storage_url setting when --store is not given"
+        },
+        {
+          "name": [
+            "--register-url"
+          ],
+          "required": false,
+          "help": "register the run with the application over HTTP (its Redline mount, e.g. https://app.example/_redline) when no store is shared; the application needs accept_remote_runs. The access token is read from REDLINE_TOKEN or --token-file"
+        },
+        {
+          "name": [
+            "--token-file"
+          ],
+          "required": false,
+          "help": "file holding the Redline access token (one line)"
+        },
+        {
+          "name": [
             "--no-store"
           ],
           "required": false,

@@ -112,6 +112,16 @@ def _configure_load(p: argparse.ArgumentParser) -> None:
         help="write the run to a shared PostgreSQL store (postgresql://...) instead of a file; "
         "also taken from the project's storage_url setting when --store is not given",
     )
+    p.add_argument(
+        "--register-url",
+        metavar="URL",
+        help="register the run with the application over HTTP (its Redline mount, e.g. "
+        "https://app.example/_redline) when no store is shared; the application needs "
+        "accept_remote_runs. The access token is read from REDLINE_TOKEN or --token-file",
+    )
+    p.add_argument(
+        "--token-file", metavar="PATH", help="file holding the Redline access token (one line)"
+    )
     p.add_argument("--no-store", action="store_true", help="do not write to the store")
     p.add_argument("--json", metavar="OUT", help="also write the results as JSON")
     p.add_argument("--fail-p95-ms", type=float, metavar="X", help="exit 1 if p95 > X ms")
@@ -260,6 +270,31 @@ def _open_store_sink(path: str, err: TextIO) -> Any:
     return StoreSink(store, close=True)
 
 
+def _open_http_sink(args: argparse.Namespace, err: TextIO) -> Any:
+    """``HttpSink`` for ``--register-url``, checked reachable and authorised; else ``None``."""
+    from .load.sinks import HttpSink, RegisterError
+
+    url = str(args.register_url).strip()
+    if not url.lower().startswith(("http://", "https://")):
+        err.write("redline load: --register-url must be an http:// or https:// URL\n")
+        return None
+    token = os.environ.get("REDLINE_TOKEN")
+    if args.token_file:
+        try:
+            with open(args.token_file, encoding="utf-8") as fh:
+                token = fh.read().strip()
+        except OSError as exc:
+            err.write(f"redline load: cannot read --token-file: {exc.strerror or exc}\n")
+            return None
+    sink = HttpSink(url, token or None)
+    try:
+        sink.preflight()
+    except RegisterError as exc:
+        err.write(f"redline load: {exc}\n")
+        return None
+    return sink
+
+
 def _run_store_target(args: argparse.Namespace, err: TextIO) -> str | None:
     """Where the run is stored: ``--store-url``, else ``--store`` when given, else the
     project's ``storage_url`` setting, else the default file. ``None`` with ``--no-store``."""
@@ -373,6 +408,13 @@ def _cmd_load(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
     sinks: list[Any] = []
     from .storage.postgres import is_postgres_url
 
+    if args.register_url:
+        http_sink = _open_http_sink(args, err)
+        if http_sink is None:
+            return EXIT_USAGE
+        sinks.append(http_sink)
+        store_target = None
+
     # Stop and pid files live beside a local store; a shared PostgreSQL store has none, so
     # they go to the default directory (the process that started the run reads them there).
     store_path = None if store_target is None else store_target
@@ -420,7 +462,11 @@ def _cmd_load(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
             control.cleanup(run_id, control_path)
 
     _print_final(printer, result)
-    if store_path and sinks and not isinstance(sinks[0], JsonSink):
+    if args.register_url:
+        printer.line(
+            f"Open the run in Redline: {str(args.register_url).rstrip('/')}/#/load/{run_id}"
+        )
+    elif store_path and sinks and not isinstance(sinks[0], JsonSink):
         ui_url = scenario.ui_url or _configured_mount()
         printer.line(f"Open the run in Redline: {_ui_hint(scenario.base_url, run_id, ui_url)}")
     if result.status == "failed":

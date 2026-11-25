@@ -27,6 +27,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import math
 import os
 import re
 import threading
@@ -111,6 +112,8 @@ _SNAPSHOT = re.compile(rf"^api/traces/{_ID}/snapshot$")
 _RUN = re.compile(rf"^api/runs/{_ID}$")
 _RUN_BOTTLENECKS = re.compile(rf"^api/runs/{_ID}/bottlenecks$")
 _RUN_STOP = re.compile(rf"^api/runs/{_ID}/stop$")
+_RUN_STEPS = re.compile(rf"^api/runs/{_ID}/steps$")
+_RUN_FINISH = re.compile(rf"^api/runs/{_ID}/finish$")
 _ISSUE_KINDS = ISSUE_KINDS
 _BUCKETS = {"1h": 3_600.0, "1d": 86_400.0}
 _LOAD_MODES = ("constant", "ramp", "steps")
@@ -266,6 +269,12 @@ class RedlineAPI:
             return get_routes[path](params) if method == "GET" else _not_allowed()
         if path == "api/checks" or path.startswith("api/checks/"):
             return self.checks.route(method, path, params, body, base_url)
+        if path == "api/runs/register":
+            return self.register_run(body) if method == "POST" else _not_allowed()
+        if m := _RUN_STEPS.match(path):
+            return self.register_step(m.group(1), body) if method == "POST" else _not_allowed()
+        if m := _RUN_FINISH.match(path):
+            return self.finish_remote_run(m.group(1), body) if method == "POST" else _not_allowed()
         if path == "api/runs":
             if method == "GET":
                 return self.list_runs(params)
@@ -959,6 +968,98 @@ class RedlineAPI:
             return error(400, "invalid_body", str(exc))
         return 202, {"id": run_id, "name": config["name"], "status": "running"}
 
+    # remote runs ---------------------------------------------------------
+    def _remote_gate(self) -> Response | None:
+        if not self.settings.accept_remote_runs:
+            return error(
+                403,
+                "remote_runs_disabled",
+                "Registering load runs over HTTP is off; enable the accept_remote_runs setting.",
+            )
+        return None
+
+    def _remote_run(self, run_id: str, *, open_only: bool = True) -> Any:
+        """The run a remote generator may change: it must exist, have been registered over
+        HTTP (so a local run cannot be tampered with) and still be running."""
+        run = self._ext("get_run")(run_id)
+        if run is None:
+            return error(404, "run_not_found", f"No run {run_id!r}.")
+        if not (run.config or {}).get(_REMOTE_FLAG):
+            return error(403, "run_not_remote", "This run was not registered over HTTP.")
+        if open_only and run.status != "running":
+            return error(409, "run_closed", "This run has already finished.")
+        return run
+
+    def register_run(self, body: bytes | str | Mapping[str, Any] | None) -> Response:
+        if (denied := self._remote_gate()) is not None:
+            return denied
+        parsed = _json_body(body)
+        if not isinstance(parsed, Mapping):
+            return parsed
+        run_id = parsed.get("id")
+        if not isinstance(run_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", run_id):
+            return error(400, "invalid_body", "'id' must be 1-64 letters, digits, _ or -.")
+        if run_id == "register":
+            return error(400, "invalid_body", "'id' is reserved.")
+        name = parsed.get("name", "")
+        config = parsed.get("config", {})
+        created_at = parsed.get("created_at")
+        if not isinstance(name, str) or len(name) > 200:
+            return error(400, "invalid_body", "'name' must be text of at most 200 characters.")
+        if not isinstance(config, Mapping):
+            return error(400, "invalid_body", "'config' must be an object.")
+        if len(json.dumps(config, default=str)) > _MAX_REMOTE_CONFIG:
+            return error(400, "invalid_body", "'config' is too large.")
+        created = _number(created_at)
+        if created is None or not math.isfinite(created):
+            return error(400, "invalid_body", "'created_at' must be an epoch number.")
+        from .load.sinks import redact_config
+        from .runs import Run
+
+        safe = redact_config(dict(config))  # masked again here: never trust the sender
+        safe[_REMOTE_FLAG] = True
+        if self._ext("get_run")(run_id) is not None:
+            return error(409, "run_exists", f"Run {run_id!r} already exists.")
+        self._ext("save_run")(
+            Run(id=run_id, name=name, status="running", config=safe, created_at=created)
+        )
+        return 201, {"id": run_id, "status": "running"}
+
+    def register_step(self, run_id: str, body: bytes | str | Mapping[str, Any] | None) -> Response:
+        if (denied := self._remote_gate()) is not None:
+            return denied
+        parsed = _json_body(body)
+        if not isinstance(parsed, Mapping):
+            return parsed
+        run = self._remote_run(run_id)
+        if not hasattr(run, "id"):
+            return run
+        step, problem = _remote_step(parsed)
+        if problem:
+            return error(400, "invalid_body", problem)
+        self._ext("save_run_step")(run_id, step)
+        return 200, {"id": run_id, "step": step.step}
+
+    def finish_remote_run(
+        self, run_id: str, body: bytes | str | Mapping[str, Any] | None
+    ) -> Response:
+        if (denied := self._remote_gate()) is not None:
+            return denied
+        parsed = _json_body(body)
+        if not isinstance(parsed, Mapping):
+            return parsed
+        status = parsed.get("status")
+        if status not in ("done", "stopped", "failed"):
+            return error(400, "invalid_body", "'status' must be done, stopped or failed.")
+        summary = parsed.get("summary", {})
+        if not isinstance(summary, Mapping) or len(json.dumps(summary, default=str)) > 65_536:
+            return error(400, "invalid_body", "'summary' must be an object under 64 KB.")
+        run = self._remote_run(run_id)
+        if not hasattr(run, "id"):
+            return run
+        self._ext("finish_run")(run_id, status, dict(summary))
+        return 200, {"id": run_id, "status": status}
+
     def _run_target(self, derived: str | None) -> str | None:
         """Where a UI-started run goes: the ``base_url`` setting, else the URL the adapter
         derived from the server's own listening port (:func:`own_base_url`) – only when its
@@ -986,6 +1087,75 @@ class RedlineAPI:
         if self.run_stopper is None:
             return error(501, "not_supported", "This adapter cannot stop load runs.")
         return 200, {"stopped": bool(self.run_stopper(run_id))}
+
+
+_REMOTE_FLAG = "registered_remote"
+_MAX_REMOTE_CONFIG = 262_144
+_COUNT_MAX = 10**12
+
+
+def _count(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= _COUNT_MAX:
+        return None
+    return value
+
+
+def _remote_step(body: Mapping[str, Any]) -> tuple[Any, str | None]:
+    """Validate a ``POST api/runs/{id}/steps`` body into a :class:`RunStep`."""
+    import base64
+    import binascii
+
+    from .histogram import Histogram
+    from .runs import RunStep
+
+    ints: dict[str, int] = {}
+    for key in ("step", "sent", "ok", "errors", "dropped"):
+        value = _count(body.get(key, 0 if key != "step" else None))
+        if value is None:
+            return None, f"'{key}' must be a non-negative integer."
+        ints[key] = value
+    floats: dict[str, float | None] = {}
+    for key in ("target_rps", "started_at", "ended_at", "achieved_rps"):
+        raw = body.get(key)
+        if raw is None and key == "ended_at":
+            floats[key] = None
+            continue
+        value = _number(raw if raw is not None else 0.0)
+        if value is None or not math.isfinite(value) or value < 0:
+            return None, f"'{key}' must be a finite non-negative number."
+        floats[key] = value
+    raw_hist = body.get("hist")
+    if not isinstance(raw_hist, str) or len(raw_hist) > 262_144:
+        return None, "'hist' must be a base64 histogram."
+    try:
+        hist = Histogram.from_bytes(base64.b64decode(raw_hist, validate=True))
+    except (binascii.Error, ValueError):
+        return None, "'hist' is not a valid histogram."
+    breakdown = body.get("error_breakdown", {})
+    if not isinstance(breakdown, Mapping) or len(breakdown) > 64:
+        return None, "'error_breakdown' must be an object of at most 64 entries."
+    clean: dict[str, int] = {}
+    for key, value in breakdown.items():
+        count = _count(value)
+        if not isinstance(key, str) or not 0 < len(key) <= 64 or count is None:
+            return None, "'error_breakdown' maps short names to counts."
+        clean[key] = count
+    return (
+        RunStep(
+            step=ints["step"],
+            target_rps=floats["target_rps"] or 0.0,
+            started_at=floats["started_at"] or 0.0,
+            ended_at=floats["ended_at"],
+            achieved_rps=floats["achieved_rps"] or 0.0,
+            sent=ints["sent"],
+            ok=ints["ok"],
+            errors=ints["errors"],
+            dropped=ints["dropped"],
+            hist=hist,
+            error_breakdown=clean,
+        ),
+        None,
+    )
 
 
 def _json_body(body: bytes | str | Mapping[str, Any] | None) -> Mapping[str, Any] | Response:

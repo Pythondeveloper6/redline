@@ -16,6 +16,12 @@ version is below `1.0` the public API may change between minor versions.
   and the project's `storage_url` setting is used when `--store` is not given, so a load
   generator on another host fills the same bottleneck table as the application. The URL's
   password is never printed.
+- A generator with no shared store registers its run over HTTP:
+  `redline load --register-url https://app/_redline` (token from `REDLINE_TOKEN` or
+  `--token-file`). The application accepts it only with the new `accept_remote_runs` setting
+  (off by default and in every preset) through `POST api/runs/register`, `.../steps` and
+  `.../finish`; it re-masks the config, validates every field, and only a run registered
+  this way can be changed this way (never a run written by a local process).
 - SQL sent through a raw driver cursor is recorded. `engine.raw_connection().cursor()` on an
   instrumented SQLAlchemy engine returns a recording proxy, and
   `redline_core.contrib.dbapi.instrument_dbapi(module)` does the same for a driver used with

@@ -154,6 +154,23 @@ uses. The default is `.redline/redline.db` in the working directory, and `--stor
 elsewhere, so run the command from the app's directory or pass the path. The UI then lists
 it under **Load**.
 
+### Generator and application on different machines
+
+When the generator runs on another host (or the app runs in a container) there is no shared
+file, and a run written to a local file would tag none of the app's traces. Two options:
+
+- **Shared store.** Point both at the same PostgreSQL database:
+  `redline load scenario.toml --store-url postgresql://...` (or set `storage_url` in the
+  project's config, which `redline load` picks up when `--store` is not given). The URL's
+  password is never printed.
+- **Register over HTTP.** With no shared store, the generator tells the application about
+  the run: `redline load scenario.toml --register-url https://app.example/_redline`.
+  The application must enable `accept_remote_runs` (off by default, and always off while
+  `read_only` is on). The Redline access token is read from `REDLINE_TOKEN` or
+  `--token-file`, never from the command line. The generator checks the application is
+  reachable and accepts the token before the first request, and only runs registered this
+  way can be changed over HTTP, never runs written by a local process.
+
 ## Profiles
 
 A profile says how the rate changes over time.
@@ -303,6 +320,9 @@ SCENARIO = {
 | `--ui-url PATH\|URL` | where the Redline UI is mounted, for the printed link (overrides the scenario's `ui_url`) |
 | `--name TEXT` | run name |
 | `--store PATH` | store to write the run to (default `.redline/redline.db`) |
+| `--store-url URL` | write the run to a shared PostgreSQL store (`postgresql://...`) |
+| `--register-url URL` | register the run with the application over HTTP (needs `accept_remote_runs` there) |
+| `--token-file PATH` | file holding the Redline access token for `--register-url` (else `REDLINE_TOKEN`) |
 | `--no-store` | do not write to a store |
 | `--json OUT` | also write the results as JSON |
 | `--fail-p95-ms X` | exit 1 if the run-wide p95 exceeds X ms |
