@@ -226,6 +226,7 @@ def run(
     status, message = engine.execute()
     steps = engine.finished_steps
     summary = analyze(steps, engine.seconds, {p.index: p.start_s for p in plans})
+    _attach_resources(summary, sc, steps, sinks, run_id)
     if engine.flow_stats:
         by_name = {f.name: f for f in sc.flows}
         summary["flows"] = {
@@ -252,6 +253,31 @@ def run(
         summary=summary,
         message=message,
     )
+
+
+def _attach_resources(
+    summary: dict[str, Any], sc: Scenario, steps: list[StepResult], sinks: MultiSink, run_id: str
+) -> None:
+    """Pull in the metric sources' numbers, then add what the application sampled about
+    itself (CPU, memory, GC, pool) and the likely limiting resource to the summary."""
+    from ..run_metrics import run_sources
+
+    if sc.metric_sources:
+        failed = run_sources(
+            sc.metric_sources,
+            steps,
+            lambda step, values, ts: sinks.save_metrics(run_id, step, values, ts),
+        )
+        if failed:
+            summary["metric_source_errors"] = sorted(set(failed))
+    try:
+        report = sinks.resource_report(run_id, summary.get("knee_step"))
+    except Exception:  # metrics are an extra: never fail the run for them
+        report = None
+    if report:
+        summary["resources"] = report["steps"]
+        if report.get("limiting_resource"):
+            summary["limiting_resource"] = report["limiting_resource"]
 
 
 def _request_cfg(r: Any) -> dict[str, Any]:

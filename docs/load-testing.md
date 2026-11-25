@@ -553,6 +553,45 @@ The verdict is one word:
 | `failing` | the very first step is already the knee. Lower the starting rate |
 | `no data` | no complete step |
 
+### Resources: which one ran out
+
+The knee says when the system stopped keeping up and the bottleneck table says which query
+slowed; neither says whether the app CPU, the connection pool or memory was the limit. While
+a run that is registered in the app's store is sending it traffic (and only then), each app
+worker samples itself once a second: process CPU, resident memory, garbage-collection pauses,
+threads, and the SQLAlchemy pool (size, checked out, time spent waiting for a connection).
+Samples are stored with the run and its current step (turn it off with `run_metrics = false`;
+the `production` preset does). The run summary then carries `resources` (per step, average
+and maximum of each number) and a verdict in `limiting_resource`, which the CLI prints:
+
+```text
+limiting resource: step 8: connection pool exhausted (5/5 checked out), wait time 40x the first step
+```
+
+The verdict looks at the knee step (else the last one) in this order: **pool** (every
+connection checked out and requests waiting for one), **cpu** (a worker above 85% of a core),
+**gc** (pauses of 10% of the time or more), else `unknown`. Memory that grew by 30% over the
+run is added as a note, never as the limit. `GET api/runs/{id}/metrics` returns the same.
+
+Numbers from outside the process (a database or host monitor, a cloud metrics API) come in
+through a **metric source**: a function you write that returns `{name: number}` for a time
+range, called once per step after the run:
+
+```toml
+metric_sources = ["perf_monitors:database"]   # package.module:function
+```
+
+```python
+def database(start_epoch: float, end_epoch: float) -> dict[str, float]:
+    return {"db_cpu_pct": query_my_monitor(start_epoch, end_epoch)}
+```
+
+They are stored beside the app's own samples and shown in `resources`. A source that raises
+is listed under `metric_source_errors`; it never fails the run. Sources are only read from a
+scenario file (they run your code), and a remote generator posts them to the app with
+`POST api/runs/{id}/metrics`. Database-side counters (active sessions, waits, blocking) are
+not sampled by Redline itself: a metric source is the place for them.
+
 ### Bottlenecks
 
 The **Bottlenecks** table in the UI answers "what got slower". It joins the traces tagged

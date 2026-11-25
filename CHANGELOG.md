@@ -12,6 +12,12 @@ version is below `1.0` the public API may change between minor versions.
 
 ### Added
 
+- A load run reports which resource ran out. While a registered run sends it traffic, each app
+  worker samples its own CPU, memory, GC pauses, threads and connection pool once a second
+  (`run_metrics`, off in the `production` preset); the run summary carries `resources` per
+  step and a `limiting_resource` verdict ("connection pool exhausted (5/5 checked out), wait
+  time 40x"), printed by the CLI and served by `GET api/runs/{id}/metrics`. `metric_sources`
+  (`package.module:function`) pull in numbers from a database or host monitor per step.
 - A `stages` load profile (`--stages 10:1m,200:30s,10:3m`) describes spikes, soaks and any
   custom shape. A step where the rate falls no longer decides the knee; the run summary reports
   how long p95 took to return to its pre-spike level (`recovery`) and checks long steps for

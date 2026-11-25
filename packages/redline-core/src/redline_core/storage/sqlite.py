@@ -1041,12 +1041,19 @@ class SQLStore(CheckStoreMixin):
         traces by design and is kept; ``history=True`` wipes it too.
         """
         self._check_pid()
+        if history:
+            self._ensure_metrics()
         with self._lock:
             c = self._conn
             c.execute("BEGIN IMMEDIATE")
             try:
                 n = int(c.execute("SELECT COUNT(*) FROM traces").fetchone()[0])
-                for table in (*_TRACE_TABLES, "traces", *(_HISTORY_TABLES if history else ())):
+                tables = (
+                    *_TRACE_TABLES,
+                    "traces",
+                    *(("run_metrics", *_HISTORY_TABLES) if history else ()),
+                )
+                for table in tables:
                     c.execute(f"DELETE FROM {table}")
                 c.execute("COMMIT")
             except BaseException:
@@ -1099,6 +1106,7 @@ class SQLStore(CheckStoreMixin):
             return 0
         cutoff = (time.time() if now is None else now) - retention_s
         self._check_pid()
+        self._ensure_metrics()
         n = 0
         with self._lock:
             c = self._conn
@@ -1110,6 +1118,8 @@ class SQLStore(CheckStoreMixin):
                     "DELETE FROM lifecycle_hourly WHERE bucket + 3600 <= ?",
                     "DELETE FROM releases WHERE last_seen < ?",
                     "DELETE FROM issue_index WHERE last_seen < ?",
+                    "DELETE FROM run_metrics WHERE run_id IN (SELECT id FROM runs WHERE "
+                    "created_at < ? AND status != 'running')",
                     "DELETE FROM run_steps WHERE run_id IN (SELECT id FROM runs WHERE "
                     "created_at < ? AND status != 'running')",
                     "DELETE FROM runs WHERE created_at < ? AND status != 'running'",
@@ -1665,13 +1675,94 @@ class SQLStore(CheckStoreMixin):
             steps[s["run_id"]].append(_run_step(s))
         return [_run(r, steps[r["id"]]) for r in rows]
 
+    # resource metrics of a run (sampled by the application during the run) --------------
+    _metrics_ready = False
+    #: Most samples kept per run; the oldest go first.
+    MAX_METRIC_SAMPLES = 20_000
+
+    def _ensure_metrics(self) -> None:
+        """Create the ``run_metrics`` table when missing (idempotent; no schema bump, so older
+        and newer Redline versions can share one store)."""
+        if self._metrics_ready:
+            return
+        self._write_now(
+            [
+                (
+                    "CREATE TABLE IF NOT EXISTS run_metrics (run_id TEXT NOT NULL, "
+                    "step INTEGER NOT NULL, ts DOUBLE PRECISION NOT NULL, pid INTEGER NOT NULL, "
+                    "data TEXT NOT NULL)",
+                    (),
+                ),
+                ("CREATE INDEX IF NOT EXISTS run_metrics_run ON run_metrics (run_id, step)", ()),
+            ]
+        )
+        self._metrics_ready = True
+
+    def save_run_metrics(
+        self,
+        run_id: str,
+        step: int,
+        data: dict[str, Any],
+        *,
+        pid: int = 0,
+        ts: float | None = None,
+    ) -> None:
+        """Store one sample of named numbers (``cpu_pct``, ``rss_mb``, ``pool_checked_out`` ...)
+        taken at ``ts`` by process ``pid`` while ``step`` of the run was in progress."""
+        clean = {
+            str(k)[:64]: float(v)
+            for k, v in list(data.items())[:60]
+            if isinstance(v, (int, float)) and not isinstance(v, bool) and v == v
+        }
+        if not clean:
+            return
+        self._ensure_metrics()
+        self._write_now(
+            [
+                (
+                    "INSERT INTO run_metrics (run_id, step, ts, pid, data) VALUES (?, ?, ?, ?, ?)",
+                    (
+                        run_id,
+                        int(step),
+                        time.time() if ts is None else float(ts),
+                        int(pid),
+                        json.dumps(clean),
+                    ),
+                ),
+                (
+                    "DELETE FROM run_metrics WHERE run_id = ? AND ts < "
+                    "(SELECT MIN(ts) FROM (SELECT ts FROM run_metrics WHERE run_id = ? "
+                    "ORDER BY ts DESC LIMIT ?) AS keep)",
+                    (run_id, run_id, self.MAX_METRIC_SAMPLES),
+                ),
+            ]
+        )
+
+    def run_metric_samples(self, run_id: str) -> builtins.list[dict[str, Any]]:
+        """Every stored sample of the run, oldest first: ``{step, ts, pid, **values}``."""
+        self._ensure_metrics()
+        rows = self._query(
+            "SELECT step, ts, pid, data FROM run_metrics WHERE run_id = ? ORDER BY ts, pid",
+            (run_id,),
+        )
+        out = []
+        for r in rows:
+            try:
+                values = json.loads(r[3])
+            except ValueError:
+                continue
+            out.append({"step": int(r[0]), "ts": float(r[1]), "pid": int(r[2]), **values})
+        return out
+
     def delete_run(self, run_id: str) -> int:
         """Delete a run and its steps (its tagged traces stay); returns 1 or 0."""
         self._check_pid()
+        self._ensure_metrics()
         with self._lock:
             c = self._conn
             c.execute("BEGIN IMMEDIATE")
             try:
+                c.execute("DELETE FROM run_metrics WHERE run_id = ?", (run_id,))
                 c.execute("DELETE FROM run_steps WHERE run_id = ?", (run_id,))
                 n = c.execute("DELETE FROM runs WHERE id = ?", (run_id,)).rowcount
                 c.execute("COMMIT")

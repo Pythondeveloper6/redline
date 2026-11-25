@@ -6259,6 +6259,45 @@ The verdict is one word:
 | `failing` | the very first step is already the knee. Lower the starting rate |
 | `no data` | no complete step |
 
+### Resources: which one ran out
+
+The knee says when the system stopped keeping up and the bottleneck table says which query
+slowed; neither says whether the app CPU, the connection pool or memory was the limit. While
+a run that is registered in the app's store is sending it traffic (and only then), each app
+worker samples itself once a second: process CPU, resident memory, garbage-collection pauses,
+threads, and the SQLAlchemy pool (size, checked out, time spent waiting for a connection).
+Samples are stored with the run and its current step (turn it off with `run_metrics = false`;
+the `production` preset does). The run summary then carries `resources` (per step, average
+and maximum of each number) and a verdict in `limiting_resource`, which the CLI prints:
+
+```text
+limiting resource: step 8: connection pool exhausted (5/5 checked out), wait time 40x the first step
+```
+
+The verdict looks at the knee step (else the last one) in this order: **pool** (every
+connection checked out and requests waiting for one), **cpu** (a worker above 85% of a core),
+**gc** (pauses of 10% of the time or more), else `unknown`. Memory that grew by 30% over the
+run is added as a note, never as the limit. `GET api/runs/{id}/metrics` returns the same.
+
+Numbers from outside the process (a database or host monitor, a cloud metrics API) come in
+through a **metric source**: a function you write that returns `{name: number}` for a time
+range, called once per step after the run:
+
+```toml
+metric_sources = ["perf_monitors:database"]   # package.module:function
+```
+
+```python
+def database(start_epoch: float, end_epoch: float) -> dict[str, float]:
+    return {"db_cpu_pct": query_my_monitor(start_epoch, end_epoch)}
+```
+
+They are stored beside the app's own samples and shown in `resources`. A source that raises
+is listed under `metric_source_errors`; it never fails the run. Sources are only read from a
+scenario file (they run your code), and a remote generator posts them to the app with
+`POST api/runs/{id}/metrics`. Database-side counters (active sessions, waits, blocking) are
+not sampled by Redline itself: a metric source is the place for them.
+
 ### Bottlenecks
 
 The **Bottlenecks** table in the UI answers "what got slower". It joins the traces tagged
@@ -10241,6 +10280,14 @@ load_disabled`). When on, its safety rests on these rules:
 3. It is a real load: a user who may start runs can make your instance slow. Enable it only
    in environments where that is acceptable, and not in production.
 
+### Run metrics and metric sources
+
+Resource sampling happens only for a run that exists in the store and is running; a made-up
+`X-Redline-Run` header starts nothing. It reads process counters (CPU, memory, pool sizes),
+never request or user data, and stores at most 20,000 samples per run. `metric_sources` run
+your own functions, so like the other scenario-file keys they are refused from the UI and
+`POST api/runs`.
+
 ### Flows
 
 `flows` is accepted only from a scenario file, like the other keys below, and any request
@@ -11259,6 +11306,7 @@ See [Flamegraphs](flamegraphs.md). Needs `redline-core[profile]`.
 | `server_timing` | `"auto"` or `bool` | `"auto"` | Add a `Server-Timing` header (trace id, query count and time) to recorded responses. `auto` means on when the framework is in debug mode. See [Server-Timing and the badge](server-timing-badge.md) |
 | `badge` | `"auto"` or `bool` | `"auto"` | Inject the floating badge into HTML responses. `auto` means on when the framework is in debug mode (FastAPI, Flask and Litestar: the app's `debug` flag) |
 | `explain_url` | `str` | `None` | A SQLAlchemy URL for a separate plan-capable login (synchronous driver). EXPLAIN, plan and catalog requests for that database type use it so the application's own login stays least-privilege. The password is masked in `redline config` and the API |
+| `run_metrics` | `bool` | `True` | While a registered load run sends this process traffic, sample its CPU, memory, GC pauses and connection pool once a second into the store. Off in the `production` preset |
 | `accept_remote_runs` | `bool` | `False` | Accept load runs registered over HTTP by a generator on another host (`POST api/runs/register`, `.../steps`, `.../finish`). Refused while `read_only` is on |
 | `load_from_ui` | `bool` | `False` | Allow starting a [load run](load-testing.md#starting-a-run-from-the-ui) from the UI (`POST api/runs`). Needs `redline-core[load]`. Off whenever `read_only` is on or the `load` feature is off |
 | `checks_from_ui` | `"auto"` or `bool` | `"auto"` | Allow starting [refactor-check](refactor-check.md) baseline and compare runs from the UI (`POST api/checks/runs`). `auto` means on only while the framework is in debug mode; `true` and `false` force it. Needs `redline-core[load]` (httpx). Off whenever `read_only` is on or the `checks` feature is off; the `production` preset sets it to `false`. Reading suites and reports is not affected |
@@ -12199,6 +12247,8 @@ Load-test runs ([Load testing](load-testing.md)).
 | `POST api/runs/{id}/stop` | stop a run: `{"stopped": true}` |
 | `POST api/runs/register` | a remote generator registers a run (`201`); needs `accept_remote_runs` |
 | `POST api/runs/{id}/steps` | the generator reports one finished step (`hist` is a base64 histogram) |
+| `GET api/runs/{id}/metrics` | resource metrics per step and the `limiting_resource` verdict |
+| `POST api/runs/{id}/metrics` | the remote generator adds `{step, values: {name: number}}` from its metric sources |
 | `POST api/runs/{id}/finish` | the generator ends the run with `done`, `stopped` or `failed` |
 | `DELETE api/runs/{id}` | delete a finished run: `{"deleted": 1}` |
 

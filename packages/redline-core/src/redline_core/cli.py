@@ -571,6 +571,11 @@ def _print_final(printer: _Printer, result: Any) -> None:
             breakdown[key] = breakdown.get(key, 0) + n
     if breakdown:
         printer.line("errors: " + ", ".join(f"{k} ×{v}" for k, v in sorted(breakdown.items())))
+    limit = s.get("limiting_resource")
+    if limit:
+        printer.line(f"limiting resource: step {limit['step']}: {limit['detail']}")
+        if limit.get("note"):
+            printer.line(f"  note: {limit['note']}")
     for rec in s.get("recovery") or []:
         when = (
             f"recovered after {rec['recovered_after_s']:g}s"

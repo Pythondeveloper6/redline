@@ -113,6 +113,7 @@ _RUN = re.compile(rf"^api/runs/{_ID}$")
 _RUN_BOTTLENECKS = re.compile(rf"^api/runs/{_ID}/bottlenecks$")
 _RUN_STOP = re.compile(rf"^api/runs/{_ID}/stop$")
 _RUN_STEPS = re.compile(rf"^api/runs/{_ID}/steps$")
+_RUN_METRICS = re.compile(rf"^api/runs/{_ID}/metrics$")
 _RUN_FINISH = re.compile(rf"^api/runs/{_ID}/finish$")
 _ISSUE_KINDS = ISSUE_KINDS
 _BUCKETS = {"1h": 3_600.0, "1d": 86_400.0}
@@ -277,6 +278,12 @@ class RedlineAPI:
             return self.register_run(body) if method == "POST" else _not_allowed()
         if m := _RUN_STEPS.match(path):
             return self.register_step(m.group(1), body) if method == "POST" else _not_allowed()
+        if m := _RUN_METRICS.match(path):
+            if method == "GET":
+                return self.run_metrics(m.group(1))
+            if method == "POST":
+                return self.register_metrics(m.group(1), body)
+            return _not_allowed()
         if m := _RUN_FINISH.match(path):
             return self.finish_remote_run(m.group(1), body) if method == "POST" else _not_allowed()
         if path == "api/runs":
@@ -1101,6 +1108,51 @@ class RedlineAPI:
             return error(400, "invalid_body", problem)
         self._ext("save_run_step")(run_id, step)
         return 200, {"id": run_id, "step": step.step}
+
+    def run_metrics(self, run_id: str) -> Response:
+        """Resource metrics sampled during a run, per step, and the likely limiting resource."""
+        from .run_metrics import aggregate, limiting_resource
+
+        run = self._ext("get_run")(run_id)
+        if run is None:
+            return error(404, "run_not_found", f"No run {run_id!r}.")
+        per_step = aggregate(self._ext("run_metric_samples")(run_id))
+        knee = (run.summary or {}).get("knee_step")
+        return 200, {
+            "id": run_id,
+            "steps": per_step,
+            "limiting_resource": limiting_resource(
+                per_step, knee if isinstance(knee, int) else None
+            ),
+        }
+
+    def register_metrics(
+        self, run_id: str, body: bytes | str | Mapping[str, Any] | None
+    ) -> Response:
+        """A remote generator adds named numbers from its own metric sources to a run."""
+        if (denied := self._remote_gate()) is not None:
+            return denied
+        parsed = _json_body(body)
+        if not isinstance(parsed, Mapping):
+            return parsed
+        run = self._remote_run(run_id, open_only=False)
+        if not hasattr(run, "id"):
+            return run
+        step = _count(parsed.get("step"))
+        values = parsed.get("values")
+        ts = _number(parsed.get("ts", time.time()))
+        if step is None or not isinstance(values, Mapping) or not 0 < len(values) <= 50:
+            return error(400, "invalid_body", "'step' and 1-50 numeric 'values' are required.")
+        if ts is None or not math.isfinite(ts):
+            return error(400, "invalid_body", "'ts' must be an epoch number.")
+        numbers = {}
+        for k, v in values.items():
+            n = _number(v)
+            if not isinstance(k, str) or not 0 < len(k) <= 64 or n is None or not math.isfinite(n):
+                return error(400, "invalid_body", "'values' maps short names to finite numbers.")
+            numbers[k] = n
+        self._ext("save_run_metrics")(run_id, step, numbers, pid=0, ts=ts)
+        return 200, {"id": run_id, "step": step, "stored": len(numbers)}
 
     def finish_remote_run(
         self, run_id: str, body: bytes | str | Mapping[str, Any] | None

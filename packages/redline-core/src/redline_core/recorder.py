@@ -506,6 +506,17 @@ class Recorder:
                 builder.tags["profile_error"] = type(exc).__name__
         return builder
 
+    def _note_run_metrics(self, trace: Trace) -> None:
+        """Start (or keep alive) resource sampling for a registered, running load run."""
+        try:
+            from .run_metrics import sampler_for
+
+            sampler = sampler_for(self.store)
+            if sampler is not None:
+                sampler.note(trace.tags["run_id"], trace.tags.get("step"))
+        except Exception:  # sampling must never reach the request path
+            pass
+
     def finish_trace(
         self,
         builder: TraceBuilder,
@@ -720,6 +731,8 @@ class Recorder:
             # still produce traces; the writer drops it for an unknown or finished run
             run="run_id" in trace.tags and getattr(self.store, "validates_run_tags", False) is True,
         )
+        if "run_id" in trace.tags and self.store is not None and self.settings.run_metrics:
+            self._note_run_metrics(trace)
         from .testing import active_capture
 
         self._persist_lifecycle()

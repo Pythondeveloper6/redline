@@ -98,6 +98,7 @@ _SCENARIO_KEYS = {
     "data",
     "auth",
     "flows",
+    "metric_sources",
 }
 _REQUEST_KEYS = {
     "name",
@@ -204,6 +205,8 @@ class Scenario:
     base_dir: str | None = None  # relative file paths resolve against this
     #: Weighted journeys; each arrival starts one flow or one plain request.
     flows: tuple[FlowSpec, ...] = ()
+    #: ``module:function`` callables returning ``{name: number}`` per step (local files only).
+    metric_sources: tuple[str, ...] = ()
 
     def replace(self, **changes: Any) -> Scenario:
         from dataclasses import replace
@@ -239,6 +242,8 @@ class Scenario:
             out["auth"] = self.auth.to_dict()
         if self.flows:
             out["flows"] = [f.to_dict() for f in self.flows]
+        if self.metric_sources:
+            out["metric_sources"] = list(self.metric_sources)
         return out
 
 
@@ -331,6 +336,16 @@ def parse_scenario(
             raise ScenarioError("must be a non-empty list", "requests")
         requests = tuple(_request(r, i, names) for i, r in enumerate(raw_requests))
     flows = _flows(raw_flows, names)
+    sources_raw = data.get("metric_sources")
+    metric_sources: tuple[str, ...] = ()
+    if sources_raw is not None:
+        if not isinstance(sources_raw, (list, tuple)) or any(
+            not isinstance(s, str) or not re.fullmatch(r"[\w.]+:[\w.]+", s) for s in sources_raw
+        ):
+            raise ScenarioError(
+                "must be a list of 'package.module:function' strings", "metric_sources"
+            )
+        metric_sources = tuple(sources_raw)
     if not any(r.weight > 0 for r in requests) and not any(f.weight > 0 for f in flows):
         raise ScenarioError("at least one request or flow needs a weight > 0", "requests")
 
@@ -372,6 +387,7 @@ def parse_scenario(
         auth=auth,
         base_dir=base_dir,
         flows=flows,
+        metric_sources=metric_sources,
     )
 
 

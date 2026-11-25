@@ -269,6 +269,21 @@ class StoreSink:
     def step(self, run_id: str, step: StepResult) -> None:
         self.store.save_run_step(run_id, self.step_row(step))
 
+    def save_metrics(self, run_id: str, step: int, values: dict[str, float], ts: float) -> None:
+        self.store.save_run_metrics(run_id, step, values, pid=0, ts=ts)
+
+    def resource_report(self, run_id: str, knee_step: int | None) -> dict[str, Any] | None:
+        """Per-step resource metrics the application sampled, and the limiting resource."""
+        from ..run_metrics import aggregate, limiting_resource
+
+        samples = getattr(self.store, "run_metric_samples", None)
+        if not callable(samples):
+            return None
+        per_step = aggregate(samples(run_id))
+        if not per_step:
+            return None
+        return {"steps": per_step, "limiting_resource": limiting_resource(per_step, knee_step)}
+
     def has_run_trace(self, run_id: str) -> bool:
         """Whether a trace tagged with this run is in the store (the recording probe)."""
         from ..storage.base import Filters
@@ -317,6 +332,29 @@ class MultiSink:
 
     def start(self, meta: RunMeta) -> None:
         self._each("start", meta)
+
+    def save_metrics(self, run_id: str, step: int, values: dict[str, float], ts: float) -> None:
+        for sink in self.sinks:
+            if callable(getattr(sink, "save_metrics", None)):
+                try:
+                    sink.save_metrics(run_id, step, values, ts)
+                except Exception:
+                    log.exception("redline load: %s.save_metrics failed", type(sink).__name__)
+
+    def resource_report(self, run_id: str, knee_step: int | None) -> dict[str, Any] | None:
+        """The first sink's answer: sinks that cannot hold metrics are skipped."""
+        for sink in self.sinks:
+            method = getattr(sink, "resource_report", None)
+            if not callable(method):
+                continue
+            try:
+                report = method(run_id, knee_step)
+            except Exception:
+                log.exception("redline load: %s.resource_report failed", type(sink).__name__)
+                continue
+            if report:
+                return report  # type: ignore[no-any-return]
+        return None
 
     def step(self, run_id: str, step: StepResult) -> None:
         self._each("step", run_id, step)
@@ -399,6 +437,15 @@ class HttpSink:
         response = self._call("GET", f"api/traces?tag=run_id:{quote(run_id, safe='')}&limit=1")
         data = response.json()
         return bool(isinstance(data, Mapping) and data.get("items"))
+
+    def save_metrics(self, run_id: str, step: int, values: dict[str, float], ts: float) -> None:
+        self._call("POST", f"api/runs/{run_id}/metrics", {"step": step, "values": values, "ts": ts})
+
+    def resource_report(self, run_id: str, knee_step: int | None) -> dict[str, Any] | None:
+        data = self._call("GET", f"api/runs/{run_id}/metrics").json()
+        if not isinstance(data, Mapping) or not data.get("steps"):
+            return None
+        return {"steps": data["steps"], "limiting_resource": data.get("limiting_resource")}
 
     def start(self, meta: RunMeta) -> None:
         row = meta.to_dict()

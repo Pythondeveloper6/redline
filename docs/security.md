@@ -293,6 +293,14 @@ load_disabled`). When on, its safety rests on these rules:
 3. It is a real load: a user who may start runs can make your instance slow. Enable it only
    in environments where that is acceptable, and not in production.
 
+### Run metrics and metric sources
+
+Resource sampling happens only for a run that exists in the store and is running; a made-up
+`X-Redline-Run` header starts nothing. It reads process counters (CPU, memory, pool sizes),
+never request or user data, and stores at most 20,000 samples per run. `metric_sources` run
+your own functions, so like the other scenario-file keys they are refused from the UI and
+`POST api/runs`.
+
 ### Flows
 
 `flows` is accepted only from a scenario file, like the other keys below, and any request

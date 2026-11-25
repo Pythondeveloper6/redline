@@ -454,6 +454,9 @@ def _instrument_pool(sync_engine: Engine, alias: str) -> None:
         try:
             duration = _perf() - start
             if duration >= POOL_WAIT_MIN:
+                from redline_core.run_metrics import note_pool_wait
+
+                note_pool_wait(duration * 1000.0)
                 builder = current()
                 pool = sync_engine.pool
                 record_span(

@@ -89,6 +89,7 @@ PRESETS: dict[str, dict[str, Any]] = {
         "max_age_days": 3,
         "load_from_ui": False,
         "accept_remote_runs": False,
+        "run_metrics": False,
         "checks_from_ui": False,
         "analysis_from_ui": False,
         "features": {"replay": False, "replay_writes": False},
@@ -129,6 +130,7 @@ PRESETS: dict[str, dict[str, Any]] = {
         "server_timing": False,
         "load_from_ui": False,
         "accept_remote_runs": False,
+        "run_metrics": False,
         "checks_from_ui": False,
         "analysis_from_ui": False,
         "explain_analyze": False,
@@ -320,6 +322,9 @@ class Settings:
     #: (``POST api/runs/register``, ``.../steps``, ``.../finish``). Off by default and in the
     #: ``production`` and ``staging`` presets; refused while ``read_only`` is on.
     accept_remote_runs: bool = False
+    #: While a registered load run sends this process traffic, sample its CPU, memory, GC
+    #: pauses and connection pool once a second into the store (``GET api/runs/{id}/metrics``).
+    run_metrics: bool = True
     #: Start refactor-check runs (baseline / compare) from the UI; ``"auto"`` = only while
     #: the framework is in debug mode (``CONTRACT.md`` §19.5).
     checks_from_ui: bool | str = "auto"
@@ -571,6 +576,7 @@ def _validate(s: Settings) -> None:
         "capture_error_details",
         "load_from_ui",
         "accept_remote_runs",
+        "run_metrics",
         "read_only",
         "ui_enabled",
         "trust_unix_socket",

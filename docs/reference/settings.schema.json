@@ -385,6 +385,10 @@
       "type": "number",
       "default": 100.0
     },
+    "run_metrics": {
+      "type": "boolean",
+      "default": true
+    },
     "sample_rate": {
       "type": "number",
       "default": 1.0
