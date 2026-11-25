@@ -123,6 +123,22 @@ def _configure_load(p: argparse.ArgumentParser) -> None:
         "--token-file", metavar="PATH", help="file holding the Redline access token (one line)"
     )
     p.add_argument("--no-store", action="store_true", help="do not write to the store")
+    p.add_argument(
+        "--probe",
+        action="store_true",
+        help="send one tagged GET before the run and warn when the application does not "
+        "record it (on by default with --store-url or --register-url)",
+    )
+    p.add_argument("--no-probe", action="store_true", help="skip the recording probe")
+    p.add_argument(
+        "--require-recording",
+        action="store_true",
+        help="stop the run when the application does not record the probe request "
+        "(default: only warn)",
+    )
+    p.add_argument(
+        "--probe-timeout", type=_duration, metavar="5s", help="how long to wait for the probe trace"
+    )
     p.add_argument("--json", metavar="OUT", help="also write the results as JSON")
     p.add_argument("--fail-p95-ms", type=float, metavar="X", help="exit 1 if p95 > X ms")
     p.add_argument(
@@ -295,6 +311,30 @@ def _open_http_sink(args: argparse.Namespace, err: TextIO) -> Any:
     return sink
 
 
+def _make_probe(
+    args: argparse.Namespace, scenario: Any, run_id: str, sinks: list[Any], err: TextIO
+) -> Any:
+    """The ``probe`` callable for ``run()``, or ``None`` (no sink can look traces up)."""
+    if args.no_probe:
+        return None
+    if not (args.probe or args.require_recording or args.store_url or args.register_url):
+        return None  # a file store keeps its old behaviour: no extra request unless asked
+    finder = next((s.has_run_trace for s in sinks if hasattr(s, "has_run_trace")), None)
+    if finder is None:
+        return None
+    from .load.probe import ProbeFailed, run_probe
+
+    def probe() -> None:
+        try:
+            run_probe(scenario, run_id, finder, timeout_s=args.probe_timeout or 5.0)
+        except ProbeFailed as exc:
+            if args.require_recording:
+                raise
+            err.write(f"warning: {exc}\nthe run continues; its bottleneck table may be empty\n")
+
+    return probe
+
+
 def _run_store_target(args: argparse.Namespace, err: TextIO) -> str | None:
     """Where the run is stored: ``--store-url``, else ``--store`` when given, else the
     project's ``storage_url`` setting, else the default file. ``None`` with ``--no-store``."""
@@ -449,6 +489,7 @@ def _cmd_load(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
             run_id=run_id,
             name=args.name,
             on_event=printer,
+            probe=_make_probe(args, scenario, run_id, sinks, err),
         )
     except Exception as exc:
         err.write(f"redline load: {exc}\n")

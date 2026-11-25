@@ -1304,6 +1304,34 @@
         },
         {
           "name": [
+            "--probe"
+          ],
+          "required": false,
+          "help": "send one tagged GET before the run and warn when the application does not record it (on by default with --store-url or --register-url)"
+        },
+        {
+          "name": [
+            "--no-probe"
+          ],
+          "required": false,
+          "help": "skip the recording probe"
+        },
+        {
+          "name": [
+            "--require-recording"
+          ],
+          "required": false,
+          "help": "stop the run when the application does not record the probe request (default: only warn)"
+        },
+        {
+          "name": [
+            "--probe-timeout"
+          ],
+          "required": false,
+          "help": "how long to wait for the probe trace"
+        },
+        {
+          "name": [
             "--json"
           ],
           "required": false,

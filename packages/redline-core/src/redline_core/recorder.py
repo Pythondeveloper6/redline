@@ -716,6 +716,9 @@ class Recorder:
             # the tag (its writer drops it for an unknown or finished check run)
             check="check_run_id" in trace.tags
             and getattr(self.store, "validates_check_tags", False) is True,
+            # the same for a registered load run (X-Redline-Run): kept so low-rate steps
+            # still produce traces; the writer drops it for an unknown or finished run
+            run="run_id" in trace.tags and getattr(self.store, "validates_run_tags", False) is True,
         )
         from .testing import active_capture
 

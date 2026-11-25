@@ -178,6 +178,7 @@ Recording is cheap, storing is not, so the decision is split.
 | `error` | `always_keep_errors` is on and the request returned 5xx, or raised without becoming a 4xx (a raised `Http404` is a 404, not an error) |
 | `slow` | `duration_ms >= always_keep_slower_than_ms` |
 | `profile` | the request was profiled |
+| `run` | the request carries `X-Redline-Run` of a load run that is registered in this store and running (or ended under a minute ago). A made-up run id keeps nothing |
 
 Otherwise it is dropped. The practical production recipe is therefore a low
 `sample_rate` with the two safety nets left on: you keep a sample of normal traffic

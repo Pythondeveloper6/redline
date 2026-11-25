@@ -161,6 +161,7 @@ def run(
     run_id: str | None = None,
     name: str | None = None,
     on_event: EventCallback | None = None,
+    probe: Callable[[], Any] | None = None,
 ) -> RunResult:
     """Run a load test and return its :class:`RunResult` (blocking).
 
@@ -168,7 +169,8 @@ def run(
     event, :class:`~redline_core.load.control.StopFile`); setting it stops the run
     gracefully with status ``stopped``. ``on_event(kind, data)`` receives live events:
     ``("start", RunMeta)``, ``("second", dict)``, ``("step", StepResult)``,
-    ``("stopping", reason)``.
+    ``("stopping", reason)``. ``probe`` is called once after the run is registered and
+    before any load; when it raises, the run ends ``failed`` with its message.
 
     Workers are started with the *spawn* method, so a script calling this must guard its
     entry point with ``if __name__ == "__main__":``.
@@ -197,6 +199,27 @@ def run(
     emit = on_event or (lambda kind, data: None)
     sinks.start(meta)
     emit("start", meta)
+
+    if probe is not None:
+        try:
+            probe()
+        except Exception as exc:  # a failed probe ends the run before any load is sent
+            message = str(exc)
+            summary = analyze([])
+            summary["message"] = message
+            sinks.finish(run_id, "failed", summary)
+            return RunResult(
+                run_id=run_id,
+                name=run_name,
+                status="failed",
+                config=config,
+                created_at=created_at,
+                finished_at=time.time(),
+                steps=[],
+                seconds=[],
+                summary=summary,
+                message=message,
+            )
 
     engine = _Engine(sc, plans, n_workers, run_id, stop_event, sinks, emit)
     status, message = engine.execute()

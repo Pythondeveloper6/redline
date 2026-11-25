@@ -991,6 +991,7 @@ Recording is cheap, storing is not, so the decision is split.
 | `error` | `always_keep_errors` is on and the request returned 5xx, or raised without becoming a 4xx (a raised `Http404` is a 404, not an error) |
 | `slow` | `duration_ms >= always_keep_slower_than_ms` |
 | `profile` | the request was profiled |
+| `run` | the request carries `X-Redline-Run` of a load run that is registered in this store and running (or ended under a minute ago). A made-up run id keeps nothing |
 
 Otherwise it is dropped. The practical production recipe is therefore a low
 `sample_rate` with the two safety nets left on: you keep a sample of normal traffic
@@ -5765,13 +5766,27 @@ run with `--no-store`, or written to another store, does not tag the app's trace
 **bottleneck** analysis joins
 those tags with the per-query summaries, so the app must be recording the load. Remember
 [sampling](production.md#sampling): in a profile that keeps 5% of requests you still get
-enough traces at high rps, but at 5 rps you may get none. Raise `sample_rate` on the
-instance under test.
+enough traces at high rps, but at 5 rps you may get none. Requests tagged with a run that
+is registered in the app's store and running are always kept (`sampled_by` is `run`), so a
+low-rate step still produces traces without changing `sample_rate`.
 
 The run itself (its steps and latency histograms) is written to the same store the app
 uses. The default is `.redline/redline.db` in the working directory, and `--store` points
 elsewhere, so run the command from the app's directory or pass the path. The UI then lists
 it under **Load**.
+
+### Checking that the app records the run
+
+Before the first step, `redline load` can send one harmless request (the scenario's first
+enabled `GET`, tagged `step=probe`, which the bottleneck analysis ignores) and look for the
+trace it should have produced. If none appears it says why it usually happens: the app uses
+a different store than the run, sampling dropped the request, or recording is disabled.
+
+- With `--store-url` or `--register-url` the probe is on by default and only warns.
+- With a file store it is off, so existing runs send no extra request; add `--probe` to turn
+  it on.
+- `--require-recording` stops the run (status `failed`) instead of warning.
+- `--no-probe` skips it; `--probe-timeout 10s` waits longer for a slow writer.
 
 ### Generator and application on different machines
 
@@ -5787,8 +5802,8 @@ file, and a run written to a local file would tag none of the app's traces. Two 
   The application must enable `accept_remote_runs` (off by default, and always off while
   `read_only` is on). The Redline access token is read from `REDLINE_TOKEN` or
   `--token-file`, never from the command line. The generator checks the application is
-  reachable and accepts the token before the first request, and a run registered this way
-  can only be changed over HTTP by its own generator.
+  reachable and accepts the token before the first request, and only runs registered this
+  way can be changed over HTTP, never runs written by a local process.
 
 ## Profiles
 
@@ -5943,6 +5958,9 @@ SCENARIO = {
 | `--register-url URL` | register the run with the application over HTTP (needs `accept_remote_runs` there) |
 | `--token-file PATH` | file holding the Redline access token for `--register-url` (else `REDLINE_TOKEN`) |
 | `--no-store` | do not write to a store |
+| `--probe`, `--no-probe` | send (or skip) one tagged `GET` before the run to check the app records it. On by default with `--store-url` / `--register-url`, off with a file store |
+| `--require-recording` | stop the run when the probe request is not recorded (default: warn) |
+| `--probe-timeout 5s` | how long to wait for the probe trace |
 | `--json OUT` | also write the results as JSON |
 | `--fail-p95-ms X` | exit 1 if the run-wide p95 exceeds X ms |
 | `--fail-error-rate Y` | exit 1 if the error rate exceeds Y (`0.01` or `1%`) |
@@ -6056,8 +6074,10 @@ Notes for stable CI numbers:
 
 With `load_from_ui = True` the **Load** page has a form that starts a run against the app
 that serves the UI. It is **off by default** (`403 load_disabled`) and needs
-`redline-core[load]`, a file-backed SQLite store, and a store the background process can
-write to. It is also blocked by `read_only` (`403 read_only`) and the `load` feature
+`redline-core[load]`, and either a file-backed SQLite store or the shared PostgreSQL store
+(`storage_url`), which the background process reaches through the `REDLINE_STORAGE_URL`
+environment variable. On a shared store there are no pid files to tell a killed run from a
+live one, so stopping a run whose process is gone closes it as `failed`. It is also blocked by `read_only` (`403 read_only`) and the `load` feature
 switch (`404 feature_disabled`), and the `production` preset keeps it off. Turn it on only
 in environments where load is welcome. See [Security](security.md#load-from-the-ui).
 
@@ -10528,9 +10548,12 @@ With `storage_url` set, every adapter builds `PostgresStore` instead of the SQLi
   by whichever worker's writer prunes, to the whole shared store.
 - **Secrets.** `redline config` and `GET api/config` show the URL with its password masked.
 
-Load tests and refactor checks **started from the UI** need a SQLite store (their background
-process writes into the store file), so those UI actions answer `501` with a shared store;
-the CLI (`redline load`, `redline check`) still records into SQLite files. `redline doctor`
+Refactor checks **started from the UI** need a SQLite store (their background
+process writes into the store file), so that UI action answers `501` with a shared store.
+Load runs started from the UI work with the shared store too: the background process gets
+the URL through `REDLINE_STORAGE_URL`.
+`redline load --store-url` writes runs to the shared store; `redline check` still records
+into SQLite files. `redline doctor`
 checks the driver and that the database answers.
 
 ## A different store

@@ -293,6 +293,17 @@ load_disabled`). When on, its safety rests on these rules:
 3. It is a real load: a user who may start runs can make your instance slow. Enable it only
    in environments where that is acceptable, and not in production.
 
+### Registering runs over HTTP
+
+`accept_remote_runs` lets a load generator on another host register its run
+(`POST api/runs/register`, `.../steps`, `.../finish`). It is **off by default and in every
+preset**, refused while `read_only` is on, and behind the same access policy as every other
+mutation (use `access="token"`). The application checks each field's type and size, masks the
+run's config again, and refuses to change any run that was not registered this way, so a
+local run cannot be rewritten through it. Requests of a run are kept past `sample_rate` only
+while that run exists and is running; an invented run id keeps nothing. The generator reads
+the token from `REDLINE_TOKEN` or `--token-file`, and a PostgreSQL store URL is never printed.
+
 The `redline load` command line is a different matter: it runs on the machine you run it
 on, against the URL you give it, with the rights you have there. Point it only at systems you
 own or are authorised to test.

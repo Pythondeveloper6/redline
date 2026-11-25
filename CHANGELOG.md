@@ -16,6 +16,17 @@ version is below `1.0` the public API may change between minor versions.
   and the project's `storage_url` setting is used when `--store` is not given, so a load
   generator on another host fills the same bottleneck table as the application. The URL's
   password is never printed.
+- Requests tagged with a registered, running load run are kept even when `sample_rate`
+  would drop them (`sampled_by="run"`), so low-rate steps still fill the bottleneck table. A
+  made-up run id keeps nothing.
+- `redline load` can check, before the first step, that the application records the run:
+  one tagged `GET` (`step=probe`) and a lookup of its trace, with the likely causes when
+  nothing appears. On by default with `--store-url` / `--register-url` (warns), opt-in with
+  `--probe` for a file store so existing runs send no extra request; `--require-recording`
+  stops the run, `--no-probe` skips it.
+- Load runs started from the UI work on the shared PostgreSQL store. The background process
+  gets the URL through the environment, and stopping a run whose process is gone closes it
+  as `failed`.
 - A generator with no shared store registers its run over HTTP:
   `redline load --register-url https://app/_redline` (token from `REDLINE_TOKEN` or
   `--token-file`). The application accepts it only with the new `accept_remote_runs` setting

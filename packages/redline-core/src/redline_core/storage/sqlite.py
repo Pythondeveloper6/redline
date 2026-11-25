@@ -308,6 +308,9 @@ class SQLStore(CheckStoreMixin):
     """
 
     path: str
+    #: The writer validates ``X-Redline-Run`` tags against the runs table, so the recorder may
+    #: keep a sampled-out request of a registered run (``sampled_by="run"``).
+    validates_run_tags = True
     #: Errors of the database driver (caught where a failed read must not stop a write).
     _db_errors: tuple[type[BaseException], ...] = (sqlite3.Error,)
     #: The newest trace per SQL fingerprint (``{where}`` filters ``trace_sql``).
@@ -637,6 +640,8 @@ class SQLStore(CheckStoreMixin):
         out = []
         for t in traces:
             if "run_id" in t.tags and t.tags["run_id"] not in known:
+                if t.tags.get("sampled_by") == "run":
+                    continue  # kept only because of the tag; a made-up run forces nothing
                 tags = {k: v for k, v in t.tags.items() if k not in ("run_id", "step")}
                 t = dataclasses.replace(t, tags=tags)
             out.append(t)

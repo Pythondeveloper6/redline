@@ -8,7 +8,7 @@ Recording is cheap, storing is not, so the decision is split in two:
 2. **At request end** – :meth:`Sampler.keep` stores the trace if the dice said so, *or* it
    was slow, *or* it failed, *or* it was explicitly profiled (or, provisionally, is a
    refactor-check call). The reason lands in ``trace.tags["sampled_by"]`` (``all`` /
-   ``rate`` / ``slow`` / ``error`` / ``profile`` / ``check``).
+   ``rate`` / ``slow`` / ``error`` / ``profile`` / ``check`` / ``run``).
 
 With the defaults (``sample_rate=1.0``) every request is kept – the development setting.
 In production lower ``sample_rate`` and rely on the slow/error safety nets.
@@ -134,6 +134,7 @@ class Sampler:
         error: bool = False,
         profiled: bool = False,
         check: bool = False,
+        run: bool = False,
     ) -> str | None:
         """The ``sampled_by`` reason to store the trace, or ``None`` to drop it.
 
@@ -142,6 +143,9 @@ class Sampler:
         an ``X-Redline-Check`` tag and the store validates those tags: it is then kept
         *provisionally* as ``"check"`` – the store's writer drops it unless the check run
         exists and is running (``CONTRACT.md`` §19.2), so a client cannot force storage.
+        ``run`` is the same for an ``X-Redline-Run`` tag (a registered load run): kept as
+        ``"run"`` so low-rate steps still produce traces; the writer drops it unless the run
+        is known and running.
         """
         s = self.settings
         if rolled:
@@ -154,4 +158,6 @@ class Sampler:
             return "profile"
         if check:
             return "check"
+        if run:
+            return "run"
         return None

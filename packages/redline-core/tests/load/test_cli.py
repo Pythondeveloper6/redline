@@ -595,3 +595,58 @@ def test_register_url_run_is_registered_with_the_application(
     assert len(runs) == 1 and runs[0].status == "done" and runs[0].steps
     assert "http://app/_redline/#/load/" in capsys.readouterr().out
     store.close()
+
+
+# ---------------------------------------------------------------------------- recording probe
+def _store_run(tmp_path, url, *extra):
+    db = str(tmp_path / "p.db")
+    sc = write_scenario(tmp_path, url)
+    args = ["load", sc, "--store", db, "--rps", "5", "--duration", "1s", "-q", *extra]
+    return args, db
+
+
+def test_probe_warns_by_default_when_the_app_records_nothing(tmp_path, capsys, http_server):
+    _, url = http_server  # not a Redline app: nothing is ever recorded
+    args, _ = _store_run(tmp_path, url, "--probe", "--probe-timeout", "1s")
+    code = cli.main(args)
+    err = capsys.readouterr().err
+    assert code == 0
+    assert "not recording this run" in err and "the run continues" in err
+
+
+def test_require_recording_stops_the_run(tmp_path, capsys, http_server):
+    state, url = http_server
+    args, db = _store_run(tmp_path, url, "--probe-timeout", "1s", "--require-recording")
+    code = cli.main(args)
+    assert code == 1
+    assert state.count == 1  # only the probe request was sent
+    store = SQLiteStore(db, background=False)
+    runs = store.list_runs()
+    store.close()
+    assert runs[0].status == "failed"
+
+
+def test_a_file_store_run_sends_no_probe_unless_asked(tmp_path, http_server):
+    state, url = http_server
+    args, _ = _store_run(tmp_path, url)
+    assert cli.main(args) == 0
+    assert not any("probe" in h for h in state.headers)
+
+
+def test_shared_store_runs_probe_by_default(tmp_path, monkeypatch, capsys, http_server):
+    state, url = http_server
+    db = str(tmp_path / "s.db")
+    monkeypatch.setattr(cli, "_open_run_store", lambda target: SQLiteStore(db, background=False))
+    monkeypatch.chdir(tmp_path)
+    sc = write_scenario(tmp_path, url)
+    args = ["load", sc, "--store-url", PG_URL, "--rps", "5", "--duration", "1s", "-q"]
+    assert cli.main([*args, "--probe-timeout", "1s"]) == 0
+    assert any("step=probe" in h for h in state.headers)
+    assert "not recording this run" in capsys.readouterr().err
+
+
+def test_storage_url_from_the_environment_is_used_by_a_background_run(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("REDLINE_STORAGE_URL", PG_URL)
+    args = cli._parser().parse_args(["load", "x", "--store", cli.DEFAULT_STORE])
+    assert cli._run_store_target(args, None) == PG_URL

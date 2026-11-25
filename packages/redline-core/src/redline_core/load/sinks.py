@@ -226,6 +226,13 @@ class StoreSink:
     def step(self, run_id: str, step: StepResult) -> None:
         self.store.save_run_step(run_id, self.step_row(step))
 
+    def has_run_trace(self, run_id: str) -> bool:
+        """Whether a trace tagged with this run is in the store (the recording probe)."""
+        from ..storage.base import Filters
+
+        page = self.store.list(Filters(tag=("run_id", run_id)), limit=1)
+        return bool(page.items)
+
     def finish(self, run_id: str, status: str, summary: dict[str, Any]) -> None:
         try:
             self.store.finish_run(run_id, status, summary)
@@ -341,6 +348,14 @@ class HttpSink:
             raise RegisterError(
                 f"{self.base} does not look like a Redline mount (api/meta has no version)"
             )
+
+    def has_run_trace(self, run_id: str) -> bool:
+        """Whether the application holds a trace tagged with this run (the recording probe)."""
+        from urllib.parse import quote
+
+        response = self._call("GET", f"api/traces?tag=run_id:{quote(run_id, safe='')}&limit=1")
+        data = response.json()
+        return bool(isinstance(data, Mapping) and data.get("items"))
 
     def start(self, meta: RunMeta) -> None:
         row = meta.to_dict()

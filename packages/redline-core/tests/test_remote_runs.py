@@ -182,3 +182,18 @@ def test_read_only_refuses_remote_registration(tmp_path):
     ro = RedlineAPI(store, Settings(accept_remote_runs=True, read_only=True))
     assert register(ro)[0] == 403
     store.close()
+
+
+def test_http_sink_finds_a_tagged_trace_through_the_api(api):
+    from redline_core.load.sinks import HttpSink
+
+    from .conftest import make_trace
+
+    client, _ = _client(api)
+    sink = HttpSink("http://app/_redline", "tok", client=client)
+    assert sink.has_run_trace("g9") is False
+    trace = make_trace()
+    trace.tags["run_id"] = "g9"
+    api.store.save(trace)
+    api.store.flush()
+    assert sink.has_run_trace("g9") is True

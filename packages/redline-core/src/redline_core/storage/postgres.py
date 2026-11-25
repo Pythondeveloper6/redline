@@ -334,10 +334,11 @@ class PostgresStore(SQLStore):
         it the tables go to the first schema of the connection's ``search_path``.
     :param connect_kwargs: extra keyword arguments for ``psycopg.connect``.
 
-    The other parameters are :class:`~redline_core.storage.SQLiteStore`'s. Load tests and
-    refactor checks started from the UI need a local SQLite store (their background
-    process writes into the store file), so the UI answers 501 for them here; runs recorded
-    by ``redline load`` / ``redline check`` into a SQLite store are unaffected.
+    The other parameters are :class:`~redline_core.storage.SQLiteStore`'s. Refactor checks
+    started from the UI need a local SQLite store (their background process writes into the
+    store file), so the UI answers 501 for them here. Load runs work here: ``redline load
+    --store-url`` writes to this store, and runs started from the UI hand the URL to their
+    background process through ``REDLINE_STORAGE_URL``.
     """
 
     _SAMPLES_SQL = (
