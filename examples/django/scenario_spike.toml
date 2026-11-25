@@ -1,0 +1,16 @@
+name = "django shop: spike and recovery"
+description = "Normal load, a burst, then normal load again: how long does p95 take to come back?"
+base_url = "http://127.0.0.1:8014"
+timeout_s = 10
+
+[[requests]]
+name = "list"
+path = "/orders/"
+weight = 3
+
+[profile]
+stages = [
+  { rps = 5,  duration_s = "20s" },
+  { rps = 40, duration_s = "15s" },
+  { rps = 5,  duration_s = "40s" },
+]

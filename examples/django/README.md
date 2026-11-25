@@ -91,6 +91,13 @@ at **http://127.0.0.1:8014/redline/#/load** (log in as admin / admin first; the 
 prints uses `/_redline/`, which this app does not mount) to see the per-step latency, the knee,
 and the bottlenecks found under load.
 
+More scenarios in this folder: `scenario_users.toml` (twenty invented users and, where the app has ids, a skewed
+`[[data]]` feed, so per-user caches are not all warm) and `scenario_spike.toml` (a `stages` profile: 5, then 40, then
+5 rps; the summary reports how long p95 took to recover). Run them like the first one, for example
+`redline load examples/django/scenario_spike.toml --store examples/django/.redline/redline.db`. When the generator
+runs on another machine, use `--store-url`, or `--register-url` with `accept_remote_runs`; see
+[Load testing](../../docs/load-testing.md).
+
 ## Additional real-work workflows
 
 The [Flask playground](../flask/README.md#v04-real-work-playground) demonstrates the
