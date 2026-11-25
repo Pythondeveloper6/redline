@@ -923,8 +923,11 @@ the id of the innermost open span. The consequences:
 - `asgiref.sync_to_async`, `loop.run_in_executor` with `contextvars.copy_context()` and
   Starlette's threadpool (which runs your `def` endpoints) copy context into the worker
   thread, so their queries attribute correctly.
-- A bare `threading.Thread` does **not** copy context. Work started that way is not
-  attributed to any request. That is by design: it is not part of the request.
+- A bare `threading.Thread` and a plain `ThreadPoolExecutor` do **not** copy context, so work
+  started that way is not attributed to any request. If that work is part of the request,
+  call [`instrument_threads()`](async-blocking.md#work-on-threads-and-pools): it copies the
+  context into new threads and pool tasks, and spans recorded there carry the thread's name.
+  The trace builder is thread-safe: spans from several threads are appended under a lock.
 - When no trace is active, every hook is one `ContextVar.get()` and a `None` check.
 - Once a trace is finished, late hooks (a background task that outlives the response)
   are ignored rather than attached to a closed trace.
@@ -3528,6 +3531,7 @@ An *issue* is something the detectors found in one trace. Issues with the same i
 | `large_cache_entry` | Known binary cache payload size exceeds the threshold | 1000000 bytes | [Performance workflows](performance-workflows.md) |
 | `slow_cache_decode` | Explicitly instrumented cache decode exceeds the threshold | 50 ms | [Performance workflows](performance-workflows.md) |
 | `json_decode_hotspot` | Sampled standard-library JSON decoding cost | 50 ms | [Performance workflows](performance-workflows.md) |
+| `unattributed_time` | at least half of a web request is covered by no span | `unattributed_time_ratio = 0.5`, `unattributed_time_ms = 100` | [Unattributed time](#unattributed-time) |
 
 Severity is `info`, `warning` or `critical`. For most of the new detectors, a value at five
 times its threshold is `critical`.
@@ -3565,6 +3569,45 @@ small per-request summary tables at write time and the UI queries those:
 Two pieces of context are not issues but make every issue easier to understand: the **log
 records** emitted during the request, and the **local variables** of the project frames in
 an exception. See [Logs and exceptions](logs-and-exceptions.md).
+
+## Unattributed time
+
+Every other detector reports something redline recorded. `unattributed_time` reports what it
+could not record: time inside a request that no span covers. It fires when the uncovered time
+is at least `unattributed_time_ms` (default 100 ms) **and** at least `unattributed_time_ratio`
+of the request (default 0.5; `0` turns the detector off). Both can be changed in
+[settings](settings.md#detectors) and in the analysis preview.
+
+How the time is counted:
+
+- Spans of every kind except the wrappers `view`, `middleware` and `transaction` count as
+  covered. A wrapper encloses work without saying what it was, so it does not hide the gap. A
+  [custom span](custom-spans.md) counts: a named block is attributed.
+- Overlapping spans (SQL on several [threads](async-blocking.md#work-on-threads-and-pools), for
+  example) are merged, so time is never counted twice.
+- Severity is `info` just over the floor and `warning` from twice the minimum.
+
+When the trace has a [profile](flamegraphs.md), the finding names the project frame that held
+most of the uncovered time. Without one it only says how much time is unaccounted for.
+
+The time is either your own code (CPU work, a loop) or a client library redline has no
+integration for. For a client, wrap it once and the time gets a name:
+
+```python
+from redline_core import instrument_client_method
+
+instrument_client_method(acme_sdk.Client, "put", client="acme",
+                         target=lambda self, args, kwargs: args[0])
+```
+
+See [Extending](extending.md#instrumenting-a-client). The finding disappears once the
+uncovered share falls below the thresholds.
+
+It is deliberately conservative: it looks only at requests recorded by the Django, FastAPI,
+Flask and Litestar adapters (jobs and hand-made recordings are mostly their own code and
+would always trip it), and it is silent when `max_spans_per_trace` dropped spans, because the
+coverage would be understated. On a [load run](load-testing.md#bottlenecks) the same
+uncovered time appears as an `other` row.
 
 ## Tuning
 
@@ -5109,6 +5152,46 @@ The overhead is the timer callback, a few microseconds every 5 ms per busy loop.
 | Litestar | Lag monitor (the app runs inside it while a request is recorded) |
 | Django on WSGI, Flask | No event loop to watch: not applicable |
 
+## Work on threads and pools
+
+Offloading work to a thread is the usual fix for blocking the loop, and it creates a new
+blind spot: a plain `threading.Thread` or `ThreadPoolExecutor` worker does not inherit the
+request's `contextvars`, so the queries and calls made there are recorded against no request
+and the time shows up as [unattributed](detectors.md#unattributed-time).
+
+```python
+from redline_core.contrib.threads import instrument_threads
+
+instrument_threads()      # once, at startup
+```
+
+From then on, when a request is being recorded, `ThreadPoolExecutor.submit` (and so `map` and
+`loop.run_in_executor`) and `Thread.start` run the work in a copy of the current context, as
+`contextvars.copy_context().run` would:
+
+- the spans stay **under the request**, with the span that was open at the call as parent;
+- each span recorded on another thread has the thread's name in `span.data["thread"]`
+  (`ThreadPoolExecutor-0_1`, or the `name=` you gave a `Thread`), so three queries run on a
+  three-worker pool show as three SQL spans with three distinct thread names;
+- spans from several threads can be recorded at once; the trace builder appends them under a
+  lock.
+
+`uninstrument_threads()` restores both methods; calling `instrument_threads()` twice is
+harmless. Outside a recorded request the wrappers do nothing. It is not enabled by
+`auto_instrument`, and `redline instrumentation` lists it as `threads`.
+
+Limits:
+
+- Work still running when the request finishes is **not** recorded. The trace is closed, so
+  later spans are dropped; they are not attached to a finished request and are not turned
+  into a separate job the way [background tasks](fastapi.md#in-process-background-tasks)
+  are. Wait for the futures before returning if you want them counted.
+- Only threads started *inside* a recorded request get its context. Long-lived pool workers
+  created earlier keep a clean context between tasks; each task gets its own copy.
+- Threads whose name starts with `redline` (the store's writer, the loop watchdog) are never
+  touched. `ProcessPoolExecutor` and `multiprocessing` are not covered: a child process has no
+  recorder.
+
 ## Limits
 
 - The lag monitor measures a loop that is *late*, which is the right signal but is not proof
@@ -6485,6 +6568,7 @@ with the run, step by step, with their per-fingerprint and per-route summaries:
 |---|---|
 | `sql` | mean time per execution of each query, by step |
 | `route` | mean time per request of each endpoint, by step |
+| `other` | mean time per request that no span covers (the gap between the spans, see [unattributed time](detectors.md#unattributed-time)), by step. Read from the run's 2000 latest requests; absent when every request is fully covered |
 
 Each item shows its mean and p95 at every step and a **growth** factor: the last step's
 mean divided by the first's (floored at 0.01 ms to avoid dividing by nothing). Items are
@@ -6498,6 +6582,7 @@ to open a sample trace, with its callsite.
 | One SQL statement's time grows 100x | a missing index or a lock; run [EXPLAIN](explain.md) on a sample |
 | Every statement grows together; routes grow | the database or its pool is saturated. Look for `pool_wait` spans ([Transactions and locks](transactions.md#pool-waits)) |
 | SQL flat, routes grow | the app itself: CPU, GIL, [blocking in async](async-blocking.md), or a downstream call |
+| The `other` row grows with the routes | time redline cannot see: CPU, or a client with no span ([wrap it](extending.md#instrumenting-a-client)) |
 | `dropped` rises with flat server latency | the generator is the limit. More workers, or another machine |
 | Errors with no matching traces | requests are rejected before the app records them (proxy, worker queue) |
 
@@ -8444,9 +8529,15 @@ They share a few rules:
 | requests | `instrument_requests()` | `http_out` spans | `requests` |
 | boto3 | `instrument_boto3()` | `http_out` spans per SDK operation | `boto3` |
 | redis-py | `instrument_redis()` | `cache` spans | `redis` |
+| pymongo | `instrument_pymongo()` | `custom` spans per collection call (`client="mongodb"`) | none |
+| kafka-python | `instrument_kafka()` | `custom` publish spans (`client="kafka"`) | none |
+| pika | `instrument_pika()` | `custom` publish spans (`client="amqp"`) | none |
+| Google Cloud Storage | `instrument_google_cloud_storage()` | `custom` upload/download spans (`client="gcs"`) | none |
+| Azure Blob Storage | `instrument_azure_blob()` | `custom` upload/download/delete spans (`client="azure_blob"`) | none |
 | asyncpg | `instrument_asyncpg()` | `sql` spans | `asyncpg` |
 | psycopg 3 | `instrument_psycopg()` | `sql` spans | `psycopg` |
 | Raw DB-API driver | `instrument_dbapi(module)` | `sql` spans (`source="raw_cursor"`) | any DB-API driver |
+| Threads and pools | `instrument_threads()` | carries the request into `Thread` and `ThreadPoolExecutor` work; spans get `data["thread"]` | none |
 | Marshmallow | `instrument_marshmallow()` | `serializer` spans | none |
 | Strawberry | `RedlineExtension` | `resolver` spans | `strawberry` |
 | Graphene | `RedlineMiddleware` | `resolver` spans | `graphene` |
@@ -8600,6 +8691,51 @@ schemas (`fields.Nested`) are part of their parent's time. Feeds the
 [slow serializer detector](serializers.md). Marshmallow has no extra: the call
 returns `False` if marshmallow is not installed.
 
+## Data stores, queues and object storage
+
+```python
+from redline_core.contrib.pymongo import instrument_pymongo
+from redline_core.contrib.kafka import instrument_kafka
+from redline_core.contrib.pika import instrument_pika
+from redline_core.contrib.google_cloud_storage import instrument_google_cloud_storage
+from redline_core.contrib.azure_blob import instrument_azure_blob
+```
+
+These record `custom` spans built with [`instrument_client_method`](extending.md#instrumenting-a-client).
+Each span has `client`, `op`, `target`, `payload_bytes` and `error` in its data. Every function
+imports its library only when called and returns `False` if it is not installed, so an app
+without the library is unaffected. Filters, documents, message keys and bodies, object names,
+URLs and credentials are never captured, and an error is recorded as its class name.
+
+| Integration | What a span covers | Target | Size |
+|---|---|---|---|
+| pymongo | `Collection` writes, `find_one`, `count_documents`, `distinct`, `bulk_write`, and each network batch of a `find()` cursor (`op="find"`) | `database.collection` | none |
+| kafka-python | `KafkaProducer.send` (`op="publish"`). `send` only enqueues, so the span is the time the caller waited, not delivery | topic | value, when bytes |
+| pika | `BlockingChannel.basic_publish` (`op="publish"`) | `exchange/routing_key` | body |
+| Google Cloud Storage | `Blob.upload_from_*` and `download_*` | bucket | upload data (`upload_from_string`) and downloaded bytes or text |
+| Azure Blob Storage | `BlobClient.upload_blob`, `download_blob`, `delete_blob`, sync and `aio`. `download_blob` covers starting the download; the stream is read later | container | upload data |
+
+For any other client, wrap it yourself with `instrument_client_method`
+([Extending](extending.md#instrumenting-a-client)). `auto_instrument="on"` also instruments
+these when they are installed; the default `"warn"` lists them if installed and inactive.
+Asynchronous drivers (motor, aiokafka) are not covered; wrap their coroutine methods with the helper.
+
+## Threads and pools
+
+```python
+from redline_core.contrib.threads import instrument_threads
+
+instrument_threads()
+```
+
+Not a client but a gap in what is attributed: SQL, cache and HTTP calls made on a plain
+`threading.Thread` or a `ThreadPoolExecutor` worker belong to no request, because those
+threads do not inherit `contextvars`. `instrument_threads()` patches `ThreadPoolExecutor.submit`
+and `Thread.start` so the work runs in a copy of the request's context. The spans appear under
+the request, each with the thread's name in `data["thread"]`. It is process-wide, reversible
+with `uninstrument_threads()`, and never enabled by `auto_instrument`. Work that outlives the
+request is not recorded. Details and limits: [Work on threads and pools](async-blocking.md#work-on-threads-and-pools).
+
 ## GraphQL
 
 Strawberry and Graphene resolvers are described on their own page:
@@ -8701,14 +8837,16 @@ storms. This avoids treating reads of different object keys as identical request
 
 [← Index](index.md)
 
-Redline has two extension points, both small `typing.Protocol`s in `redline_core`:
+Redline has two extension points, both small `typing.Protocol`s in `redline_core`, and a
+helper for making any other client visible:
 
 | Extension | You write | Use it for |
 |---|---|---|
 | [`FixSuggester`](#fixsuggester) | one method, `suggest(issue, spans)` | fix advice for another ORM, a house style, or a framework Redline does not know |
 | [`Store`](#the-store-protocol) | the storage interface | keeping traces somewhere other than the local SQLite file |
+| [`instrument_client_method`](#instrumenting-a-client) | one call per client method | spans for a database, queue or storage client Redline has no integration for |
 
-Both are **beta** surfaces: signatures may change before 1.0.
+All three are **beta** surfaces: signatures may change before 1.0.
 
 ## The data you will touch
 
@@ -8848,6 +8986,53 @@ project root. The file path in `Callsite.file` is relative to `project_root`.
 
 Only produce a diff when you are **sure** you found the right expression. A wrong diff is
 worse than a hint. Use `confidence` honestly: `high` means "relation and line identified".
+
+## Instrumenting a client
+
+Time spent in a client Redline cannot see shows up as [unattributed time](detectors.md#unattributed-time)
+on the request. `instrument_client_method` makes it visible: it wraps one method of a client
+class (or one object) and records every call as a span with the client name, the operation,
+a target, the duration, a payload size and, on failure, the exception class.
+
+```python
+from redline_core import instrument_client_method
+from redline_core.extending import payload_size
+
+restore = instrument_client_method(
+    acme_sdk.Client,                     # a class (all instances) or one object
+    "put",
+    client="acme",                       # span data["client"]
+    operation="write",                   # a string, or a callable (self, args, kwargs) -> str
+    target=lambda self, args, kwargs: args[0],                      # e.g. the table name
+    payload_bytes=lambda self, args, kwargs: payload_size(args[1]),  # request size
+    result_bytes=payload_size,           # response size, from the return value
+)
+# restore() puts the original method back
+```
+
+| Property | Behaviour |
+|---|---|
+| Span | kind `custom` (override with `kind=`), name `acme write orders`, data `client`, `op`, `target`, `payload_bytes`, `error`, and `result_bytes` when given |
+| Sizes | `payload_size(value)` measures only bytes-like and text values; anything else is `None` rather than serialized to be measured |
+| Errors | the exception class name only, never its message; the exception is re-raised unchanged |
+| Safety | a hook that raises is ignored (the call still runs and is recorded); the target is redacted and capped at 200 characters |
+| Async | coroutine functions are wrapped as coroutines |
+| Idempotent | wrapping an already wrapped method does nothing; the undo function restores the original and does nothing if another patch replaced yours |
+| Cost | outside a traced request, one `ContextVar` read per call |
+
+Use it on instance methods; static and class methods are not supported. For code you cannot
+patch, `client_span` is the context-manager form:
+
+```python
+from redline_core import client_span
+
+with client_span("acme", "scan", target="orders") as info:
+    rows = acme_client.scan("orders")
+    info["payload_bytes"] = len(rows)
+```
+
+The first-party [pymongo, Kafka, pika, Google Cloud Storage and Azure Blob integrations](integrations.md#data-stores-queues-and-object-storage)
+are built on this helper.
 
 ## The `Store` protocol
 
@@ -11512,7 +11697,7 @@ See [How it works: sampling](how-it-works.md#sampling).
 | `capture_logs` | `bool` | `True` | Keep the log records emitted during a request. See [Logs and exceptions](logs-and-exceptions.md) |
 | `log_level` | `str` (`DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`; case-insensitive) | `"INFO"` | An extra minimum level for records stored in a trace. Capture follows your application's own logger levels (Redline never adds a root handler or changes a level), so a record your logging configuration drops is never captured; `log_level` can only raise the bar further |
 | `max_logs_per_trace` | `int` | `200` | Cap per trace; extras are counted, not stored |
-| `auto_instrument` | `"off"`, `"warn"` or `"on"` | `"warn"` | Outbound-call integrations (httpx, requests, redis, boto3). `"warn"`: at install, log one warning naming installed but uninstrumented ones; `"on"`: instrument every installed one at install; `"off"`: neither. See [Integrations](integrations.md#zero-config-coverage) |
+| `auto_instrument` | `"off"`, `"warn"` or `"on"` | `"warn"` | Client integrations (httpx, requests, redis, boto3, pymongo, kafka-python, pika, google-cloud-storage, azure-storage-blob). `"warn"`: at install, log one warning naming installed but uninstrumented ones; `"on"`: instrument every installed one at install; `"off"`: neither. See [Integrations](integrations.md#zero-config-coverage) |
 | `capture_locals` | `bool` | `True` | Keep the local variables of project frames in an exception (names matching `redact_keys` are masked). See [Logs and exceptions](logs-and-exceptions.md#exceptions-with-locals) |
 | `capture_error_details` | `bool` | `True` | Capture exception messages and formatted tracebacks. When false, errors retain type/codes without formatting message or traceback text; exception locals are also disabled. SQL messages additionally require SQL parameter capture for that statement. Shared-dev and production default to false |
 
@@ -11533,6 +11718,8 @@ See [N+1 detection](n-plus-one.md).
 | `slow_serializer_ms` | `float` | `50` | 0 | A [serializer](serializers.md) at least this slow is reported |
 | `long_transaction_ms` | `float` | `200` | 0 | A [transaction](transactions.md) open at least this long is reported |
 | `slow_external_ms` | `float` | `500` | 0 | An [outbound call](external-calls.md) at least this slow is reported |
+| `unattributed_time_ratio` | `float` | `0.5` | 0 | A web request with at least this share of its time covered by no span is [unattributed time](detectors.md#unattributed-time). Between 0 and 1; `0` disables the detector |
+| `unattributed_time_ms` | `float` | `100` | 0 | ...and only when that uncovered time is also at least this many milliseconds |
 
 Two more switches belong here. `detect_blocking` (`bool`, default `True`) runs the
 event-loop lag monitor in async adapters, only while a request is in flight; set it false to
@@ -12543,7 +12730,9 @@ A `Run`:
 }
 ```
 
-`kind` is `sql` or `route`. Items are sorted by `growth` (last step's mean over the first's),
+`kind` is `sql`, `route` or `other` (at most one item: the per-request time covered by no
+span, key `other:uncovered`, no callsite; clients that only know `sql` and `route` can skip
+it). Items are sorted by `growth` (last step's mean over the first's),
 top 50. It is `404 run_not_found` when there is neither the run nor a trace tagged with it.
 
 `POST api/runs` starts a run **against the app that serves the UI**:
@@ -13438,7 +13627,7 @@ with `_`, and any module not listed here, even if it is importable.
 
 | Surface | Public names |
 |---|---|
-| `redline_core` | everything in `redline_core.__all__`: `configure`, `get_recorder`, `Recorder`, `Settings`, `SettingsError`, `span`, `record_span`, `record_query`, `tag`, `job`, `stage`, `row_outcome`, `start_trace`, `finish_trace`, `current`, the model types (`Trace`, `Span`, `SpanContext`, `TraceBuilder`, `Issue`, `Suggestion`, `Callsite`, `Frame`) and the extension points `Detector`, `FixSuggester`, `GenericSuggester` |
+| `redline_core` | everything in `redline_core.__all__`: `configure`, `get_recorder`, `Recorder`, `Settings`, `SettingsError`, `span`, `record_span`, `record_query`, `tag`, `job`, `stage`, `row_outcome`, `start_trace`, `finish_trace`, `current`, the model types (`Trace`, `Span`, `SpanContext`, `TraceBuilder`, `Issue`, `Suggestion`, `Callsite`, `Frame`) and the extension points `Detector`, `FixSuggester`, `GenericSuggester` and the client helpers `instrument_client_method`, `client_span` |
 | `redline_core.testing` | the pytest helpers documented in [Performance workflows](performance-workflows.md) |
 | `redline_core.contrib.*` | the `instrument_*` / `uninstrument_*` functions of each integration documented in [Integrations](integrations.md) |
 | `redline_core.storage` | `SQLiteStore` construction from a path and the `Store` protocol for custom stores ([Storage](storage.md)); the SQL schema itself is internal |

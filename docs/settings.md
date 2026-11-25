@@ -108,7 +108,7 @@ See [How it works: sampling](how-it-works.md#sampling).
 | `capture_logs` | `bool` | `True` | Keep the log records emitted during a request. See [Logs and exceptions](logs-and-exceptions.md) |
 | `log_level` | `str` (`DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`; case-insensitive) | `"INFO"` | An extra minimum level for records stored in a trace. Capture follows your application's own logger levels (Redline never adds a root handler or changes a level), so a record your logging configuration drops is never captured; `log_level` can only raise the bar further |
 | `max_logs_per_trace` | `int` | `200` | Cap per trace; extras are counted, not stored |
-| `auto_instrument` | `"off"`, `"warn"` or `"on"` | `"warn"` | Outbound-call integrations (httpx, requests, redis, boto3). `"warn"`: at install, log one warning naming installed but uninstrumented ones; `"on"`: instrument every installed one at install; `"off"`: neither. See [Integrations](integrations.md#zero-config-coverage) |
+| `auto_instrument` | `"off"`, `"warn"` or `"on"` | `"warn"` | Client integrations (httpx, requests, redis, boto3, pymongo, kafka-python, pika, google-cloud-storage, azure-storage-blob). `"warn"`: at install, log one warning naming installed but uninstrumented ones; `"on"`: instrument every installed one at install; `"off"`: neither. See [Integrations](integrations.md#zero-config-coverage) |
 | `capture_locals` | `bool` | `True` | Keep the local variables of project frames in an exception (names matching `redact_keys` are masked). See [Logs and exceptions](logs-and-exceptions.md#exceptions-with-locals) |
 | `capture_error_details` | `bool` | `True` | Capture exception messages and formatted tracebacks. When false, errors retain type/codes without formatting message or traceback text; exception locals are also disabled. SQL messages additionally require SQL parameter capture for that statement. Shared-dev and production default to false |
 
@@ -129,6 +129,8 @@ See [N+1 detection](n-plus-one.md).
 | `slow_serializer_ms` | `float` | `50` | 0 | A [serializer](serializers.md) at least this slow is reported |
 | `long_transaction_ms` | `float` | `200` | 0 | A [transaction](transactions.md) open at least this long is reported |
 | `slow_external_ms` | `float` | `500` | 0 | An [outbound call](external-calls.md) at least this slow is reported |
+| `unattributed_time_ratio` | `float` | `0.5` | 0 | A web request with at least this share of its time covered by no span is [unattributed time](detectors.md#unattributed-time). Between 0 and 1; `0` disables the detector |
+| `unattributed_time_ms` | `float` | `100` | 0 | ...and only when that uncovered time is also at least this many milliseconds |
 
 Two more switches belong here. `detect_blocking` (`bool`, default `True`) runs the
 event-loop lag monitor in async adapters, only while a request is in flight; set it false to

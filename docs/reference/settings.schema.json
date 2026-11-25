@@ -475,6 +475,14 @@
       "type": "boolean",
       "default": true
     },
+    "unattributed_time_ms": {
+      "type": "number",
+      "default": 100.0
+    },
+    "unattributed_time_ratio": {
+      "type": "number",
+      "default": 0.5
+    },
     "unbounded_rows": {
       "type": "integer",
       "default": 200

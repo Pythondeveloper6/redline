@@ -88,6 +88,46 @@ The overhead is the timer callback, a few microseconds every 5 ms per busy loop.
 | Litestar | Lag monitor (the app runs inside it while a request is recorded) |
 | Django on WSGI, Flask | No event loop to watch: not applicable |
 
+## Work on threads and pools
+
+Offloading work to a thread is the usual fix for blocking the loop, and it creates a new
+blind spot: a plain `threading.Thread` or `ThreadPoolExecutor` worker does not inherit the
+request's `contextvars`, so the queries and calls made there are recorded against no request
+and the time shows up as [unattributed](detectors.md#unattributed-time).
+
+```python
+from redline_core.contrib.threads import instrument_threads
+
+instrument_threads()      # once, at startup
+```
+
+From then on, when a request is being recorded, `ThreadPoolExecutor.submit` (and so `map` and
+`loop.run_in_executor`) and `Thread.start` run the work in a copy of the current context, as
+`contextvars.copy_context().run` would:
+
+- the spans stay **under the request**, with the span that was open at the call as parent;
+- each span recorded on another thread has the thread's name in `span.data["thread"]`
+  (`ThreadPoolExecutor-0_1`, or the `name=` you gave a `Thread`), so three queries run on a
+  three-worker pool show as three SQL spans with three distinct thread names;
+- spans from several threads can be recorded at once; the trace builder appends them under a
+  lock.
+
+`uninstrument_threads()` restores both methods; calling `instrument_threads()` twice is
+harmless. Outside a recorded request the wrappers do nothing. It is not enabled by
+`auto_instrument`, and `redline instrumentation` lists it as `threads`.
+
+Limits:
+
+- Work still running when the request finishes is **not** recorded. The trace is closed, so
+  later spans are dropped; they are not attached to a finished request and are not turned
+  into a separate job the way [background tasks](fastapi.md#in-process-background-tasks)
+  are. Wait for the futures before returning if you want them counted.
+- Only threads started *inside* a recorded request get its context. Long-lived pool workers
+  created earlier keep a clean context between tasks; each task gets its own copy.
+- Threads whose name starts with `redline` (the store's writer, the loop watchdog) are never
+  touched. `ProcessPoolExecutor` and `multiprocessing` are not covered: a child process has no
+  recorder.
+
 ## Limits
 
 - The lag monitor measures a loop that is *late*, which is the right signal but is not proof

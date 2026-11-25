@@ -9,8 +9,11 @@ variables, recording is correct wherever Python propagates context:
   request record into that request;
 * ``asgiref.sync_to_async``, ``loop.run_in_executor`` via ``contextvars.copy_context()``,
   and Starlette's threadpool all copy context into the worker thread;
-* a plain ``threading.Thread`` does **not** copy context, so work done there is not
-  attributed to any request (by design: it isn't part of the request).
+* a plain ``threading.Thread`` and a ``ThreadPoolExecutor`` worker do **not** copy context, so
+  work done there is not attributed to any request unless
+  :func:`redline_core.contrib.threads.instrument_threads` is on; spans it records on another
+  thread carry the thread's name in ``data["thread"]``. ``TraceBuilder.add`` is guarded by a
+  lock, so concurrent threads may record into one trace.
 
 When no trace is active every hook is one ``ContextVar.get()`` and a ``None`` check.
 
@@ -93,6 +96,9 @@ F = TypeVar("F", bound=Callable[..., Any])
 
 _trace: ContextVar[TraceBuilder | None] = ContextVar("redline_trace", default=None)
 _parent: ContextVar[str | None] = ContextVar("redline_span", default=None)
+#: Name of the worker thread when the code runs inside work started by
+#: ``instrument_threads()``; spans finished there carry it as ``data["thread"]``.
+_thread_label: ContextVar[str | None] = ContextVar("redline_thread", default=None)
 
 _perf = time.perf_counter
 _MAX_MANY_ROWS = 10  # executemany: keep the first N parameter rows
@@ -349,6 +355,9 @@ class TraceBuilder:
         spans are folded into per-(fingerprint, callsite) :class:`OverflowGroup`
         counters so query totals and N+1 detection stay exact.
         """
+        label = _thread_label.get()
+        if label is not None and "thread" not in span.data:
+            span.data["thread"] = label
         estimate = (
             len(json.dumps(span.data, ensure_ascii=True, separators=(",", ":")).encode())
             + len(span.name.encode())

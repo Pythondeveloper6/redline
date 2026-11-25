@@ -40,6 +40,12 @@ def test_status_reports_installed_loaded_and_instrumented_without_importing_prov
         "boto3",
         "anthropic",
         "openai",
+        "pymongo",
+        "kafka",
+        "pika",
+        "google_cloud_storage",
+        "azure_blob",
+        "threads",
     ]
     assert statuses[0] == {
         "name": "httpx",
@@ -96,3 +102,19 @@ def test_health_endpoint_includes_json_friendly_integration_status(store, monkey
     assert data["integrations"][0]["name"] == "httpx"
     assert "not instrumented" in data["warnings"][-1]
     assert "do not indicate whether calls were observed" in data["note"]
+
+
+def test_threads_status_follows_the_patch_and_is_never_a_warning():
+    from redline_core.contrib.threads import instrument_threads, uninstrument_threads
+
+    def entry():
+        return next(i for i in status_module.integration_status() if i["name"] == "threads")
+
+    uninstrument_threads()
+    try:
+        assert entry()["installed"] and not entry()["instrumented"]
+        assert status_module.integration_warnings([entry()]) == []
+        instrument_threads()
+        assert entry()["instrumented"]
+    finally:
+        uninstrument_threads()

@@ -24,6 +24,7 @@ __version__ = "0.5.0b1"
 
 from .conf import Settings, SettingsError
 from .detect import Detector, FixSuggester, GenericSuggester
+from .extending import client_span, instrument_client_method
 from .jobs import job, row_outcome, stage, tag
 from .model import Callsite, Frame, Issue, Span, Suggestion, Trace
 from .recorder import (
@@ -56,10 +57,12 @@ __all__ = [
     "Trace",
     "TraceBuilder",
     "__version__",
+    "client_span",
     "configure",
     "current",
     "finish_trace",
     "get_recorder",
+    "instrument_client_method",
     "job",
     "record_query",
     "record_span",

@@ -150,6 +150,29 @@ The project moves from alpha to beta.
   (settings `ai_diagnosis`, `ai_provider`, `ai_model`).
 - The FastAPI demo gains `GET /assistant` (LLM-call findings without a key or network), a
   `.mcp.json` and an `AGENTS.md`.
+- `instrument_client_method` and `client_span` (`redline_core`, `redline_core.extending`) record a
+  call to any client library as a span with client, operation, target, duration, payload size
+  and error class, so a database, queue or storage client without an integration is no longer
+  invisible. See [Extending](docs/extending.md#instrumenting-a-client).
+- First-party, opt-in integrations built on it: `instrument_pymongo()`, `instrument_kafka()`
+  (kafka-python `KafkaProducer.send`), `instrument_pika()` (`basic_publish`),
+  `instrument_google_cloud_storage()` and `instrument_azure_blob()`. Each imports its library
+  lazily, returns `False` when it is missing, never records payloads, object names or error
+  messages, and is covered by `auto_instrument` and `redline instrumentation`.
+- New finding `unattributed_time`: a Django, FastAPI, Flask or Litestar request with at least
+  `unattributed_time_ratio` (default 0.5) of its time, and at least `unattributed_time_ms`
+  (default 100), covered by no span. It names the profiler's project frame when the trace has a
+  profile. Wrapper spans (`view`, `middleware`, `transaction`) do not count as coverage; jobs and
+  traces with dropped spans are skipped.
+- Load runs: `api/runs/{id}/bottlenecks` gains an item of kind `other` (key `other:uncovered`)
+  with the per-request time no span covers, per step. Existing `sql` and `route` items are
+  unchanged.
+- `instrument_threads()` (opt-in, reversible with `uninstrument_threads()`, idempotent) copies the
+  request context into `ThreadPoolExecutor.submit` and `Thread.start` work. SQL and other spans
+  recorded on worker threads stay under the request and carry the thread name in
+  `span.data["thread"]`; spans from concurrent threads are recorded safely. Work that outlives
+  the request is not recorded. Listed as `threads` in `redline instrumentation`, never enabled by
+  `auto_instrument`.
 
 ### Changed
 

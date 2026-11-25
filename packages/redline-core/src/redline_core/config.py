@@ -147,6 +147,8 @@ GROUPS: dict[str, tuple[str, ...]] = {
         "orm_instances_threshold",
         "json_decode_ms",
         "cache_decode_ms",
+        "unattributed_time_ratio",
+        "unattributed_time_ms",
         "explain_analyze",
         "explain_url",
     ),

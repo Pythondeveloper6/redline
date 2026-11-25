@@ -72,6 +72,12 @@ _RULES: dict[str, tuple[str, str]] = {
         "A large Anthropic prompt was sent without reading from or writing to the prompt cache.",
         "One LLM call span with a large prompt and no cache tokens.",
     ),
+    "unattributed_time": (
+        "A large share of the request is covered by no recorded span, so redline cannot say "
+        "what it was spent on.",
+        "Time between spans in one trace for the route; wrapper spans (view, middleware, "
+        "transaction) do not count as coverage.",
+    ),
     "large_response": (
         "A response was larger than the configured byte limit.",
         "One response per trace for the route.",

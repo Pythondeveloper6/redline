@@ -682,7 +682,9 @@ A `Run`:
 }
 ```
 
-`kind` is `sql` or `route`. Items are sorted by `growth` (last step's mean over the first's),
+`kind` is `sql`, `route` or `other` (at most one item: the per-request time covered by no
+span, key `other:uncovered`, no callsite; clients that only know `sql` and `route` can skip
+it). Items are sorted by `growth` (last step's mean over the first's),
 top 50. It is `404 run_not_found` when there is neither the run nor a trace tagged with it.
 
 `POST api/runs` starts a run **against the app that serves the UI**:

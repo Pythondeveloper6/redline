@@ -44,6 +44,7 @@ from typing import TYPE_CHECKING, Any
 
 from redline_core.diagnostics import capture_failure
 
+from ..coverage import uncovered_ms
 from ..histogram import Histogram
 from ..model import Callsite, Issue, Trace
 from ..runs import Run, RunStep
@@ -1777,7 +1778,10 @@ class SQLStore(CheckStoreMixin):
         ``mean_ms`` is per execution (per request for routes), ``p95_ms`` the 95th percentile
         of each request's mean, ``count`` executions (requests). ``growth`` is the mean in the
         last step the item appears in over the mean in the first (the first floored at
-        0.01 ms). ``None`` when there is neither such a run nor any trace tagged with it.
+        0.01 ms). One extra item, ``kind="other"``, is the per-request time covered by no span
+        (:mod:`redline_core.coverage`), read from up to the run's 2000 latest requests; it is
+        omitted when every request is fully covered. ``None`` when there is neither such a run
+        nor any trace tagged with it.
         """
         steps_rows = self._query(
             "SELECT step, target_rps FROM run_steps WHERE run_id = ? ORDER BY step", (run_id,)
@@ -1811,6 +1815,20 @@ class SQLStore(CheckStoreMixin):
             key = ("route", f"{r[1]} {r[2]}")
             labels[key] = key[1]
             _add_sample(acc[key], step, 1, float(r[3]), r[4])
+        other = ("other", "uncovered")
+        for r in self._query(
+            "SELECT s.value, t.duration_ms, t.body, t.id "
+            + tagged.format(join="JOIN traces t ON t.id = r.trace_id")
+            + " ORDER BY t.started_at DESC LIMIT ?",
+            (run_id, _OTHER_SAMPLE),
+        ):
+            step = _int_or_none(r[0])
+            gap = _uncovered_from_body(r[2], float(r[1]))
+            if step is not None and gap is not None:
+                _add_sample(acc[other], step, 1, gap, r[3])
+        if other in acc and not any(g[1] > 0 for g in acc[other].values()):
+            del acc[other]  # every request was fully covered: no row
+        labels[other] = "Other (time not covered by any span)"
         if not steps_rows and not acc:
             if not self._query("SELECT 1 FROM runs WHERE id = ?", (run_id,)):
                 return None
@@ -2374,6 +2392,23 @@ def _int_or_none(value: Any) -> int | None:
     try:
         return int(value)
     except (TypeError, ValueError):
+        return None
+
+
+#: At most this many of a run's most recent requests are read to compute the ``other`` row
+#: (it needs each request's spans, which are only stored in the trace body).
+_OTHER_SAMPLE = 2000
+
+
+def _uncovered_from_body(body: Any, duration_ms: float) -> float | None:
+    """Milliseconds of the request covered by no span, from a stored trace body."""
+    try:
+        spans = json.loads(body).get("spans", [])
+        return uncovered_ms(
+            ((s["kind"], float(s["start_ms"]), float(s["duration_ms"])) for s in spans),
+            duration_ms,
+        )
+    except (ValueError, KeyError, TypeError, AttributeError):
         return None
 
 

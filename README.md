@@ -222,7 +222,9 @@ Detailed APIs, support boundaries and UI paths are in [Real-world workflows](doc
 | Runtime engines | `engines="auto"` captures SQLAlchemy engines created per user or per request; stored procedures (`EXEC`, `CALL`) are their own query kind, and session housekeeping (`sp_set_session_context`, `SET ...`) is ignored by default (`ignore_sql`) |
 | Grouping | Flask requests carry their blueprint; `api/endpoints?group_by=blueprint` and `flask redline endpoints --group-by blueprint` aggregate per blueprint |
 | Jobs | RQ, Dramatiq and FastAPI/Starlette background tasks are recorded as jobs linked to the request that queued them |
-| Coverage | `auto_instrument` (`off`/`warn`/`on`) warns about, or instruments, installed httpx/requests/Redis/boto3 |
+| Coverage | `auto_instrument` (`off`/`warn`/`on`) warns about, or instruments, installed httpx/requests/Redis/boto3 and, when present, pymongo, kafka-python, pika, Google Cloud Storage and Azure Blob clients; `instrument_client_method` makes any other client visible |
+| Threads and pools | `instrument_threads()` copies the request context into `Thread` and `ThreadPoolExecutor` work, so queries run on worker threads stay under the request, labelled with the thread name |
+| Unattributed time | `unattributed_time` flags web requests spending most of their time where no span is recorded, naming the profiled callsite; load runs show it as an `other` bottleneck row |
 | Static analysis | More dynamic SQL resolved, unresolved inputs reported by reason, and a precision harness to measure the false-positive rate on your own code |
 | Sharing and alerts | `redline export ID --html` writes one redacted, self-contained page; `redline digest` posts new issues to a webhook; `api/metrics` exposes recorder health for Prometheus; `redline_trace_id` links logs, Sentry events and OTLP spans to a recording |
 | Release checks | Live MySQL qualification (pymysql, aiomysql, asyncmy) in CI; fresh-venv install and old-store upgrade checks against published releases |

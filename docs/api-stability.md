@@ -34,7 +34,7 @@ with `_`, and any module not listed here, even if it is importable.
 
 | Surface | Public names |
 |---|---|
-| `redline_core` | everything in `redline_core.__all__`: `configure`, `get_recorder`, `Recorder`, `Settings`, `SettingsError`, `span`, `record_span`, `record_query`, `tag`, `job`, `stage`, `row_outcome`, `start_trace`, `finish_trace`, `current`, the model types (`Trace`, `Span`, `SpanContext`, `TraceBuilder`, `Issue`, `Suggestion`, `Callsite`, `Frame`) and the extension points `Detector`, `FixSuggester`, `GenericSuggester` |
+| `redline_core` | everything in `redline_core.__all__`: `configure`, `get_recorder`, `Recorder`, `Settings`, `SettingsError`, `span`, `record_span`, `record_query`, `tag`, `job`, `stage`, `row_outcome`, `start_trace`, `finish_trace`, `current`, the model types (`Trace`, `Span`, `SpanContext`, `TraceBuilder`, `Issue`, `Suggestion`, `Callsite`, `Frame`) and the extension points `Detector`, `FixSuggester`, `GenericSuggester` and the client helpers `instrument_client_method`, `client_span` |
 | `redline_core.testing` | the pytest helpers documented in [Performance workflows](performance-workflows.md) |
 | `redline_core.contrib.*` | the `instrument_*` / `uninstrument_*` functions of each integration documented in [Integrations](integrations.md) |
 | `redline_core.storage` | `SQLiteStore` construction from a path and the `Store` protocol for custom stores ([Storage](storage.md)); the SQL schema itself is internal |

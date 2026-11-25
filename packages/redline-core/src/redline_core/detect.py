@@ -177,6 +177,12 @@ _GENERIC_V02: dict[str, tuple[str, str]] = {
         "Call the service once per request and reuse the response, or cache it.",
         "low",
     ),
+    "unattributed_time": (
+        "Find what runs between the spans (open the flamegraph if the trace has a profile). "
+        "Wrap an uninstrumented client with redline_core.instrument_client_method, or add a "
+        "span() around the code, so the time is named.",
+        "low",
+    ),
     "retry_storm": (
         "Cap retries, add exponential backoff with jitter, and use a circuit breaker so a "
         "failing service cannot multiply your latency.",
