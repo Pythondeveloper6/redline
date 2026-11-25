@@ -155,7 +155,25 @@ export type RunStatus = 'running' | 'done' | 'stopped' | 'failed'
 export interface RunSummary {
   knee_step: number | null; max_ok_rps: number | null; verdict: string | null; verdict_detail?: string | null; knee_reason?: string | null
   sent?: number; ok?: number; errors?: number; dropped?: number; error_rate?: number; p50_ms?: number; p95_ms?: number; p99_ms?: number; max_ms?: number
+  ttfb_p50_ms?: number; ttfb_p95_ms?: number
+  limiting_resource?: LimitingResource; resources?: StepMetrics[]
+  recovery?: RecoveryInfo[]; drift?: DriftInfo[]; drift_verdict?: string
+  flows?: Record<string, FlowStats>; identities?: { count: number; requests: number; by_name?: Record<string, number>; min?: number; max?: number }
+  streams?: PeakInfo; websockets?: PeakInfo; sessions?: PeakInfo
+  generator?: { max_cpu_pct: number; limited_steps: number[] }; metric_source_errors?: string[]
 }
+export interface MetricStat { avg: number; max: number }
+export interface StepMetrics { step: number; samples: number; workers: number; metrics: Record<string, MetricStat> }
+export interface LimitingResource { resource: string; step: number; detail: string; note?: string }
+export interface RunMetrics { id: string; steps: StepMetrics[]; limiting_resource: LimitingResource | null }
+export interface RecoveryInfo { step: number; target_rps: number; baseline_step: number; baseline_p95_ms: number; peak_p95_ms: number; recovered_after_s: number | null; seconds_observed: number }
+export interface DriftInfo { step: number; target_rps: number; duration_s: number; first_third_p95_ms: number; last_third_p95_ms: number; p95_slope_ms_per_min: number; error_rate_slope_per_min: number; verdict: string }
+export interface FlowStepStats { step: number; name: string; count: number; errors: number; p50_ms: number; p95_ms: number }
+export interface FlowStats { count: number; errors: number; error_rate: number; p50_ms: number; p95_ms: number; p99_ms: number; error_breakdown: Record<string, number>; steps: FlowStepStats[] }
+export interface PeakInfo { count?: number; max_open: number; events?: number; messages?: number; by_step?: Record<string, Record<string, number>> }
+export interface PageStat { page: string; requests: number; total_ms: number; queries: number; slowest: { route: string | null; ms: number } | null }
+export interface DbCapability { status: 'granted' | 'missing' | 'unknown'; detail: string; grant: string | null }
+export interface DbCapabilities { db: string; supported: boolean; vendor?: string | null; principal?: string | null; managed?: boolean | null; capabilities: Record<string, DbCapability>; message?: string }
 export interface RunConfig { requests?: { method: string; path: string; weight?: number; name?: string }[]; profile?: Record<string, any>; [k: string]: any }
 export interface RunItem {
   id: string; name: string; status: RunStatus | string; config?: RunConfig; created_at: number; finished_at: number | null
@@ -178,9 +196,9 @@ export interface SqlStat {
 }
 export interface IndexCandidate {
   table: string; columns: string[]; create_sql: string; covers: string[]; queries: number; total_ms: number
-  est_saving_ms: number; vendor: string; kind?: string; confidence?: string; verified?: boolean
+  est_saving_ms: number; vendor: string; kind?: string; confidence?: string; verified?: boolean; evidence?: string[]
 }
-export interface UnusedIndex { table: string; index: string; scans: number | null; size_bytes: number | null; drop_sql?: string }
+export interface UnusedIndex { table: string; index: string; scans: number | null; size_bytes: number | null; drop_sql?: string; confidence?: string; evidence?: string[] }
 export interface IndexAdvice { candidates: IndexCandidate[]; unused: UnusedIndex[]; unused_supported: boolean }
 export interface CacheStat {
   backend: string; key_pattern: string; gets: number; hits: number; misses: number; hit_rate: number | null

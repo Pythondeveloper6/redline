@@ -7,6 +7,7 @@ import { useNow } from '../lib/hooks'
 import { feature, isReadOnly } from '../lib/meta'
 import type { Bottleneck, RunItem } from '../types'
 import NewRunForm, { CliHint } from '../components/NewRunForm'
+import RunInsights, { ResourceChart } from '../components/RunInsights'
 import RunChart from '../components/RunChart'
 import Sparkline from '../components/Sparkline'
 import { LoadError } from '../components/Unsupported'
@@ -105,9 +106,10 @@ function RunDetail({ id }: { id: string }) {
   const feat = useLoadFromUi()
   const d = useAsync(() => apiLoad.run(id), [id])
   const bn = useAsync(() => apiLoad.bottlenecks(id), [id])
+  const mx = useAsync(() => apiLoad.metrics(id).catch(() => null), [id])
   const run = d.data
   const running = run?.status === 'running'
-  usePolling(() => { d.reload(); bn.reload() }, !!running)
+  usePolling(() => { d.reload(); bn.reload(); mx.reload() }, !!running)
   const [confirm, setConfirm] = useState(false)
   const [busy, setBusy] = useState(false)
   const [actErr, setActErr] = useState<string | null>(null)
@@ -141,7 +143,10 @@ function RunDetail({ id }: { id: string }) {
 
       <section className="card p-3 sm:p-4" aria-label="Steps chart">
         {steps.length === 0 ? <Empty title={running ? 'Waiting for the first step…' : 'No steps recorded'} /> : <RunChart steps={steps} knee={knee} />}
+        {steps.length > 0 && mx.data && mx.data.steps.length > 0 && <div className="mt-2 border-t border-line pt-2"><ResourceChart steps={steps} metrics={mx.data.steps} /></div>}
       </section>
+
+      <RunInsights summary={run.summary} metrics={mx.data} />
 
       {steps.length > 0 && (
         <section className="card overflow-x-auto" aria-label="Steps table">
