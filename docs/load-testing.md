@@ -270,6 +270,9 @@ stop_on = { error_rate = 0.05, p95_ms = 2000 }
 | `max_inflight` | `1000` | In-flight cap per worker; arrivals beyond it are counted `dropped` |
 | `seed` | random | Integer seed for placeholders and request choice, for repeatable runs |
 | `ui_url` | config `mount_path`, else `/_redline` | Where the Redline UI is mounted (path on `base_url`'s host, or a full URL); only used for the printed link |
+| `identities`, `identities_file`, `identity_mode` | none | Many users instead of one: see [Identities](#identities) |
+| `data` | none | CSV / JSON Lines files that fill `{data:source.column}`: see [Data feeds](#data-feeds) |
+| `auth` | none | A token provider refreshed during the run: see [Token refresh](#token-refresh) |
 
 Durations accept a number of seconds or strings such as `"20s"`, `"2m"`.
 
@@ -296,8 +299,86 @@ Rendered separately for every request:
 | `{random_choice:a\|b\|c}` | one of the listed values |
 | `{uuid}` | a fresh random UUID (32 hex digits, no dashes) |
 
+| `{data:source.column}` | a value from a [data feed](#data-feeds); also works in headers, JSON and raw bodies |
+
 Any other `{...}` in a path is an **error**, so an OpenAPI path such as `/orders/{id}` can
 never be sent by accident.
+
+### Identities
+
+One set of credentials makes the app see one user thousands of times: per-user caches stay
+warm and row-level filters always pick the same rows. Give the run many users:
+
+```toml
+identity_mode = "round_robin"      # or "random" (seeded) or "sticky"
+identities_file = "users.csv"      # name, header:X-Api-Key, cookie:session ...
+
+[[identities]]
+name = "alice"
+headers = { Authorization = "Bearer ${ALICE_TOKEN}" }   # ${VAR} reads the environment
+cookies = { sid = "${ALICE_SID}" }
+```
+
+Inline identities come first, then the file's. CSV columns are `name`, `header:<Header-Name>`
+and `cookie:<name>`; a `.jsonl` file holds `{"name", "headers", "cookies"}` objects. A missing
+environment variable fails the run before any request, naming the variable. Header order:
+scenario `headers`, then the identity's, then the request's own.
+
+`round_robin` cycles through every identity (all workers together visit them in order),
+`random` picks with the scenario `seed`, and `sticky` gives each worker process one fixed
+identity (one virtual user per process).
+
+Only the identity **name** is ever recorded: as the `identity` tag on the app's traces
+(filter with `tag=identity:alice`), and as per-identity request counts in the run summary.
+Header and cookie values are masked in the stored run config.
+
+### Data feeds
+
+Uniform random identifiers hit rows that do not exist and hit every real row equally, so
+the page cache and query plans behave nothing like production.
+
+```toml
+[[data]]
+name = "orders"
+file = "orders.csv"      # CSV with a header row, or .jsonl
+pick = "zipf"            # "sequential", "random" or "zipf" (first rows hottest)
+zipf_s = 1.1             # skew for zipf
+
+[[requests]]
+path = "/orders/{data:orders.id}"
+json = { sku = "{data:orders.sku}" }
+```
+
+Relative files resolve against the scenario file. Every reference to one source in a request
+uses the same row. A missing file or column fails the run before any request. `zipf` and
+`random` follow the scenario `seed`. `redline load init --from-traces --data-dir DIR` writes
+the distinct paths seen per endpoint as such files, most used first, instead of one sample
+path per endpoint.
+
+### Token refresh
+
+Short-lived tokens expire mid-run and every request then fails with 401, which looks like a
+knee. An `auth` block gets a token before the run and refreshes it before it expires, outside
+the latency numbers:
+
+```toml
+[auth]
+provider = "request"                 # "command", "request" or "python"
+request = { method = "POST", path = "/login", json = { user = "load", password = "${LOAD_PW}" } }
+extract = "data.access_token"        # dotted path into the JSON response
+expires_extract = "data.expires_in"  # lifetime in seconds (or set ttl_s)
+refresh_before_s = 30
+```
+
+`command = ["get-token", "--env", "perf"]` runs a program (no shell) and reads its output;
+`callable = "package.module:function"` calls a Python function returning the token or
+`(token, ttl_s)`. The token goes in `Authorization: Bearer ...` (`header` and `prefix` change
+that). Each worker refreshes on its own; refresh calls are never counted in the histograms.
+If a refresh fails twice, the run stops with an error instead of reporting 401s as server
+errors. The stored config masks command arguments and request credentials.
+
+`auth`, `identities`, `identities_file` and `data` can run a program or read a file, so they
+are accepted only from a scenario file, never from the UI or `POST api/runs`.
 
 ### Authentication
 
@@ -511,6 +592,8 @@ starting point and edit it.
 | `--window 24h` | how far back to look |
 | `--top 10` | endpoints to keep |
 | `--include-writes` | also include POST/PUT/PATCH/DELETE (written with `weight = 0`) |
+| `--data-dir DIR` | with `--from-traces`: write each endpoint's distinct paths as CSV here and use them as `zipf` data sources |
+| `--identities-file FILE`, `--identity-mode MODE` | add `identities_file` and `identity_mode` to the scenario |
 | `--base-url URL` | set `base_url` |
 | `-o, --out PATH` | output file; `.toml` or `.json`; `-` prints to stdout (default `scenario.toml`) |
 | `--force` | overwrite an existing file |

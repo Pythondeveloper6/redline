@@ -46,12 +46,20 @@ import re
 import runpy
 import sys
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from .profile import Profile, ScenarioError, _unknown, parse_duration, parse_profile
+from .variation import (
+    AuthSpec,
+    DataSource,
+    data_refs,
+    parse_auth,
+    parse_data_sources,
+    parse_identities,
+)
 
 __all__ = [
     "METHODS",
@@ -84,6 +92,11 @@ _SCENARIO_KEYS = {
     "max_inflight",
     "seed",
     "ui_url",
+    "identities",
+    "identities_file",
+    "identity_mode",
+    "data",
+    "auth",
 }
 _REQUEST_KEYS = {"name", "method", "path", "weight", "headers", "json", "body", "expect_status"}
 
@@ -139,6 +152,14 @@ class Scenario:
     ui_url: str | None = None
     source: str | None = None
     extra: dict[str, Any] = field(default_factory=dict)  # private ``_keys``, kept verbatim
+    #: Named header/cookie sets picked per request (see :mod:`redline_core.load.variation`).
+    identities: tuple[dict[str, Any], ...] = ()
+    identities_file: str | None = None
+    identity_mode: str = "round_robin"
+    #: CSV / JSON Lines files filling ``{data:source.column}``.
+    data: tuple[DataSource, ...] = ()
+    auth: AuthSpec | None = None
+    base_dir: str | None = None  # relative file paths resolve against this
 
     def replace(self, **changes: Any) -> Scenario:
         from dataclasses import replace
@@ -162,6 +183,16 @@ class Scenario:
             out["seed"] = self.seed
         if self.ui_url is not None:
             out["ui_url"] = self.ui_url
+        if self.identities:
+            out["identities"] = [dict(i) for i in self.identities]
+        if self.identities_file:
+            out["identities_file"] = self.identities_file
+        if self.identities or self.identities_file:
+            out["identity_mode"] = self.identity_mode
+        if self.data:
+            out["data"] = [d.to_dict() for d in self.data]
+        if self.auth is not None:
+            out["auth"] = self.auth.to_dict()
         return out
 
 
@@ -238,12 +269,17 @@ def parse_scenario(
         else DEFAULT_TIMEOUT_S
     )
 
+    base_dir = str(Path(source).resolve().parent) if source and Path(source).is_file() else None
+    identities, identities_file, identity_mode = parse_identities(data)
+    sources = parse_data_sources(data.get("data"), base_dir)
+    auth = parse_auth(data.get("auth"))
+
     raw_requests = data.get("requests")
     if raw_requests is None:
         raise ScenarioError("is required: a list of requests to send", "requests")
     if not isinstance(raw_requests, (list, tuple)) or not raw_requests:
         raise ScenarioError("must be a non-empty list", "requests")
-    requests = tuple(_request(r, i) for i, r in enumerate(raw_requests))
+    requests = tuple(_request(r, i, {d.name for d in sources}) for i, r in enumerate(raw_requests))
     if not any(r.weight > 0 for r in requests):
         raise ScenarioError("at least one request needs a weight > 0", "requests")
 
@@ -278,6 +314,12 @@ def parse_scenario(
         ui_url=ui_url,
         source=source,
         extra=extra,
+        identities=identities,
+        identities_file=identities_file,
+        identity_mode=identity_mode,
+        data=sources,
+        auth=auth,
+        base_dir=base_dir,
     )
 
 
@@ -323,7 +365,7 @@ def _headers(value: Any, path: str) -> dict[str, str]:
     return out
 
 
-def _request(raw: Any, index: int) -> RequestSpec:
+def _request(raw: Any, index: int, sources: set[str] | None = None) -> RequestSpec:
     path = f"requests[{index}]"
     if not isinstance(raw, Mapping):
         raise ScenarioError("must be a table/object with at least a path", path)
@@ -331,8 +373,15 @@ def _request(raw: Any, index: int) -> RequestSpec:
     url_path = raw.get("path")
     if not isinstance(url_path, str) or not url_path.startswith("/"):
         raise ScenarioError(f"must be a path starting with '/' (got {url_path!r})", f"{path}.path")
+    known = sources or set()
+
+    def declared(source: str, column: str) -> str:
+        if source not in known:
+            raise ValueError(f"unknown data source {source!r}; declare it under [[data]]")
+        return "x"
+
     try:
-        render_path(url_path, random.Random(0))
+        render_path(url_path, random.Random(0), declared)
     except ValueError as exc:
         raise ScenarioError(str(exc), f"{path}.path") from None
     method = raw.get("method", "GET")
@@ -367,6 +416,12 @@ def _request(raw: Any, index: int) -> RequestSpec:
                 f"{path}.expect_status",
             )
         expect_t = tuple(items)
+    for where, text in _strings_of(raw):
+        for source, _ in data_refs(text):
+            if source not in known:
+                raise ScenarioError(
+                    f"unknown data source {source!r}; declare it under [[data]]", f"{path}.{where}"
+                )
     name = raw.get("name") or f"{method} {url_path}"
     if not isinstance(name, str):
         raise ScenarioError(f"must be a string (got {name!r})", f"{path}.name")
@@ -383,9 +438,32 @@ def _request(raw: Any, index: int) -> RequestSpec:
     )
 
 
+def _strings_of(raw: Mapping[str, Any]) -> list[tuple[str, str]]:
+    """The strings of a request that may hold ``{data:...}`` (headers, json, body)."""
+    out: list[tuple[str, str]] = []
+
+    def walk(value: Any, where: str) -> None:
+        if isinstance(value, str):
+            out.append((where, value))
+        elif isinstance(value, Mapping):
+            for k, v in value.items():
+                walk(v, f"{where}.{k}")
+        elif isinstance(value, (list, tuple)):
+            for i, v in enumerate(value):
+                walk(v, f"{where}[{i}]")
+
+    for key in ("headers", "json", "body"):
+        if raw.get(key) is not None:
+            walk(raw[key], key)
+    return out
+
+
 # ---------------------------------------------------------------------------- placeholders
-def render_path(path: str, rng: random.Random) -> str:
-    """Expand ``{random_int:A:B}``, ``{random_choice:a|b}`` and ``{uuid}``.
+def render_path(
+    path: str, rng: random.Random, data: Callable[[str, str], str] | None = None
+) -> str:
+    """Expand ``{random_int:A:B}``, ``{random_choice:a|b}``, ``{uuid}`` and, with a ``data``
+    lookup, ``{data:source.column}``.
 
     Raises ``ValueError`` for anything else in braces.
     """
@@ -394,6 +472,11 @@ def render_path(path: str, rng: random.Random) -> str:
 
     def sub(m: re.Match[str]) -> str:
         token = m.group(1).strip()
+        if token.startswith("data:"):
+            ref = re.fullmatch(r"data:([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)", token)
+            if ref is None or data is None:
+                raise ValueError(f"bad placeholder {{{token}}}; use {{data:source.column}}")
+            return data(ref.group(1), ref.group(2))
         if token == "uuid":
             return uuid.UUID(int=rng.getrandbits(128), version=4).hex
         im = _RANDOM_INT.match(token)

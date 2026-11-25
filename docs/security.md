@@ -293,6 +293,14 @@ load_disabled`). When on, its safety rests on these rules:
 3. It is a real load: a user who may start runs can make your instance slow. Enable it only
    in environments where that is acceptable, and not in production.
 
+### Identities, data files and token commands
+
+A scenario file may name identities, data files and a token provider (a command, a request or
+a Python callable). These can run a program or read a file, so they are accepted **only from a
+scenario file** you run yourself, never from the UI or `POST api/runs` (`400`). The token
+command runs without a shell. Identity and token values are masked in the stored run config;
+only the identity name reaches the app (as the `identity` trace tag) and the run summary.
+
 ### Registering runs over HTTP
 
 `accept_remote_runs` lets a load generator on another host register its run

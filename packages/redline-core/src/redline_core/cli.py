@@ -566,6 +566,22 @@ def _configure_init(p: argparse.ArgumentParser) -> None:
     p.add_argument("--top", type=int, default=10, help="endpoints to keep (--from-traces)")
     p.add_argument("--include-writes", action="store_true", help="also POST/PUT/PATCH/DELETE")
     p.add_argument("--base-url", metavar="URL")
+    p.add_argument(
+        "--data-dir",
+        metavar="DIR",
+        help="with --from-traces: write the distinct paths seen per endpoint as CSV files "
+        "here and use them as zipf data sources instead of one sample path",
+    )
+    p.add_argument(
+        "--identities-file",
+        metavar="FILE",
+        help="add identities_file to the scenario (CSV: name, header:<Name>, cookie:<name>)",
+    )
+    p.add_argument(
+        "--identity-mode",
+        choices=("round_robin", "random", "sticky"),
+        help="with --identities-file: how identities are picked (default round_robin)",
+    )
     p.add_argument("-o", "--out", default="scenario.toml", help="output (.toml/.json, - = stdout)")
     p.add_argument("--force", action="store_true", help="overwrite an existing file")
 
@@ -594,9 +610,24 @@ def _cmd_init(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
                     top=args.top,
                     include_writes=args.include_writes,
                     base_url=args.base_url,
+                    data_dir=args.data_dir,
+                    # the scenario names its data files relative to where the scenario is
+                    data_ref_dir=(
+                        os.path.relpath(args.data_dir, os.path.dirname(os.path.abspath(args.out)))
+                        if args.data_dir and args.out != "-"
+                        else args.data_dir
+                    ),
                 )
             finally:
                 store.close()
+        if args.data_dir and not args.from_traces:
+            raise ValueError("--data-dir needs --from-traces")
+        if args.identities_file:
+            data["identities_file"] = args.identities_file
+            if args.identity_mode:
+                data["identity_mode"] = args.identity_mode
+        elif args.identity_mode:
+            raise ValueError("--identity-mode needs --identities-file")
         parse_scenario(data)  # never write a scenario we could not run
     except Exception as exc:
         err.write(f"redline load init: {exc}\n")

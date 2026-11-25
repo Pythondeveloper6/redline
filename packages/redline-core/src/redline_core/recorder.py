@@ -1485,8 +1485,11 @@ def _apply_run_header(builder: TraceBuilder, headers: Any) -> None:
             k2, _, v2 = part.partition("=")
             if k2.strip() == "step" and v2.strip():
                 builder.tags["step"] = v2.strip()[:16]
+            elif k2.strip() == "identity" and _IDENTITY_TAG.fullmatch(v2.strip()):
+                builder.tags["identity"] = v2.strip()
 
 
+_IDENTITY_TAG = re.compile(r"[A-Za-z0-9_.@-]{1,64}")
 _CHECK_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
 _CHECK_NUM = re.compile(r"-?[0-9]{1,9}")
 

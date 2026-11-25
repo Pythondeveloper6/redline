@@ -1423,6 +1423,27 @@
             },
             {
               "name": [
+                "--data-dir"
+              ],
+              "required": false,
+              "help": "with --from-traces: write the distinct paths seen per endpoint as CSV files here and use them as zipf data sources instead of one sample path"
+            },
+            {
+              "name": [
+                "--identities-file"
+              ],
+              "required": false,
+              "help": "add identities_file to the scenario (CSV: name, header:<Name>, cookie:<name>)"
+            },
+            {
+              "name": [
+                "--identity-mode"
+              ],
+              "required": false,
+              "help": "with --identities-file: how identities are picked (default round_robin)"
+            },
+            {
+              "name": [
                 "-o",
                 "--out"
               ],

@@ -185,6 +185,7 @@ def run(
     if importlib.util.find_spec("httpx") is None:
         raise RuntimeError("the load tester needs httpx: pip install 'redline-core[load]'")
 
+    _preflight(sc)
     plans = prof.plan()
     n_workers = workers or sc.workers or default_workers()
     n_workers = max(1, min(n_workers, math.ceil(prof.max_rps)))
@@ -225,6 +226,8 @@ def run(
     status, message = engine.execute()
     steps = engine.finished_steps
     summary = analyze(steps)
+    if engine.identity_counts:
+        summary["identities"] = _identity_summary(engine.identity_counts)
     if engine.stopped_reason:
         summary["stopped_reason"] = engine.stopped_reason
     if message:
@@ -242,6 +245,36 @@ def run(
         summary=summary,
         message=message,
     )
+
+
+def _identity_summary(counts: Counter[str]) -> dict[str, Any]:
+    """Requests per identity (names only, never header or cookie values)."""
+    out: dict[str, Any] = {"count": len(counts), "requests": sum(counts.values())}
+    if len(counts) <= 200:
+        out["by_name"] = dict(sorted(counts.items()))
+    else:
+        values = sorted(counts.values())
+        out["min"], out["max"] = values[0], values[-1]
+    return out
+
+
+def _preflight(sc: Scenario) -> None:
+    """Resolve identities and data files in the parent, so a missing file, environment
+    variable or column fails the run before any worker starts."""
+    from .scenario import _strings_of
+    from .variation import DataFeed, data_refs, load_identities
+
+    if sc.identities or sc.identities_file:
+        load_identities(sc.identities, sc.identities_file, sc.base_dir)
+    if sc.data:
+        feed = DataFeed(sc.data, 0, 1)
+        for r in sc.requests:
+            refs = data_refs(r.path)
+            for _, text in _strings_of(
+                {"headers": r.headers, "json": r.json if r.has_json else None, "body": r.body}
+            ):
+                refs += data_refs(text)
+            feed.check_columns(refs)
 
 
 class _Engine:
@@ -267,6 +300,7 @@ class _Engine:
         self.seconds: list[dict[str, Any]] = []
         self.window = _Window()
         self.stopped_reason: str | None = None
+        self.identity_counts: Counter[str] = Counter()
         self.start_epoch = 0.0
         self.exited: set[int] = set()
         self.errors: dict[int, str] = {}
@@ -300,6 +334,12 @@ class _Engine:
             ],
             "steps": [(p.index, p.target_rps, p.start_s, p.duration_s) for p in self.plans],
             "_crash_after_s": sc.extra.get("_crash_after_s"),
+            "identities": [dict(i) for i in sc.identities],
+            "identities_file": sc.identities_file,
+            "identity_mode": sc.identity_mode,
+            "data": [d.to_dict() for d in sc.data],
+            "auth": sc.auth.to_dict() if sc.auth else None,
+            "base_dir": sc.base_dir,
         }
 
     # ------------------------------------------------------------------ lifecycle
@@ -441,6 +481,8 @@ class _Engine:
                 if agg is not None:
                     agg.add(m)
                 self.window.add(m)
+                if m.get("identities"):
+                    self.identity_counts.update(m["identities"])
         elif kind == "step_done":
             agg = self.aggs.get(msg["step"])
             if agg is not None:

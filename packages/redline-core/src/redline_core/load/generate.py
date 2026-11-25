@@ -292,9 +292,19 @@ def from_traces(
     include_writes: bool = False,
     base_url: str | None = None,
     mount_prefix: str = "/_redline",
+    data_dir: str | None = None,
+    data_ref_dir: str | None = None,
 ) -> dict[str, Any]:
-    """Build a scenario from captured traffic (``store.endpoints`` + ``store.list``)."""
+    """Build a scenario from captured traffic (``store.endpoints`` + ``store.list``).
+
+    With ``data_dir`` every endpoint that was seen with at least two distinct paths gets a
+    CSV there (most used first) and a ``zipf`` ``[[data]]`` source, and its request becomes
+    ``/{data:<source>.path}``, so the run repeats the real mix of identifiers instead of one
+    sample path. ``data_ref_dir`` is how the scenario names that directory.
+    """
     from ..storage import Filters
+
+    data_sources: list[dict[str, Any]] = []
 
     requests: list[dict[str, Any]] = []
     stats = sorted(store.endpoints(window_s), key=lambda e: e.count, reverse=True)
@@ -324,11 +334,21 @@ def from_traces(
         )
         if sample is None:
             continue
+        path = sample
+        if data_dir and not write:
+            seen = _distinct_paths(store, route, method, sample)
+            if len(seen) >= 2:
+                source = f"ep{len(data_sources) + 1}"
+                file_name = f"{source}.csv"
+                _write_paths_csv(Path(data_dir) / file_name, seen)
+                ref = (data_ref_dir or data_dir).rstrip("/\\")
+                data_sources.append({"name": source, "file": f"{ref}/{file_name}", "pick": "zipf"})
+                path = "/{data:" + source + ".path}"
         requests.append(
             {
                 "name": f"{method} {route}",
                 "method": method,
-                "path": sample,
+                "path": path,
                 "weight": 0 if write else int(ep.count),
             }
         )
@@ -336,13 +356,51 @@ def from_traces(
         raise ValueError("no captured endpoints in the window; browse the app first")
     if not any(r["weight"] > 0 for r in requests):
         requests[0]["weight"] = 1
-    return {
+    out: dict[str, Any] = {
         "name": "captured traffic",
         "base_url": base_url or DEFAULT_BASE_URL,
         "timeout_s": 10,
         "requests": requests,
         "profile": dict(DEFAULT_PROFILE),
     }
+    if data_sources:
+        out["data"] = data_sources
+    return out
+
+
+_PATH_SAMPLE_LIMIT = 500
+
+
+def _distinct_paths(store: Any, route: str, method: str, first: str) -> list[str]:
+    """Concrete paths seen for one endpoint, most used first (``first`` guaranteed in)."""
+    from collections import Counter
+
+    from ..storage import Filters
+
+    page = store.list(Filters(route=route, method=method), limit=_PATH_SAMPLE_LIMIT)
+    counts: Counter[str] = Counter(
+        item["path"]
+        for item in page.items
+        if isinstance(item.get("path"), str)
+        and item["path"].startswith("/")
+        and "redacted" not in item["path"].lower()
+        and "{" not in item["path"]
+        and "}" not in item["path"]
+    )
+    counts.setdefault(first, 1)
+    return [p for p, _ in counts.most_common()]
+
+
+def _write_paths_csv(path: Path, paths: list[str]) -> None:
+    """One ``path`` column; values lose their leading ``/`` (the request keeps its own)."""
+    import csv
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(["path"])
+        for p in paths:
+            writer.writerow([p[1:]])
 
 
 # ---------------------------------------------------------------------------- routes
@@ -445,7 +503,7 @@ def to_toml(scenario: Mapping[str, Any]) -> str:
     for key, value in scenario.items():
         if value is None:
             continue
-        if key in ("requests", "profile"):
+        if key in ("requests", "profile", "data", "identities"):
             tables[key] = value
             continue
         lines.append(f"{_toml_key(key)} = {_toml_value(value)}")
@@ -454,6 +512,12 @@ def to_toml(scenario: Mapping[str, Any]) -> str:
         for key, value in req.items():
             if value is not None:
                 lines.append(f"{_toml_key(key)} = {_toml_value(value)}")
+    for table in ("data", "identities"):
+        for item in tables.get(table, []):
+            lines += ["", f"[[{table}]]"]
+            for key, value in item.items():
+                if value is not None:
+                    lines.append(f"{_toml_key(key)} = {_toml_value(value)}")
     if "profile" in tables:
         lines += ["", "[profile]"]
         for key, value in tables["profile"].items():

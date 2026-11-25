@@ -12,6 +12,13 @@ version is below `1.0` the public API may change between minor versions.
 
 ### Added
 
+- Load scenarios can vary the offered load. `identities` / `identities_file` give many users
+  (`round_robin`, `random` or `sticky`, `${VAR}` for secrets, only the name is recorded as the
+  `identity` trace tag and in the run summary); `[[data]]` files fill `{data:source.column}`
+  in paths, headers and bodies (`sequential`, `random` or `zipf`); `[auth]` gets a token from a
+  command, a request or a Python callable and refreshes it before it expires, stopping the run
+  with a clear error when a refresh fails. Every key is optional, so existing scenarios run
+  unchanged, and `redline load init` writes them (`--data-dir`, `--identities-file`).
 - `redline load --store-url postgresql://...` writes the run to the shared PostgreSQL store,
   and the project's `storage_url` setting is used when `--store` is not given, so a load
   generator on another host fills the same bottleneck table as the application. The URL's

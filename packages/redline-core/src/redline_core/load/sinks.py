@@ -88,6 +88,39 @@ def redact_config(config: Mapping[str, Any], redactor: Any = None) -> dict[str, 
                     item["body"] = r.body(item["body"], ctype)[0]
             items.append(item)
         out["requests"] = items
+    identities = out.get("identities")
+    if isinstance(identities, (list, tuple)):
+        # identity headers and cookies are credentials by nature: keep only the names
+        out["identities"] = [
+            {
+                **{k: v for k, v in i.items() if k not in ("headers", "cookies")},
+                **{
+                    key: dict.fromkeys(i[key], MASK)
+                    for key in ("headers", "cookies")
+                    if isinstance(i.get(key), Mapping)
+                },
+            }
+            if isinstance(i, Mapping)
+            else i
+            for i in identities
+        ]
+    auth = out.get("auth")
+    if isinstance(auth, Mapping):
+        auth = dict(auth)
+        command = auth.get("command")
+        if isinstance(command, (list, tuple)) and command:
+            auth["command"] = [command[0], *([MASK] if len(command) > 1 else [])]
+        request = auth.get("request")
+        if isinstance(request, Mapping):
+            request = dict(request)
+            if "headers" in request:
+                request["headers"] = headers(request["headers"])
+            if "json" in request:
+                request["json"] = r.mapping(request["json"])
+            if isinstance(request.get("body"), str):
+                request["body"] = MASK
+            auth["request"] = request
+        out["auth"] = auth
     return out
 
 

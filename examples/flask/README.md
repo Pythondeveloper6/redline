@@ -103,6 +103,12 @@ you run it, which is the repository root here, not the app's store. Then open th
 at **http://127.0.0.1:8012/_redline/#/load** (the CLI prints the link to this run) to see the
 per-step latency, the knee, and the bottlenecks found under load.
 
+`scenario_users.toml` shows the realistic-load keys: twenty invented users from `users.csv`
+(`identities_file`, one per request, so per-user caches are not all warm) and a skewed
+order-id feed from `order_ids.csv` (`[[data]]` with `pick = "zipf"`, so a few orders are hot).
+Run it the same way; the traces carry an `identity` tag, and only the name is recorded,
+never the key or session.
+
 If the generator runs on another machine (or the app in a container), it has no access to
 that store file. Either point both at one PostgreSQL store (`--store-url postgresql://...`) or,
 with `accept_remote_runs = true` on the app, register the run over HTTP:

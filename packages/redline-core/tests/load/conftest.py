@@ -12,6 +12,10 @@ import pytest
 @dataclass
 class ServerState:
     headers: list[str] = field(default_factory=list)  # X-Redline-Run values
+    authorizations: list[str] = field(default_factory=list)
+    cookies: list[str] = field(default_factory=list)
+    api_keys: list[str] = field(default_factory=list)
+    bodies: list[str] = field(default_factory=list)
     paths: list[str] = field(default_factory=list)
     stall_on: int | None = None  # stall the n-th request (1-based) ...
     stall_s: float = 1.0  # ... for this long
@@ -24,12 +28,17 @@ class _Handler(http.server.BaseHTTPRequestHandler):
     state: ServerState
 
     def _serve(self, body_expected: bool = False) -> None:
+        raw_body = b""
         if body_expected:
             length = int(self.headers.get("Content-Length") or 0)
             if length:
-                self.rfile.read(length)
+                raw_body = self.rfile.read(length)
         st = self.state
         with st.lock:
+            st.authorizations.append(self.headers.get("Authorization") or "")
+            st.cookies.append(self.headers.get("Cookie") or "")
+            st.api_keys.append(self.headers.get("X-Api-Key") or "")
+            st.bodies.append(raw_body.decode("utf-8", "replace"))
             st.count += 1
             n = st.count
             st.headers.append(self.headers.get("X-Redline-Run") or "")

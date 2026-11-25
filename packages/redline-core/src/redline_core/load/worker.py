@@ -39,6 +39,17 @@ from typing import Any
 from ..histogram import Histogram
 from .profile import arrival_offsets
 from .scenario import render_path
+from .variation import (
+    DataFeed,
+    DataSource,
+    IdentityPicker,
+    TokenManager,
+    identity_tag,
+    load_identities,
+    parse_auth,
+    render_data,
+    render_value,
+)
 
 __all__ = ["worker_main"]
 
@@ -47,7 +58,7 @@ STOP_POLL_S = 0.05
 
 
 class _Acc:
-    __slots__ = ("breakdown", "dropped", "errors", "hist", "ok", "sent", "svc")
+    __slots__ = ("breakdown", "dropped", "errors", "hist", "identities", "ok", "sent", "svc")
 
     def __init__(self) -> None:
         self.sent = 0
@@ -55,11 +66,13 @@ class _Acc:
         self.errors = 0
         self.dropped = 0
         self.breakdown: Counter[str] = Counter()
+        self.identities: Counter[str] = Counter()
         self.hist = Histogram()
         self.svc = Histogram()
 
     def to_msg(self) -> dict[str, Any]:
         return {
+            "identities": dict(self.identities),
             "sent": self.sent,
             "ok": self.ok,
             "errors": self.errors,
@@ -121,6 +134,20 @@ class _Worker:
         self.tasks: set[asyncio.Task[None]] = set()
         self.t0 = 0.0
         self.crash_after = cfg.get("_crash_after_s")
+        # what varies between requests (all optional; see load/variation.py)
+        identities = load_identities(
+            cfg.get("identities") or (), cfg.get("identities_file"), cfg.get("base_dir")
+        )
+        self.picker = (
+            IdentityPicker(identities, cfg.get("identity_mode", "round_robin"), self.k, self.n)
+            if identities
+            else None
+        )
+        sources = [DataSource(**d) for d in cfg.get("data") or ()]
+        self.feed = DataFeed(sources, self.k, self.n) if sources else None
+        spec = parse_auth(cfg.get("auth"))
+        self.tokens = TokenManager(spec, cfg.get("base_url")) if spec else None
+        self.auth_error: str | None = None
 
     # ------------------------------------------------------------------ plumbing
     def _acc(self, step: int) -> _Acc:
@@ -204,6 +231,11 @@ class _Worker:
             headers={"User-Agent": "redline-load"},
         ) as client:
             self.client = client
+            if self.tokens is not None:  # a first token before any load; failure fails the run
+                try:
+                    await self.tokens.refresh()
+                except Exception as exc:
+                    raise RuntimeError(f"could not get an auth token: {exc}") from None
             self.q.put({"type": "ready", "worker": self.k, "pid": os.getpid()})
             loop = asyncio.get_running_loop()
             while not go.is_set():
@@ -214,13 +246,38 @@ class _Worker:
             self.t0 = time.perf_counter() + (start_at.value - time.time())
             watcher = asyncio.create_task(self._watch())
             flusher = asyncio.create_task(self._flusher())
+            refresher = asyncio.create_task(self._refresh_token()) if self.tokens else None
             try:
                 await self._schedule()
                 await self._drain(float(cfg["timeout_s"]) + 2.0)
             finally:
                 watcher.cancel()
                 flusher.cancel()
+                if refresher is not None:
+                    refresher.cancel()
                 self.flush()
+            if self.auth_error:
+                raise RuntimeError(self.auth_error)
+
+    async def _refresh_token(self) -> None:
+        """Refresh before expiry, off the request path; two failures in a row stop the run."""
+        tokens = self.tokens
+        assert tokens is not None
+        while not self.stopping:
+            wait = tokens.due_in()
+            if wait is None:
+                return
+            await asyncio.sleep(max(wait, 0.5))
+            for attempt in (1, 2):
+                try:
+                    await tokens.refresh()
+                    break
+                except Exception as exc:
+                    if attempt == 2:
+                        self.auth_error = f"token refresh failed: {exc}"
+                        self.stopping = True
+                        return
+                    await asyncio.sleep(2.0)
 
     async def _schedule(self) -> None:
         cfg = self.cfg
@@ -279,15 +336,27 @@ class _Worker:
         status: int | None = None
         error: str | None = None
         try:
-            headers = {**self.headers, **req.get("headers", {})}
-            headers["X-Redline-Run"] = f"{self.run_header};step={step}"
+            lookup = self.feed.new_context(self.rng) if self.feed is not None else None
+            headers = dict(self.headers)
+            if self.tokens is not None:
+                pair = self.tokens.header()
+                if pair:
+                    headers[pair[0]] = pair[1]
+            run_value = f"{self.run_header};step={step}"
+            if self.picker is not None:
+                identity = self.picker.pick(self.rng)
+                headers.update(identity.request_headers())
+                run_value += f";identity={identity_tag(identity.name)}"
+                self._acc(step).identities[identity.name] += 1
+            headers.update({k: render_data(v, lookup) for k, v in req.get("headers", {}).items()})
+            headers["X-Redline-Run"] = run_value
             kwargs: dict[str, Any] = {"headers": headers}
             if req.get("has_json"):
-                kwargs["content"] = jsonlib.dumps(req["json"]).encode()
+                kwargs["content"] = jsonlib.dumps(render_value(req["json"], lookup)).encode()
                 headers.setdefault("Content-Type", "application/json")
             elif req.get("body") is not None:
-                kwargs["content"] = req["body"].encode()
-            path = render_path(req["path"], self.rng)
+                kwargs["content"] = render_data(req["body"], lookup).encode()
+            path = render_path(req["path"], self.rng, lookup)
             async with self.sem:
                 sent_at = time.perf_counter()
                 response = await self.client.request(req["method"], path, **kwargs)

@@ -5890,6 +5890,9 @@ stop_on = { error_rate = 0.05, p95_ms = 2000 }
 | `max_inflight` | `1000` | In-flight cap per worker; arrivals beyond it are counted `dropped` |
 | `seed` | random | Integer seed for placeholders and request choice, for repeatable runs |
 | `ui_url` | config `mount_path`, else `/_redline` | Where the Redline UI is mounted (path on `base_url`'s host, or a full URL); only used for the printed link |
+| `identities`, `identities_file`, `identity_mode` | none | Many users instead of one: see [Identities](#identities) |
+| `data` | none | CSV / JSON Lines files that fill `{data:source.column}`: see [Data feeds](#data-feeds) |
+| `auth` | none | A token provider refreshed during the run: see [Token refresh](#token-refresh) |
 
 Durations accept a number of seconds or strings such as `"20s"`, `"2m"`.
 
@@ -5916,8 +5919,86 @@ Rendered separately for every request:
 | `{random_choice:a\|b\|c}` | one of the listed values |
 | `{uuid}` | a fresh random UUID (32 hex digits, no dashes) |
 
+| `{data:source.column}` | a value from a [data feed](#data-feeds); also works in headers, JSON and raw bodies |
+
 Any other `{...}` in a path is an **error**, so an OpenAPI path such as `/orders/{id}` can
 never be sent by accident.
+
+### Identities
+
+One set of credentials makes the app see one user thousands of times: per-user caches stay
+warm and row-level filters always pick the same rows. Give the run many users:
+
+```toml
+identity_mode = "round_robin"      # or "random" (seeded) or "sticky"
+identities_file = "users.csv"      # name, header:X-Api-Key, cookie:session ...
+
+[[identities]]
+name = "alice"
+headers = { Authorization = "Bearer ${ALICE_TOKEN}" }   # ${VAR} reads the environment
+cookies = { sid = "${ALICE_SID}" }
+```
+
+Inline identities come first, then the file's. CSV columns are `name`, `header:<Header-Name>`
+and `cookie:<name>`; a `.jsonl` file holds `{"name", "headers", "cookies"}` objects. A missing
+environment variable fails the run before any request, naming the variable. Header order:
+scenario `headers`, then the identity's, then the request's own.
+
+`round_robin` cycles through every identity (all workers together visit them in order),
+`random` picks with the scenario `seed`, and `sticky` gives each worker process one fixed
+identity (one virtual user per process).
+
+Only the identity **name** is ever recorded: as the `identity` tag on the app's traces
+(filter with `tag=identity:alice`), and as per-identity request counts in the run summary.
+Header and cookie values are masked in the stored run config.
+
+### Data feeds
+
+Uniform random identifiers hit rows that do not exist and hit every real row equally, so
+the page cache and query plans behave nothing like production.
+
+```toml
+[[data]]
+name = "orders"
+file = "orders.csv"      # CSV with a header row, or .jsonl
+pick = "zipf"            # "sequential", "random" or "zipf" (first rows hottest)
+zipf_s = 1.1             # skew for zipf
+
+[[requests]]
+path = "/orders/{data:orders.id}"
+json = { sku = "{data:orders.sku}" }
+```
+
+Relative files resolve against the scenario file. Every reference to one source in a request
+uses the same row. A missing file or column fails the run before any request. `zipf` and
+`random` follow the scenario `seed`. `redline load init --from-traces --data-dir DIR` writes
+the distinct paths seen per endpoint as such files, most used first, instead of one sample
+path per endpoint.
+
+### Token refresh
+
+Short-lived tokens expire mid-run and every request then fails with 401, which looks like a
+knee. An `auth` block gets a token before the run and refreshes it before it expires, outside
+the latency numbers:
+
+```toml
+[auth]
+provider = "request"                 # "command", "request" or "python"
+request = { method = "POST", path = "/login", json = { user = "load", password = "${LOAD_PW}" } }
+extract = "data.access_token"        # dotted path into the JSON response
+expires_extract = "data.expires_in"  # lifetime in seconds (or set ttl_s)
+refresh_before_s = 30
+```
+
+`command = ["get-token", "--env", "perf"]` runs a program (no shell) and reads its output;
+`callable = "package.module:function"` calls a Python function returning the token or
+`(token, ttl_s)`. The token goes in `Authorization: Bearer ...` (`header` and `prefix` change
+that). Each worker refreshes on its own; refresh calls are never counted in the histograms.
+If a refresh fails twice, the run stops with an error instead of reporting 401s as server
+errors. The stored config masks command arguments and request credentials.
+
+`auth`, `identities`, `identities_file` and `data` can run a program or read a file, so they
+are accepted only from a scenario file, never from the UI or `POST api/runs`.
 
 ### Authentication
 
@@ -6131,6 +6212,8 @@ starting point and edit it.
 | `--window 24h` | how far back to look |
 | `--top 10` | endpoints to keep |
 | `--include-writes` | also include POST/PUT/PATCH/DELETE (written with `weight = 0`) |
+| `--data-dir DIR` | with `--from-traces`: write each endpoint's distinct paths as CSV here and use them as `zipf` data sources |
+| `--identities-file FILE`, `--identity-mode MODE` | add `identities_file` and `identity_mode` to the scenario |
 | `--base-url URL` | set `base_url` |
 | `-o, --out PATH` | output file; `.toml` or `.json`; `-` prints to stdout (default `scenario.toml`) |
 | `--force` | overwrite an existing file |
@@ -9991,6 +10074,25 @@ load_disabled`). When on, its safety rests on these rules:
 3. It is a real load: a user who may start runs can make your instance slow. Enable it only
    in environments where that is acceptable, and not in production.
 
+### Identities, data files and token commands
+
+A scenario file may name identities, data files and a token provider (a command, a request or
+a Python callable). These can run a program or read a file, so they are accepted **only from a
+scenario file** you run yourself, never from the UI or `POST api/runs` (`400`). The token
+command runs without a shell. Identity and token values are masked in the stored run config;
+only the identity name reaches the app (as the `identity` trace tag) and the run summary.
+
+### Registering runs over HTTP
+
+`accept_remote_runs` lets a load generator on another host register its run
+(`POST api/runs/register`, `.../steps`, `.../finish`). It is **off by default and in every
+preset**, refused while `read_only` is on, and behind the same access policy as every other
+mutation (use `access="token"`). The application checks each field's type and size, masks the
+run's config again, and refuses to change any run that was not registered this way, so a
+local run cannot be rewritten through it. Requests of a run are kept past `sample_rate` only
+while that run exists and is running; an invented run id keeps nothing. The generator reads
+the token from `REDLINE_TOKEN` or `--token-file`, and a PostgreSQL store URL is never printed.
+
 The `redline load` command line is a different matter: it runs on the machine you run it
 on, against the URL you give it, with the rights you have there. Point it only at systems you
 own or are authorised to test.
@@ -10204,6 +10306,10 @@ security review yet.
 | Cross-site request deletes or triggers EXPLAIN | Tampering | CSRF token / same-origin checks on every mutation | depends on the browser enforcing SameSite and Origin |
 | DNS rebinding against a loopback instance | Spoofing | `Host` allow-list for the loopback policy; `ALLOWED_HOSTS` on Django | another app on the same origin is trusted |
 | Forced recording of attacker requests | Tampering / DoS | profile and check headers honoured only for authorised callers; bounded queue drops instead of blocking | high-cardinality traffic still costs CPU before sampling |
+| A caller invents or tampers with load runs through the register endpoints | Tampering | `accept_remote_runs` is off by default and in every preset; same access policy and CSRF rules as other mutations; refused while `read_only`; every field is type- and size-checked; the config is masked again server-side; only runs registered over HTTP can be changed over HTTP; a made-up `X-Redline-Run` id keeps no trace | an authorised token holder can write false run results to a remote-registered run |
+| Generator credentials leak through the run command | Information disclosure | the access token comes from `REDLINE_TOKEN` or a file, never argv; a PostgreSQL URL reaches a UI-started child through the environment and is masked in every message | environment variables are visible to the same user's processes |
+| A UI or API caller makes the generator run a command or read a file | Elevation of privilege | scenario keys `auth`, `identities`, `identities_file` and `data` are refused from `POST api/runs` (400) and only read from a scenario file; the token command runs without a shell | a scenario file is trusted like any script you run |
+| Identity or token secrets stored or logged | Information disclosure | only the identity name is recorded; header, cookie, token-command and token-request credentials are masked in the stored config; the token is never put in a log, message or error | the secret still lives in the generator process |
 | Arbitrary SQL through EXPLAIN | Elevation of privilege | EXPLAIN takes trace/span ids, never SQL; `is_explainable` on stored text; rolled back | under `explain_analyze` a planted `SELECT` calling a side-effecting function would run (in a rolled-back transaction) |
 | Store file stolen from disk or backups | Information disclosure | redaction, retention, file permissions | no at-rest encryption |
 | Crafted request data makes redaction slow | Denial of service | redaction patterns are linear-time; error, header and identifier texts are cut before they are scanned | free-text capture still costs CPU proportional to the capture budgets |

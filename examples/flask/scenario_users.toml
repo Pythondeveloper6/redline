@@ -1,0 +1,27 @@
+name = "flask shop: many users, skewed orders"
+description = "Twenty invented users and a skewed order-id feed: hot orders are requested far more than the rest, like real traffic."
+base_url = "http://127.0.0.1:8012"
+timeout_s = 10
+identities_file = "users.csv"
+identity_mode = "round_robin"
+
+[[data]]
+name = "orders"
+file = "order_ids.csv"
+pick = "zipf"
+zipf_s = 1.1
+
+[[requests]]
+name = "order detail (hot orders dominate)"
+path = "/orders/{data:orders.id}"
+weight = 4
+
+[[requests]]
+name = "audit count (raw cursor)"
+path = "/audit/raw"
+weight = 1
+
+[profile]
+mode = "constant"
+rps = 20
+duration_s = "20s"

@@ -1212,6 +1212,11 @@ def _run_config(body: Mapping[str, Any]) -> tuple[dict[str, Any], str | None]:
         value = _number(profile.get(key))
         if value is None or value <= 0:
             return {}, f"profile.{key} must be a positive number for mode {profile['mode']!r}."
+    from .load.variation import LOCAL_ONLY_KEYS
+
+    local = [k for k in LOCAL_ONLY_KEYS if k in body]
+    if local:  # these can run a command or read a file: scenario files only
+        return {}, f"{', '.join(local)} can only be set in a scenario file, not from the UI."
     # The target is never taken from the body: the adapter's base URL always wins.
     extra = {k: v for k, v in body.items() if k not in ("base_url", "workers")}
     config = {**extra, "name": name.strip(), "requests": clean, "profile": dict(profile)}
