@@ -442,9 +442,10 @@ controller runs no workers itself unless you also pass `--workers`. Stopping the
 What the controller sends is the scenario's requests plus its identities and data rows
 **inline** (an agent reads no files), so the config, including credentials, crosses the
 network: use TLS (`--cert`/`--key`, verified with `--agent-ca`) or a private network. An agent
-needs a token (at least 8 characters), listens on `127.0.0.1` unless told otherwise, refuses
+needs a token (at least 16 characters), listens on `127.0.0.1` unless told otherwise, refuses
 `auth.provider` `command` and `python` (use `request`), blocks link-local and metadata targets,
-and can be limited with `--allow-target URL_PREFIX`.
+and can be limited with `--allow-target URL_PREFIX` (scheme, host and port must match exactly; names are
+resolved and every address checked, but a name that changes its answer later, DNS rebinding, is not caught: use the allow-list).
 
 Each worker also reports its own CPU use. A step where a generator worker was above 90% of a
 core is marked `generator_limited` (and listed in `summary.generator.limited_steps`): the

@@ -101,15 +101,15 @@ def _instrumentation(store: Any, args: dict[str, Any]) -> dict[str, Any]:
 def _verify_fix(store: Any, args: dict[str, Any]) -> dict[str, Any]:
     from ..check.report import Report, ReportError
     from ..check.verify import verify_report
+    from .base import read_local_file
 
     path = args.get("report_path")
-    if not isinstance(path, str) or not path.endswith(".json"):
+    if not isinstance(path, str):
         raise ValueError("report_path must be the path of a compare report (.json)")
     try:
-        with open(path, encoding="utf-8") as fh:
-            report = Report.from_dict(json.load(fh))
-    except (OSError, ValueError, ReportError) as exc:
-        raise ValueError(f"could not read report: {exc}") from None
+        report = Report.from_dict(json.loads(read_local_file(path, (".json",), what="report")))
+    except (ValueError, ReportError):
+        raise ValueError("the file is not a compare report") from None
     min_samples = args.get("min_samples", 5)
     if isinstance(min_samples, bool) or not isinstance(min_samples, int) or min_samples < 0:
         raise ValueError("min_samples must be a whole number of 0 or more")

@@ -47,8 +47,9 @@ def test_low_sample_rate_still_keeps_traces_of_a_running_run(store):
 def test_a_made_up_run_id_forces_nothing_into_the_store(store):
     rec = Recorder(Settings(sample_rate=0.0, always_keep_slower_than_ms=1e9), store)
     forged = _call(rec, {"X-Redline-Run": "made-up;step=1"})
-    assert forged.tags["sampled_by"] == "run"  # provisionally...
-    assert store.get(forged.id) is None  # ...dropped by the writer
+    # an id the store does not know is not even kept provisionally (no queue, no writer work)
+    assert forged.tags.get("sampled_by") != "run"
+    assert store.get(forged.id) is None
 
 
 def test_a_finished_run_no_longer_keeps_traces(store):

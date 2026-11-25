@@ -221,22 +221,23 @@ REPORT = {
 }
 
 
-def test_check_report_and_findings(reader, tmp_path):
+def test_check_report_and_findings(reader, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)  # report files are read from the working directory only
     path = tmp_path / "rep.json"
     path.write_text(json.dumps(REPORT))
-    summary = call_tool("check_report", {"report_path": str(path)}, store=reader)
+    summary = call_tool("check_report", {"report_path": "rep.json"}, store=reader)
     assert summary["id"] == "rep1" and summary["exit_code"] == 1
     assert summary["requests"][0]["failing"] == ["slower"]
-    found = call_tool("check_findings", {"report_path": str(path)}, store=reader)
+    found = call_tool("check_findings", {"report_path": "rep.json"}, store=reader)
     assert found["findings_total"] == 1 and "n_plus_one" in found["findings"][0]["prompt"]
     for tool in ("check_report", "check_findings"):
-        assert "error" in call_tool(tool, {"report_path": str(tmp_path / "no.json")}, store=reader)
-        assert "error" in call_tool(tool, {"report_path": str(tmp_path / "x.txt")}, store=reader)
+        assert "error" in call_tool(tool, {"report_path": "no.json"}, store=reader)
+        assert "error" in call_tool(tool, {"report_path": "x.txt"}, store=reader)
     bad = tmp_path / "bad.json"
     bad.write_text("{not json")
-    assert "error" in call_tool("check_report", {"report_path": str(bad)}, store=reader)
+    assert "error" in call_tool("check_report", {"report_path": "bad.json"}, store=reader)
     bad.write_text(json.dumps({"format": "other"}))
-    assert "error" in call_tool("check_findings", {"report_path": str(bad)}, store=reader)
+    assert "error" in call_tool("check_findings", {"report_path": "bad.json"}, store=reader)
 
 
 def test_fix_prompt_and_diagnose_preview_never_send(reader):

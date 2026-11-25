@@ -129,15 +129,15 @@ class RunMetricsSampler:
     def _valid(self, run_id: str) -> bool:
         now = time.monotonic()
         hit = self._known.get(run_id)
-        if hit is not None and now - hit[1] < 30.0:
+        if hit is not None and now - hit[1] < (30.0 if hit[0] else 10.0):
             return hit[0]
         ok = False
         try:
-            run = self.store.get_run(run_id)
-            ok = run is not None and run.status == "running"
+            known = getattr(self.store, "is_known_run", None)  # a cached read: no reaping
+            ok = bool(known(run_id)) if callable(known) else self.store.get_run(run_id) is not None
         except Exception:
             ok = False
-        if len(self._known) > 64:
+        if len(self._known) > 256:  # bounded: random ids cannot grow it, or the query rate
             self._known.clear()
         self._known[run_id] = (ok, now)
         return ok

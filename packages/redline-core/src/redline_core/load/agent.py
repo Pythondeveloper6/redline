@@ -71,55 +71,157 @@ def decode_event(event: dict[str, Any]) -> dict[str, Any]:
     return event
 
 
-def _blocked_target(base_url: str) -> str | None:
-    host = (urlsplit(base_url).hostname or "").lower()
-    if host in _BLOCKED_NAMES:
-        return f"{host} is a cloud metadata name"
+_ALLOWED_CFG_KEYS = frozenset(
+    {
+        "worker", "workers", "run_id", "parent_pid", "base_url", "headers", "timeout_s",
+        "connections", "max_inflight", "poisson", "seed", "requests", "flows", "steps",
+        "identities", "identities_file", "identity_mode", "data", "data_rows", "auth", "base_dir",
+    }
+)  # fmt: skip
+MAX_REQUESTS_PER_CFG = 2_000
+MAX_CONNECTIONS = 10_000
+MAX_INFLIGHT = 100_000
+MAX_TOKEN_MIN = 16
+#: IPv6 ranges of cloud metadata services that are not "link-local" (AWS Nitro IPv6).
+_METADATA_V6 = ipaddress.ip_network("fd00:ec2::/32")
+
+
+def _addresses(host: str) -> list[ipaddress._BaseAddress]:
+    """Every IP ``host`` stands for: a literal in any spelling (decimal, hex, trailing dot,
+    IPv4-mapped IPv6) or what DNS resolves it to. Unresolvable names give ``[]``."""
+    import socket
+
+    host = host.strip("[]").rstrip(".")
+    found: list[ipaddress._BaseAddress] = []
     try:
-        ip = ipaddress.ip_address(host)
-    except ValueError:
-        return None
-    if ip.is_link_local:
-        return f"{host} is a link-local address (cloud metadata)"
+        infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
+    except (OSError, UnicodeError):
+        return found
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0].split("%")[0])
+        except ValueError:
+            continue
+        if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+            ip = ip.ipv4_mapped
+        found.append(ip)
+    return found
+
+
+def _blocked_target(base_url: str) -> str | None:
+    """Why a target is refused (cloud metadata and link-local addresses), or ``None``.
+
+    Names are resolved and every address is checked, so decimal/hex IPs, trailing dots and
+    DNS names that point at a metadata service are caught. A name that changes its answer
+    between this check and the connection (DNS rebinding) is not: use ``--allow-target``."""
+    parts = urlsplit(base_url)
+    host = (parts.hostname or "").lower().rstrip(".")
+    if host in _BLOCKED_NAMES or (host.endswith(".internal") and host.startswith("metadata")):
+        return f"{host} is a cloud metadata name"
+    for ip in _addresses(host):
+        if ip.is_link_local or (isinstance(ip, ipaddress.IPv6Address) and ip in _METADATA_V6):
+            return f"{host} resolves to {ip}, a link-local or metadata address"
+    return None
+
+
+def _target_allowed(base_url: str, allowed: tuple[str, ...]) -> bool:
+    """Exact scheme, host and port match against an allow-list entry, on a path boundary.
+
+    ``http://app.internal`` allows ``http://app.internal:80/x`` but neither
+    ``http://app.internal.evil.com`` nor ``http://app.internal@evil.com``."""
+
+    def identity(parts: Any) -> tuple[str, str, int | None]:
+        default = {"http": 80, "https": 443}.get(parts.scheme)
+        return parts.scheme, (parts.hostname or "").lower().rstrip("."), parts.port or default
+
+    target = urlsplit(base_url)
+    if target.username is not None or target.password is not None:
+        return False
+    for entry in allowed:
+        want = urlsplit(entry)
+        if identity(target) != identity(want):
+            continue
+        prefix = want.path.rstrip("/")
+        if not prefix or target.path == prefix or target.path.startswith(prefix + "/"):
+            return True
+    return False
+
+
+def _check_target(url: str, allow_targets: tuple[str, ...], what: str) -> str | None:
+    if not isinstance(url, str) or not url.startswith(("http://", "https://")):
+        return f"{what} must be an http(s) URL"
+    if urlsplit(url).username is not None:
+        return f"{what} must not carry credentials"
+    if (why := _blocked_target(url)) is not None:
+        return f"target refused: {why}"
+    if allow_targets and not _target_allowed(url, allow_targets):
+        return f"{what} is not in this agent's allowed targets"
     return None
 
 
 def validate_worker_cfg(cfg: Any, allow_targets: tuple[str, ...]) -> str | None:
-    """Why a worker config from a controller is refused, or ``None``."""
+    """Why a worker config from a controller is refused, or ``None``.
+
+    Only a fixed set of keys is accepted, numbers are bounded, every URL the worker may call
+    (the target and the token endpoint) is checked, and nothing may name a file or an
+    environment variable: identities and data rows must arrive inline."""
     from .scenario import METHODS
 
     if not isinstance(cfg, dict):
         return "a worker config must be an object"
+    extra = sorted(set(cfg) - _ALLOWED_CFG_KEYS)
+    if extra:
+        return f"unknown key {extra[0]}"
     for key in ("worker", "workers", "connections", "max_inflight"):
         if isinstance(cfg.get(key), bool) or not isinstance(cfg.get(key), int) or cfg[key] < 0:
             return f"{key} must be a non-negative integer"
     if cfg["workers"] < 1 or cfg["workers"] > 100_000 or cfg["worker"] >= cfg["workers"]:
         return "worker/workers are out of range"
-    base = cfg.get("base_url")
-    if not isinstance(base, str) or not base.startswith(("http://", "https://")):
-        return "base_url must be an http(s) URL"
-    if (why := _blocked_target(base)) is not None:
-        return f"target refused: {why}"
-    if allow_targets and not any(base.startswith(prefix) for prefix in allow_targets):
-        return "target is not in this agent's allowed targets"
+    if cfg["connections"] > MAX_CONNECTIONS or cfg["max_inflight"] > MAX_INFLIGHT:
+        return "connections or max_inflight is too large"
+    if (problem := _check_target(cfg.get("base_url"), allow_targets, "base_url")) is not None:
+        return problem
     auth = cfg.get("auth")
-    if auth and auth.get("provider") != "request":
-        return "an agent only supports auth.provider = 'request' (no command or callable)"
+    if auth:
+        if not isinstance(auth, dict) or auth.get("provider") != "request":
+            return "an agent only supports auth.provider = 'request' (no command or callable)"
+        request = auth.get("request") or {}
+        token_base = request.get("base_url") or cfg["base_url"]
+        if problem := _check_target(token_base, allow_targets, "auth.request.base_url"):
+            return problem
     if cfg.get("identities_file"):
         return "identities must be sent inline, not as a file"
-    for r in cfg.get("requests") or ():
+    for ident in cfg.get("identities") or ():
+        if not isinstance(ident, dict) or "${" in json.dumps(ident):
+            return "identities must be sent already resolved (no ${VAR})"
+    sources = cfg.get("data") or ()
+    rows = cfg.get("data_rows")
+    if sources and (not isinstance(rows, dict) or any(d.get("name") not in rows for d in sources)):
+        return "data must be sent inline as data_rows; an agent reads no files"
+    requests = cfg.get("requests", [])
+    flows = cfg.get("flows", [])
+    if (
+        not isinstance(requests, list)
+        or not isinstance(flows, list)
+        or len(requests) > MAX_REQUESTS_PER_CFG
+        or len(flows) > MAX_REQUESTS_PER_CFG
+    ):
+        return "too many requests or flows"
+    for r in requests:
         if not isinstance(r, dict) or str(r.get("method", "GET")).upper() not in METHODS:
             return "a request has an invalid method"
         path = r.get("path")
         if not isinstance(path, str) or not path.startswith("/") or path.startswith("//"):
             return "request paths must start with a single '/'"
-    for f in cfg.get("flows") or ():
-        for r in f.get("steps") or ():
-            path = r.get("path")
+    for f in flows:
+        if not isinstance(f, dict) or not isinstance(f.get("steps"), list):
+            return "a flow needs steps"
+        if len(f["steps"]) > MAX_REQUESTS_PER_CFG:
+            return "too many flow steps"
+        for r in f["steps"]:
+            path = r.get("path") if isinstance(r, dict) else None
             if not isinstance(path, str) or not path.startswith("/") or path.startswith("//"):
                 return "flow step paths must start with a single '/'"
-    if "_crash_after_s" in cfg:
-        return "unknown key _crash_after_s"
     return None
 
 
@@ -156,8 +258,8 @@ class AgentServer:
         certfile: str | None = None,
         keyfile: str | None = None,
     ) -> None:
-        if not token or len(token) < 8:
-            raise AgentError("an agent needs a token of at least 8 characters")
+        if not token or len(token) < MAX_TOKEN_MIN:
+            raise AgentError(f"an agent needs a token of at least {MAX_TOKEN_MIN} characters")
         self.token = token
         self.max_workers = max_workers or min(os.cpu_count() or 1, 8)
         self.allow_targets = tuple(allow_targets)
@@ -318,6 +420,8 @@ class _Busy(AgentError):
 class _Handler(BaseHTTPRequestHandler):
     agent: AgentServer
     protocol_version = "HTTP/1.1"
+    #: a connection that sends nothing for this long is dropped (slow-connection DoS)
+    timeout = 30
 
     def log_message(self, *args: Any) -> None:
         pass
@@ -342,7 +446,7 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _body(self) -> Any:
         length = int(self.headers.get("Content-Length") or 0)
-        if length > MAX_BODY:
+        if length < 0 or length > MAX_BODY:
             raise AgentError("request body too large")
         return json.loads(self.rfile.read(length) or b"{}", object_hook=_decode_hook)
 
@@ -370,7 +474,7 @@ class _Handler(BaseHTTPRequestHandler):
                 self._reply(404, {"error": "not found"})
         except AgentError as exc:
             self._reply(409, {"error": str(exc)})
-        except (ValueError, TypeError):
+        except Exception:
             self._reply(400, {"error": "bad request"})
 
     def do_POST(self) -> None:
@@ -394,7 +498,7 @@ class _Handler(BaseHTTPRequestHandler):
             self._reply(409, {"error": str(exc)})
         except AgentError as exc:
             self._reply(400, {"error": str(exc)})
-        except (ValueError, KeyError, TypeError):
+        except Exception:  # a hostile body must never take the handler down
             self._reply(400, {"error": "bad request"})
 
 

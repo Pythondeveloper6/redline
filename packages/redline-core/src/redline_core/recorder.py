@@ -515,6 +515,14 @@ class Recorder:
                 builder.tags["profile_error"] = type(exc).__name__
         return builder
 
+    def _run_is_known(self, run_id: str) -> bool:
+        """A made-up ``X-Redline-Run`` id costs one cached lookup and keeps nothing."""
+        known = getattr(self.store, "is_known_run", None)
+        try:
+            return bool(known(run_id)) if callable(known) else True
+        except Exception:
+            return False
+
     def _note_run_metrics(self, trace: Trace) -> None:
         """Start (or keep alive) resource sampling for a registered, running load run."""
         try:
@@ -738,9 +746,16 @@ class Recorder:
             and getattr(self.store, "validates_check_tags", False) is True,
             # the same for a registered load run (X-Redline-Run): kept so low-rate steps
             # still produce traces; the writer drops it for an unknown or finished run
-            run="run_id" in trace.tags and getattr(self.store, "validates_run_tags", False) is True,
+            run="run_id" in trace.tags
+            and getattr(self.store, "validates_run_tags", False) is True
+            and self._run_is_known(trace.tags["run_id"]),
         )
-        if "run_id" in trace.tags and self.store is not None and self.settings.run_metrics:
+        if (
+            "run_id" in trace.tags
+            and self.store is not None
+            and self.settings.run_metrics
+            and self._run_is_known(trace.tags["run_id"])
+        ):
             self._note_run_metrics(trace)
         from .testing import active_capture
 

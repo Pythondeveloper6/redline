@@ -87,15 +87,16 @@ def test_empty_store_gives_empty_results(tmp_path):
     r.close()
 
 
-def test_verify_fix_tool_reads_a_report_file(tmp_path, reader):
+def test_verify_fix_tool_reads_a_report_file(tmp_path, reader, monkeypatch):
     from redline_core.check.report import FORMAT, VERSION
 
+    monkeypatch.chdir(tmp_path)  # report files are read from the working directory only
     p = tmp_path / "rep.json"
     p.write_text(json.dumps({"format": FORMAT, "version": VERSION, "id": "x", "requests": []}))
-    out = call_tool("verify_fix", {"report_path": str(p), "kind": "n_plus_one"}, store=reader)
+    out = call_tool("verify_fix", {"report_path": "rep.json", "kind": "n_plus_one"}, store=reader)
     assert out["finding"] == "inconclusive"
     assert "error" in call_tool(
-        "verify_fix", {"report_path": str(tmp_path / "no.json"), "kind": "n_plus_one"}, store=reader
+        "verify_fix", {"report_path": "no.json", "kind": "n_plus_one"}, store=reader
     )
 
 

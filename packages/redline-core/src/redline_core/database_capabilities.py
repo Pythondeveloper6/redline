@@ -200,6 +200,7 @@ def _hint(permission: str, grant: str) -> dict[str, str]:
 _CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 _LOCK = threading.Lock()
 TTL_S = 600.0
+_MAX_CACHE = 64
 
 
 def capabilities_for(
@@ -219,6 +220,8 @@ def capabilities_for(
             return hit[1]
     report = probe_mssql(executor)
     with _LOCK:
+        if len(_CACHE) >= _MAX_CACHE:  # bounded: aliases from callers cannot grow it
+            _CACHE.pop(min(_CACHE, key=lambda k: _CACHE[k][0]))
         _CACHE[key] = (now, report)
     return report
 

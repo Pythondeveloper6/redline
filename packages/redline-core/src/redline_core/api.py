@@ -693,6 +693,10 @@ class RedlineAPI:
         from .database_capabilities import capabilities_for
 
         alias = _str_param(params, "db") or "default"
+        if not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", alias):
+            return error(
+                400, "invalid_filter", "db must be a database alias (letters, digits, _ . -)."
+            )
         refresh = _str_param(params, "refresh") in ("1", "true")
         executor = self.explain_executor(alias, "mssql") if self.explain_executor else None
         if executor is None:
@@ -1092,6 +1096,15 @@ class RedlineAPI:
         safe[_REMOTE_FLAG] = True
         if self._ext("get_run")(run_id) is not None:
             return error(409, "run_exists", f"Run {run_id!r} already exists.")
+        live = [
+            r
+            for r in self._ext("list_runs")(200)
+            if r.status == "running" and (r.config or {}).get(_REMOTE_FLAG)
+        ]
+        if len(live) >= _MAX_REMOTE_RUNNING:
+            return error(
+                429, "too_many_runs", f"{_MAX_REMOTE_RUNNING} registered runs are already running."
+            )
         self._ext("save_run")(
             Run(id=run_id, name=name, status="running", config=safe, created_at=created)
         )
@@ -1109,6 +1122,8 @@ class RedlineAPI:
         step, problem = _remote_step(parsed)
         if problem:
             return error(400, "invalid_body", problem)
+        if step.step > _MAX_REMOTE_STEP:
+            return error(400, "invalid_body", f"'step' must be at most {_MAX_REMOTE_STEP}.")
         self._ext("save_run_step")(run_id, step)
         return 200, {"id": run_id, "step": step.step}
 
@@ -1171,12 +1186,14 @@ class RedlineAPI:
         parsed = _json_body(body)
         if not isinstance(parsed, Mapping):
             return parsed
-        run = self._remote_run(run_id, open_only=False)
+        run = self._remote_run(run_id)
         if not hasattr(run, "id"):
             return run
         step = _count(parsed.get("step"))
         values = parsed.get("values")
         ts = _number(parsed.get("ts", time.time()))
+        if step is not None and step > _MAX_REMOTE_STEP:
+            step = None
         if step is None or not isinstance(values, Mapping) or not 0 < len(values) <= 50:
             return error(400, "invalid_body", "'step' and 1-50 numeric 'values' are required.")
         if ts is None or not math.isfinite(ts):
@@ -1285,6 +1302,8 @@ def _make_explain_engine(url: Any) -> Any:
 
 _REMOTE_FLAG = "registered_remote"
 _MAX_REMOTE_CONFIG = 262_144
+_MAX_REMOTE_RUNNING = 50
+_MAX_REMOTE_STEP = 1_000
 _COUNT_MAX = 10**12
 
 
@@ -1356,7 +1375,7 @@ def _json_body(body: bytes | str | Mapping[str, Any] | None) -> Mapping[str, Any
     if isinstance(body, (bytes, bytearray, str)):
         try:
             body = json.loads(body or "{}")
-        except ValueError:
+        except (ValueError, RecursionError):
             return error(400, "invalid_json", "The request body is not valid JSON.")
     if not isinstance(body, Mapping):
         return error(400, "invalid_body", "Expected a JSON object.")

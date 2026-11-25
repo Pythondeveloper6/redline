@@ -62,7 +62,9 @@ def mask_url(url: str) -> str:
     else:
         prefix = ""
     netloc, slash, tail = rest.partition("/")
-    tail = re.sub(r"(?i)(password=)[^&]*", r"\1***", tail)
+    # query secrets: password=, pwd=, uid=, and a whole ODBC connection string (which holds PWD=)
+    tail = re.sub(r"(?i)((?:password|pwd|uid|secret|token)=)[^&;]*", r"\1***", tail)
+    tail = re.sub(r"(?i)(odbc_connect=)[^&]*", r"\1***", tail)
     return f"{scheme}{sep}{prefix}{netloc}{slash}{tail}"
 
 

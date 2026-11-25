@@ -108,6 +108,41 @@ version is below `1.0` the public API may change between minor versions.
   an `executemany` is one span with a `batch_size`. SQLAlchemy's own use of
   `raw_connection` is not double-counted.
 
+### Security
+
+Findings of the security review of this release, all fixed in the same branch with regression
+tests:
+
+- MCP `start_load_run` now accepts only an allow-list of scenario keys. It previously refused
+  only some local-only keys, so `auth` (a command or Python token provider), `identities` and
+  `flows` could reach the detached load process.
+- A remote agent no longer trusts a worker config beyond what it documents: unknown keys are
+  refused; data must be inline rows (no file read); identities must be resolved (no `${VAR}`
+  environment expansion on the agent); the token endpoint is checked like the target; sizes
+  are bounded.
+- Agent target checks resolve names and check every address (decimal and hex IPs, trailing
+  dots, IPv4-mapped IPv6, `fd00:ec2::/32`, DNS names pointing at metadata services), and
+  `--allow-target` matches scheme, host and port exactly on a path boundary (no
+  `http://app.internal.evil.com` or `http://app.internal@evil.com`). Agent tokens need 16
+  characters, connections time out, and a hostile body is a 400, not a crash.
+- Histogram decoding is bounded (a small zlib bomb sent to `POST api/runs/{id}/steps` could
+  inflate to hundreds of MB and spin for seconds); buckets must be strictly increasing.
+- An invented `X-Redline-Run` id is no longer queued as a provisional trace nor looked up in
+  the store: the recorder asks a cached known-runs set.
+- Remote registration is bounded: at most 50 running registered runs, step numbers up to 1000,
+  and metrics only for a run that is still running.
+- Secrets: `explain_url` and other URLs mask `odbc_connect`, `pwd`, `uid` and `password` query
+  values; the stored run config masks the token endpoint URL and WebSocket messages; generator
+  errors and the "open the run" line hide URL credentials; the CLI warns about plain `http`
+  to a non-loopback agent or registration URL.
+- MCP report tools read only files inside the working directory, and scenario validation
+  errors no longer echo the offending value.
+- `GET api/database/capabilities` follows the `explain` feature switch, validates the alias
+  and bounds its cache.
+- A run registered over HTTP is no longer marked failed by the dead-process check on stores
+  that once launched a UI run.
+- A stray `.bak` file was removed from the package source.
+
 ## 0.5.0b1 (2026-11-12)
 
 The project moves from alpha to beta.

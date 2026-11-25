@@ -98,6 +98,23 @@ def redact_config(config: Mapping[str, Any], redactor: Any = None) -> dict[str, 
             else f
             for f in flows
         ]
+    for table in (out.get("auth"),):
+        request = table.get("request") if isinstance(table, Mapping) else None
+        if isinstance(request, Mapping):
+            for key in ("path", "base_url"):  # a token or userinfo can sit in the URL
+                if isinstance(request.get(key), str):
+                    request = {**request, key: r.url(request[key])}
+            table = {**table, "request": request}
+            out["auth"] = table
+    for req in [
+        *(out.get("requests") or ()),
+        *(s for f in out.get("flows") or () for s in f.get("steps", ())),
+    ]:
+        if isinstance(req, dict) and isinstance(req.get("messages"), list):
+            req["messages"] = [
+                r.text(m) if isinstance(m, str) else r.mapping(m) if isinstance(m, Mapping) else m
+                for m in req["messages"]
+            ]
     identities = out.get("identities")
     if isinstance(identities, (list, tuple)):
         # identity headers and cookies are credentials by nature: keep only the names
@@ -363,6 +380,12 @@ class MultiSink:
         self._each("finish", run_id, status, summary)
 
 
+def _mask_userinfo(url: str) -> str:
+    from ..storage.postgres import mask_url
+
+    return mask_url(url)
+
+
 class RegisterError(RuntimeError):
     """The application refused or could not be reached for a remote run registration."""
 
@@ -385,6 +408,7 @@ class HttpSink:
         timeout: float = 10.0,
     ) -> None:
         self.base = base.rstrip("/")
+        self._shown = _mask_userinfo(self.base)
         self._token = token
         if client is None:
             import httpx
@@ -400,7 +424,7 @@ class HttpSink:
             )
         except Exception as exc:
             raise RegisterError(
-                f"cannot reach the application at {self.base}: {type(exc).__name__}"
+                f"cannot reach the application at {self._shown}: {type(exc).__name__}"
             ) from None
         if response.status_code >= 400:
             code = ""
@@ -427,7 +451,7 @@ class HttpSink:
             meta = None
         if not isinstance(meta, Mapping) or "version" not in meta:
             raise RegisterError(
-                f"{self.base} does not look like a Redline mount (api/meta has no version)"
+                f"{self._shown} does not look like a Redline mount (api/meta has no version)"
             )
 
     def has_run_trace(self, run_id: str) -> bool:

@@ -6289,9 +6289,10 @@ controller runs no workers itself unless you also pass `--workers`. Stopping the
 What the controller sends is the scenario's requests plus its identities and data rows
 **inline** (an agent reads no files), so the config, including credentials, crosses the
 network: use TLS (`--cert`/`--key`, verified with `--agent-ca`) or a private network. An agent
-needs a token (at least 8 characters), listens on `127.0.0.1` unless told otherwise, refuses
+needs a token (at least 16 characters), listens on `127.0.0.1` unless told otherwise, refuses
 `auth.provider` `command` and `python` (use `request`), blocks link-local and metadata targets,
-and can be limited with `--allow-target URL_PREFIX`.
+and can be limited with `--allow-target URL_PREFIX` (scheme, host and port must match exactly; names are
+resolved and every address checked, but a name that changes its answer later, DNS rebinding, is not caught: use the allow-list).
 
 Each worker also reports its own CPU use. A step where a generator worker was above 90% of a
 core is marked `generator_limited` (and listed in `summary.generator.limited_steps`): the
@@ -10969,7 +10970,7 @@ security review yet.
 | A UI or API caller makes the generator run a command or read a file | Elevation of privilege | scenario keys `auth`, `identities`, `identities_file` and `data` are refused from `POST api/runs` (400) and only read from a scenario file; the token command runs without a shell | a scenario file is trusted like any script you run |
 | Identity or token secrets stored or logged | Information disclosure | only the identity name is recorded; header, cookie, token-command and token-request credentials are masked in the stored config; the token is never put in a log, message or error | the secret still lives in the generator process |
 | The plan login's credentials leak, or a plan upload attacks the parser | Information disclosure / DoS | `explain_url` is masked in config and API output; plan upload rejects DTDs and entities (`<!`), caps size (5 MB), elements (20,000) and depth, and never executes anything; the probe only calls `HAS_PERMS_BY_NAME` | the plan login is a second credential to protect |
-| A caller drives a remote generator against internal targets or runs code on it | Elevation of privilege / SSRF | an agent needs a token (constant-time compare, 8+ characters), listens on loopback by default, can be limited with `--allow-target`, blocks link-local and metadata addresses, refuses token commands and callables and file-based identities, validates every worker config | whoever holds the agent token can aim load at any other allowed host; protect the token and use TLS |
+| A caller drives a remote generator against internal targets or runs code on it | Elevation of privilege / SSRF | an agent needs a token (constant-time compare, 16+ characters), listens on loopback by default, can be limited with `--allow-target` (exact scheme/host/port), resolves target names and blocks link-local and metadata addresses, refuses token commands and callables, files, `${VAR}` expansion and unknown keys, bounds every worker config; the token endpoint is checked like the target | whoever holds the agent token can aim load at any other allowed host; protect the token and use TLS |
 | Arbitrary SQL through EXPLAIN | Elevation of privilege | EXPLAIN takes trace/span ids, never SQL; `is_explainable` on stored text; rolled back | under `explain_analyze` a planted `SELECT` calling a side-effecting function would run (in a rolled-back transaction) |
 | Store file stolen from disk or backups | Information disclosure | redaction, retention, file permissions | no at-rest encryption |
 | Crafted request data makes redaction slow | Denial of service | redaction patterns are linear-time; error, header and identifier texts are cut before they are scanned | free-text capture still costs CPU proportional to the capture budgets |

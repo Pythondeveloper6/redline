@@ -436,7 +436,7 @@ def _limit_key(ip: str | None) -> str:
 
 
 def _feature_for(method: str, path: str) -> str | None:
-    if path in ("api/explain", "api/explain/plan"):
+    if path in ("api/explain", "api/explain/plan", "api/database/capabilities"):
         return "explain"
     if path == "api/stream":
         return "sse"

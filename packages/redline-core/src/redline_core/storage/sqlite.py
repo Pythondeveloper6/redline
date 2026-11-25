@@ -631,6 +631,11 @@ class SQLStore(CheckStoreMixin):
         self._runs_cache = (now, ids)
         return ids
 
+    def is_known_run(self, run_id: str) -> bool:
+        """Whether ``run_id`` is a load run that is running or ended under a minute ago (a
+        cached read: cheap enough for the request path)."""
+        return run_id in self._known_runs()
+
     def _check_run_tags(self, traces: list[Trace]) -> list[Trace]:
         """Drop ``run_id``/``step`` tags (from ``X-Redline-Run``, which any client can send)
         unless the run exists in this store and is running (or just ended): a made-up
@@ -1624,7 +1629,9 @@ class SQLStore(CheckStoreMixin):
         if not os.path.isdir(os.path.join(os.path.dirname(os.path.abspath(self.path)), "runs")):
             return
         rows = self._query(
-            "SELECT id FROM runs WHERE status = 'running' AND created_at < ?",
+            # a run registered over HTTP has no local process and no pid file: never reaped here
+            "SELECT id FROM runs WHERE status = 'running' AND created_at < ? "
+            "AND config NOT LIKE '%\"registered_remote\": true%'",
             (time.time() - self.RUN_GRACE_S,),
         )
         if not rows:

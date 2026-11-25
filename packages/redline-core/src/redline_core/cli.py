@@ -324,6 +324,25 @@ def _open_store_sink(path: str, err: TextIO) -> Any:
     return StoreSink(store, close=True)
 
 
+def _mask_url(url: str) -> str:
+    from .storage.postgres import mask_url
+
+    return mask_url(url)
+
+
+def _warn_cleartext(url: str, flag: str, err: TextIO) -> None:
+    """A token or credential-bearing config over plain http to a non-loopback host."""
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(url)
+    host = (parts.hostname or "").lower()
+    if parts.scheme == "http" and host not in ("127.0.0.1", "::1", "localhost"):
+        err.write(
+            f"warning: {flag} uses plain http to {host}: the token and credentials cross the "
+            "network in clear text; use https\n"
+        )
+
+
 def _open_http_sink(args: argparse.Namespace, err: TextIO) -> Any:
     """``HttpSink`` for ``--register-url``, checked reachable and authorised; else ``None``."""
     from .load.sinks import HttpSink, RegisterError
@@ -340,6 +359,7 @@ def _open_http_sink(args: argparse.Namespace, err: TextIO) -> Any:
         except OSError as exc:
             err.write(f"redline load: cannot read --token-file: {exc.strerror or exc}\n")
             return None
+    _warn_cleartext(url, "--register-url", err)
     sink = HttpSink(url, token or None)
     try:
         sink.preflight()
@@ -494,6 +514,8 @@ def _cmd_load(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
             except OSError as exc:
                 err.write(f"redline load: cannot read --agent-token-file: {exc.strerror or exc}\n")
                 return EXIT_USAGE
+        for agent_url in agents:
+            _warn_cleartext(agent_url, "--agents", err)
         if not agent_token:
             err.write(
                 "redline load: agents need a token (--agent-token-file or REDLINE_AGENT_TOKEN)\n"
@@ -565,9 +587,8 @@ def _cmd_load(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
 
     _print_final(printer, result)
     if args.register_url:
-        printer.line(
-            f"Open the run in Redline: {str(args.register_url).rstrip('/')}/#/load/{run_id}"
-        )
+        shown = _mask_url(str(args.register_url)).rstrip("/")
+        printer.line(f"Open the run in Redline: {shown}/#/load/{run_id}")
     elif store_path and sinks and not isinstance(sinks[0], JsonSink):
         ui_url = scenario.ui_url or _configured_mount()
         printer.line(f"Open the run in Redline: {_ui_hint(scenario.base_url, run_id, ui_url)}")

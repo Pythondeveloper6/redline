@@ -249,3 +249,91 @@ def test_remote_agent_measures_the_clock_offset(agents):
     handle.info()
     assert abs(handle.clock_offset) < 0.5 and handle.cpus == 2
     handle.close()
+
+
+# ------------------------------------------------------------------ security review regressions
+BASE_CFG = {
+    "worker": 0, "workers": 1, "connections": 8, "max_inflight": 8,
+    "base_url": "http://app.internal", "requests": [{"method": "GET", "path": "/a"}],
+}  # fmt: skip
+
+
+@pytest.mark.parametrize(
+    ("patch", "expected"),
+    [
+        ({"data": [{"name": "x", "file": "/etc/passwd"}]}, "inline"),
+        ({"data": [{"name": "x", "file": "/etc/passwd"}], "data_rows": {"other": []}}, "inline"),
+        ({"identities": [{"name": "u", "headers": {"X-K": "${AWS_SECRET_ACCESS_KEY}"}}]}, "${VAR}"),
+        (
+            {
+                "auth": {
+                    "provider": "request",
+                    "request": {"base_url": "http://169.254.169.254", "path": "/x"},
+                }
+            },
+            "link-local",
+        ),
+        (
+            {
+                "auth": {
+                    "provider": "request",
+                    "request": {"base_url": "http://u:p@host", "path": "/x"},
+                }
+            },
+            "credentials",
+        ),
+        ({"base_url": "http://2852039166"}, "link-local"),  # decimal spelling of 169.254.169.254
+        ({"base_url": "http://0xa9fea9fe"}, "link-local"),
+        ({"base_url": "http://169.254.169.254."}, "link-local"),  # trailing dot
+        ({"base_url": "http://[::ffff:169.254.169.254]"}, "link-local"),
+        ({"base_url": "http://[fd00:ec2::254]"}, "link-local"),
+        ({"base_url": "http://user:pw@app.internal"}, "credentials"),
+        ({"surprise": 1}, "unknown key"),
+        ({"connections": 10**9}, "too large"),
+        ({"requests": [{"method": "GET", "path": "/a"}] * 5000}, "too many"),
+        ({"flows": [{"steps": "nope"}]}, "flow"),
+    ],
+)
+def test_the_agent_trusts_nothing_in_a_worker_config(patch, expected):
+    assert expected in (validate_worker_cfg({**BASE_CFG, **patch}, ()) or "")
+
+
+def test_a_clean_inline_config_passes():
+    cfg = {**BASE_CFG, "data": [{"name": "x", "file": "x.csv"}], "data_rows": {"x": [{"a": "1"}]}}
+    assert validate_worker_cfg(cfg, ()) is None
+
+
+@pytest.mark.parametrize(
+    ("target", "ok"),
+    [
+        ("http://app.internal", True),
+        ("http://app.internal:80/x", True),
+        ("http://app.internal/api/v1", True),
+        ("http://app.internal.evil.com/", False),
+        ("http://app.internal@evil.com/", False),
+        ("http://evil.com/http://app.internal", False),
+        ("https://app.internal", False),
+        ("http://app.internal:8080", False),
+    ],
+)
+def test_allowed_targets_match_the_host_exactly(target, ok):
+    cfg = {**BASE_CFG, "base_url": target}
+    problem = validate_worker_cfg(cfg, ("http://app.internal",))
+    assert (problem is None) is ok
+
+
+def test_a_path_prefix_is_matched_on_a_segment_boundary():
+    allowed = ("http://app.internal/api",)
+    assert (
+        validate_worker_cfg({**BASE_CFG, "base_url": "http://app.internal/api/v1"}, allowed) is None
+    )
+    assert validate_worker_cfg({**BASE_CFG, "base_url": "http://app.internal/apix"}, allowed)
+
+
+def test_agent_tokens_need_16_characters_and_garbage_gets_a_400(agents):
+    with pytest.raises(AgentError):
+        AgentServer("127.0.0.1", 0, "only-12-char")
+    headers = {"Authorization": f"Bearer {TOKEN}", "Content-Type": "application/json"}
+    for body in ('{"run_id": 1, "workers": [{"auth": 5, "worker": 0}]}', "not json", "[]"):
+        r = httpx.post(agents[0] + "/v1/prepare", content=body, headers=headers)
+        assert r.status_code == 400

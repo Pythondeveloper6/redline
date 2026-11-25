@@ -8,6 +8,7 @@ credentials in URLs; scenarios are parsed and described, never run, by the read-
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from .base import (
@@ -30,8 +31,12 @@ _PATH = {
     "description": "A file inside the working directory",
 }
 _MAX_REQUESTS = 100
-#: scenario keys that make the load process read local files or import code
-_LOCAL_ONLY_KEYS = ("metric_sources", "identities_file", "data")
+#: the only scenario keys an agent may send: everything else (``auth``, ``identities``,
+#: ``data``, ``flows``, ``metric_sources`` ...) can run a command or read a local file
+_ALLOWED_SCENARIO_KEYS = frozenset(
+    {"name", "description", "requests", "profile", "headers", "timeout_s", "connections",
+     "max_inflight", "seed", "workers", "base_url"}
+)  # fmt: skip
 
 
 # ------------------------------------------------------------------ reading runs
@@ -223,7 +228,9 @@ def _validation(data: Any, default_name: str = "scenario") -> dict[str, Any]:
     try:
         sc = parse_scenario(data, default_name=default_name)
     except ScenarioError as exc:
-        return {"valid": False, "errors": [{"path": exc.path or "", "message": exc.message}]}
+        # "(got <value>)" would echo a value from the file: say what is wrong, not what it was
+        message = re.sub(r"\s*\(got .*\)\s*$", "", exc.message, flags=re.S)
+        return {"valid": False, "errors": [{"path": exc.path or "", "message": message}]}
     return {"valid": True, "errors": [], "summary": _scenario_summary(sc)}
 
 
@@ -364,9 +371,11 @@ def _start_load_run(store: Any, args: dict[str, Any]) -> dict[str, Any]:
     if not options.load_target:
         raise ValueError("no load target configured (start the server with --load-target URL)")
     scenario = dict(args["scenario"])
-    blocked = [k for k in _LOCAL_ONLY_KEYS if k in scenario]
+    blocked = sorted(str(k) for k in scenario if k not in _ALLOWED_SCENARIO_KEYS)
     if blocked:
-        raise ValueError(f"not allowed over MCP: {', '.join(blocked)} (reads local files or code)")
+        raise ValueError(
+            f"not allowed over MCP: {', '.join(blocked)} (can run a command or read a local file)"
+        )
     if any(
         r.get("status") == "running" for r in api_get(store, "api/runs", {"limit": "20"})["items"]
     ):

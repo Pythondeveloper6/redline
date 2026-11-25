@@ -188,17 +188,13 @@ def _doctor(store: Any, args: dict[str, Any]) -> dict[str, Any]:
 # ------------------------------------------------------------------ refactor-check reports
 def _load_report(path: str) -> Any:
     from ..check.report import Report, ReportError
+    from .base import read_local_file
 
-    if not path.endswith(".json"):
-        raise ValueError("report_path must be the path of a compare report (.json)")
+    raw = read_local_file(path, (".json",), what="report")  # inside the working directory only
     try:
-        with open(path, encoding="utf-8") as fh:
-            raw = fh.read(5_000_001)
-        if len(raw) > 5_000_000:
-            raise ValueError("report is larger than 5 MB")
         return Report.from_dict(json.loads(raw))
-    except (OSError, ValueError, ReportError) as exc:
-        raise ValueError(f"could not read report: {str(exc)[:200]}") from None
+    except (ValueError, ReportError):
+        raise ValueError("the file is not a compare report") from None
 
 
 def _check_report(store: Any, args: dict[str, Any]) -> dict[str, Any]:
