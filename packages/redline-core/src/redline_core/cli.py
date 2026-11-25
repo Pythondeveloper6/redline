@@ -106,6 +106,12 @@ def _configure_load(p: argparse.ArgumentParser) -> None:
         metavar="PATH",
         help=f"Redline store to write the run to (default {DEFAULT_STORE})",
     )
+    p.add_argument(
+        "--store-url",
+        metavar="URL",
+        help="write the run to a shared PostgreSQL store (postgresql://...) instead of a file; "
+        "also taken from the project's storage_url setting when --store is not given",
+    )
     p.add_argument("--no-store", action="store_true", help="do not write to the store")
     p.add_argument("--json", metavar="OUT", help="also write the results as JSON")
     p.add_argument("--fail-p95-ms", type=float, metavar="X", help="exit 1 if p95 > X ms")
@@ -207,15 +213,42 @@ class _Printer:
             self.line(f"stopping: {data}")
 
 
-def _open_store_sink(path: str, err: TextIO) -> Any:
-    """``StoreSink`` over ``SQLiteStore(path)``, or ``None`` (with a warning)."""
-    from .load.sinks import StoreSink, store_supports_runs
+def _open_run_store(target: str) -> Any:
+    """The store a run is written to: a shared PostgreSQL store for a ``postgresql://`` URL,
+    else the SQLite file at ``target``. Raises on failure; callers never print the URL."""
+    from .storage.postgres import is_postgres_url
+
+    if is_postgres_url(target):
+        from .storage import PostgresStore
+
+        return PostgresStore(target, background=False)
     from .storage import SQLiteStore
 
+    return SQLiteStore(target, background=False)
+
+
+def _scrub(message: str, target: str) -> str:
+    """``message`` with the store URL (which can hold a password) replaced by its masked form."""
+    from .storage.postgres import is_postgres_url, mask_url
+
+    if is_postgres_url(target):
+        message = message.replace(target, mask_url(target))
+    return message
+
+
+def _open_store_sink(path: str, err: TextIO) -> Any:
+    """``StoreSink`` over the store at ``path`` (a file or a PostgreSQL URL), or ``None``
+    (with a warning)."""
+    from .load.sinks import StoreSink, store_supports_runs
+    from .storage.postgres import mask_url
+
     try:
-        store = SQLiteStore(path, background=False)
+        store = _open_run_store(path)
     except Exception as exc:
-        err.write(f"warning: cannot open the store {path}: {exc}; writing JSON only\n")
+        err.write(
+            f"warning: cannot open the store {mask_url(path)}: {_scrub(str(exc), path)}; "
+            "writing JSON only\n"
+        )
         return None
     if not store_supports_runs(store):
         store.close()
@@ -225,6 +258,29 @@ def _open_store_sink(path: str, err: TextIO) -> Any:
         )
         return None
     return StoreSink(store, close=True)
+
+
+def _run_store_target(args: argparse.Namespace, err: TextIO) -> str | None:
+    """Where the run is stored: ``--store-url``, else ``--store`` when given, else the
+    project's ``storage_url`` setting, else the default file. ``None`` with ``--no-store``."""
+    from .storage.postgres import is_postgres_url
+
+    if args.no_store:
+        return None
+    if args.store_url:
+        if not is_postgres_url(args.store_url):
+            raise argparse.ArgumentTypeError("--store-url must be a postgresql:// URL")
+        return str(args.store_url).strip()
+    if args.store == DEFAULT_STORE:
+        try:
+            from .config import resolve_settings
+
+            configured = resolve_settings(None, project_root=os.getcwd()).settings.storage_url
+        except Exception:  # an unreadable config must not break the run
+            configured = None
+        if configured:
+            return str(configured)
+    return str(args.store)
 
 
 def _graceful_sigterm() -> Any:
@@ -243,10 +299,8 @@ def _graceful_sigterm() -> Any:
 def _fail_run(store_path: str, run_id: str, message: str) -> None:
     """Close a still-``running`` row (pre-inserted by the UI) as ``failed``, so a run that
     could not start never stays "running" forever."""
-    from .storage import SQLiteStore
-
     try:
-        store = SQLiteStore(store_path, background=False)
+        store = _open_run_store(store_path)
     except Exception:
         return
     try:
@@ -300,10 +354,11 @@ def _cmd_load(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
         if args.ui_url:
             scenario = scenario.replace(ui_url=validate_ui_url(args.ui_url, "--ui-url"))
         profile = _cli_profile(args, scenario)
+        store_target = _run_store_target(args, err)
     except ScenarioError as exc:
         err.write(f"redline load: {exc}\n")
         if args.run_id and not args.no_store:  # started by the UI: its row must not stay "running"
-            _fail_run(args.store, args.run_id, str(exc))
+            _fail_run(args.store_url or args.store, args.run_id, str(exc))
         return EXIT_USAGE
     except argparse.ArgumentTypeError as exc:
         err.write(f"redline load: {exc}\n")
@@ -316,22 +371,27 @@ def _cmd_load(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
 
     run_id = args.run_id or uuid.uuid4().hex
     sinks: list[Any] = []
-    store_path = None if args.no_store else args.store
+    from .storage.postgres import is_postgres_url
+
+    # Stop and pid files live beside a local store; a shared PostgreSQL store has none, so
+    # they go to the default directory (the process that started the run reads them there).
+    store_path = None if store_target is None else store_target
+    control_path = DEFAULT_STORE if store_path and is_postgres_url(store_path) else store_path
     if store_path:
         sink = _open_store_sink(store_path, err)
         if sink is not None:
             sinks.append(sink)
         elif not args.json:
-            fallback = control.runs_dir(store_path) / f"{run_id}.json"
+            fallback = control.runs_dir(control_path) / f"{run_id}.json"
             err.write(f"results: {fallback}\n")
             sinks.append(JsonSink(fallback))
     if args.json:
         sinks.append(JsonSink(args.json))
 
-    stop = control.StopFile(run_id, store_path)
+    stop = control.StopFile(run_id, control_path)
     if store_path:
         stop.clear()
-        control.write_pid(run_id, store_path)
+        control.write_pid(run_id, control_path)
     previous_term = _graceful_sigterm()
     printer = _Printer(out, quiet=args.quiet)
     if not args.quiet:
@@ -357,7 +417,7 @@ def _cmd_load(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
         if previous_term is not None:
             signal.signal(signal.SIGTERM, previous_term)
         if store_path:
-            control.cleanup(run_id, store_path)
+            control.cleanup(run_id, control_path)
 
     _print_final(printer, result)
     if store_path and sinks and not isinstance(sinks[0], JsonSink):

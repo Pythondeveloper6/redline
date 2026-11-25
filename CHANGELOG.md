@@ -12,6 +12,10 @@ version is below `1.0` the public API may change between minor versions.
 
 ### Added
 
+- `redline load --store-url postgresql://...` writes the run to the shared PostgreSQL store,
+  and the project's `storage_url` setting is used when `--store` is not given, so a load
+  generator on another host fills the same bottleneck table as the application. The URL's
+  password is never printed.
 - SQL sent through a raw driver cursor is recorded. `engine.raw_connection().cursor()` on an
   instrumented SQLAlchemy engine returns a recording proxy, and
   `redline_core.contrib.dbapi.instrument_dbapi(module)` does the same for a driver used with

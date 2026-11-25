@@ -473,3 +473,63 @@ def test_import_redline_core_does_not_import_the_load_tester():
     )
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
     assert out.stdout.strip() == "ok"
+
+
+# ---------------------------------------------------------------------------- shared store
+PG_URL = "postgresql://redline:s3cret-pw@db.internal:5432/obs"
+
+
+def test_store_url_must_be_postgres(tmp_path, capsys):
+    sc = write_scenario(tmp_path, "http://127.0.0.1:1")
+    assert cli.main(["load", sc, "--store-url", "mysql://x/y"]) == 2
+    assert "postgresql://" in capsys.readouterr().err
+
+
+def test_store_url_failure_never_prints_the_password(tmp_path, capsys, monkeypatch):
+    opened = []
+
+    def boom(target):
+        opened.append(target)
+        raise RuntimeError(f"cannot connect to {target}")
+
+    monkeypatch.setattr(cli, "_open_run_store", boom)
+    monkeypatch.chdir(tmp_path)
+    sc = write_scenario(tmp_path, "http://127.0.0.1:1")
+    cli.main(["load", sc, "--store-url", PG_URL, "--rps", "1", "--duration", "1s", "-q"])
+    captured = capsys.readouterr()
+    assert opened[0] == PG_URL
+    assert "s3cret-pw" not in captured.out + captured.err
+    assert "db.internal" in captured.err  # the masked URL still says where
+
+
+def test_store_url_run_lands_in_the_given_store(tmp_path, monkeypatch, http_server):
+    _, url = http_server
+    db = str(tmp_path / "shared.db")
+    monkeypatch.setattr(cli, "_open_run_store", lambda target: SQLiteStore(db, background=False))
+    monkeypatch.chdir(tmp_path)
+    sc = write_scenario(tmp_path, url)
+    code = cli.main(["load", sc, "--store-url", PG_URL, "--rps", "5", "--duration", "2s", "-q"])
+    assert code == 0
+    store = SQLiteStore(db, background=False)
+    runs = store.list_runs()
+    store.close()
+    assert len(runs) == 1 and runs[0].status == "done"
+
+
+def test_configured_storage_url_is_used_when_no_store_is_given(tmp_path, monkeypatch):
+    class Settings:
+        storage_url = PG_URL
+
+    class Resolved:
+        settings = Settings()
+
+    import redline_core.config as config
+
+    monkeypatch.setattr(config, "resolve_settings", lambda *a, **k: Resolved())
+    parser = cli._parser()
+    args = parser.parse_args(["load", "x"])
+    assert cli._run_store_target(args, None) == PG_URL
+    args = parser.parse_args(["load", "x", "--store", "mine.db"])
+    assert cli._run_store_target(args, None) == "mine.db"
+    args = parser.parse_args(["load", "x", "--no-store"])
+    assert cli._run_store_target(args, None) is None
