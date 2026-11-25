@@ -45,6 +45,7 @@ An *issue* is something the detectors found in one trace. Issues with the same i
 | `large_cache_entry` | Known binary cache payload size exceeds the threshold | 1000000 bytes | [Performance workflows](performance-workflows.md) |
 | `slow_cache_decode` | Explicitly instrumented cache decode exceeds the threshold | 50 ms | [Performance workflows](performance-workflows.md) |
 | `json_decode_hotspot` | Sampled standard-library JSON decoding cost | 50 ms | [Performance workflows](performance-workflows.md) |
+| `unattributed_time` | at least half of a web request is covered by no span | `unattributed_time_ratio = 0.5`, `unattributed_time_ms = 100` | [Unattributed time](#unattributed-time) |
 
 Severity is `info`, `warning` or `critical`. For most of the new detectors, a value at five
 times its threshold is `critical`.
@@ -82,6 +83,45 @@ small per-request summary tables at write time and the UI queries those:
 Two pieces of context are not issues but make every issue easier to understand: the **log
 records** emitted during the request, and the **local variables** of the project frames in
 an exception. See [Logs and exceptions](logs-and-exceptions.md).
+
+## Unattributed time
+
+Every other detector reports something redline recorded. `unattributed_time` reports what it
+could not record: time inside a request that no span covers. It fires when the uncovered time
+is at least `unattributed_time_ms` (default 100 ms) **and** at least `unattributed_time_ratio`
+of the request (default 0.5; `0` turns the detector off). Both can be changed in
+[settings](settings.md#detectors) and in the analysis preview.
+
+How the time is counted:
+
+- Spans of every kind except the wrappers `view`, `middleware` and `transaction` count as
+  covered. A wrapper encloses work without saying what it was, so it does not hide the gap. A
+  [custom span](custom-spans.md) counts: a named block is attributed.
+- Overlapping spans (SQL on several [threads](async-blocking.md#work-on-threads-and-pools), for
+  example) are merged, so time is never counted twice.
+- Severity is `info` just over the floor and `warning` from twice the minimum.
+
+When the trace has a [profile](flamegraphs.md), the finding names the project frame that held
+most of the uncovered time. Without one it only says how much time is unaccounted for.
+
+The time is either your own code (CPU work, a loop) or a client library redline has no
+integration for. For a client, wrap it once and the time gets a name:
+
+```python
+from redline_core import instrument_client_method
+
+instrument_client_method(acme_sdk.Client, "put", client="acme",
+                         target=lambda self, args, kwargs: args[0])
+```
+
+See [Extending](extending.md#instrumenting-a-client). The finding disappears once the
+uncovered share falls below the thresholds.
+
+It is deliberately conservative: it looks only at requests recorded by the Django, FastAPI,
+Flask and Litestar adapters (jobs and hand-made recordings are mostly their own code and
+would always trip it), and it is silent when `max_spans_per_trace` dropped spans, because the
+coverage would be understated. On a [load run](load-testing.md#bottlenecks) the same
+uncovered time appears as an `other` row.
 
 ## Tuning
 

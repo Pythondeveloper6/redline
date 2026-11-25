@@ -93,6 +93,8 @@ def route(api, method, path, params, body):
                 "repeated_scans_threshold",
                 "json_decode_ms",
                 "cache_decode_ms",
+                "unattributed_time_ratio",
+                "unattributed_time_ms",
             }
             if not isinstance(data, dict) or set(data) - {"trace_id", "settings"}:
                 raise ValueError("Choose a trace and detector thresholds")

@@ -32,6 +32,7 @@ from . import (  # noqa: E402
     serializers,
     sql_failures,
     transactions,
+    unattributed,
 )
 
 REGISTRY.extend(
@@ -45,5 +46,6 @@ REGISTRY.extend(
         patterns.detect,
         json_decode.detect,
         llm.detect,
+        unattributed.detect,
     ]
 )

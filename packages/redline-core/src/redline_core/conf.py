@@ -268,6 +268,10 @@ class Settings:
     round_trip_ms: float = 100.0
     pool_wait_ms: float = 50.0
     json_decode_ms: float = 50.0
+    #: ``unattributed_time``: a request is flagged when at least this share of it (0-1;
+    #: 0 disables the detector) *and* at least ``unattributed_time_ms`` is covered by no span.
+    unattributed_time_ratio: float = 0.5
+    unattributed_time_ms: float = 100.0
     #: LLM-call detectors (0 disables each): identical prompt repeated N times in a request,
     #: N back-to-back calls, N calls in one request, and an Anthropic prompt of N characters
     #: sent without prompt caching.
@@ -637,6 +641,8 @@ def _validate(s: Settings) -> None:
         "pool_wait_ms",
         "json_decode_ms",
         "cache_decode_ms",
+        "unattributed_time_ratio",
+        "unattributed_time_ms",
         "slow_query_ms",
         "blocking_ms",
         "slow_serializer_ms",
@@ -646,11 +652,18 @@ def _validate(s: Settings) -> None:
         _check_type(s, name, (int, float), "a number")
         if getattr(s, name) < 0:
             raise SettingsError(f"Redline setting {name!r} must not be negative.")
-    for name in ("round_trip_ms", "pool_wait_ms", "json_decode_ms", "cache_decode_ms"):
+    for name in (
+        "round_trip_ms",
+        "pool_wait_ms",
+        "json_decode_ms",
+        "cache_decode_ms",
+        "unattributed_time_ratio",
+        "unattributed_time_ms",
+    ):
         value = getattr(s, name)
         if isinstance(value, float) and not math.isfinite(value):
             raise SettingsError(f"Redline setting {name!r} must be finite.")
-    for name in ("sample_rate", "profile_sample_rate"):
+    for name in ("sample_rate", "profile_sample_rate", "unattributed_time_ratio"):
         if not 0.0 <= getattr(s, name) <= 1.0:
             raise SettingsError(f"Redline setting {name!r} must be between 0 and 1.")
     _check_type(s, "storage_path", (str,), "a string or os.PathLike")
