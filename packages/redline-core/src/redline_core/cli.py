@@ -2020,7 +2020,7 @@ def _configure_check_findings(p: argparse.ArgumentParser) -> None:
 def _cmd_check_findings(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
     import json
 
-    from .agent.fixprompt import build_fix_prompt
+    from .agent.fixprompt import new_findings
     from .check.report import Report, ReportError
 
     try:
@@ -2032,27 +2032,7 @@ def _cmd_check_findings(args: argparse.Namespace, out: TextIO, err: TextIO) -> i
     except (OSError, ValueError, ReportError) as exc:
         err.write(f"redline check findings: {args.report}: {exc}\n")
         return EXIT_USAGE
-    findings = []
-    for entry in report.requests:
-        server = entry.get("server") or {}
-        for issue in server.get("new_issues") or []:
-            group = {
-                "id": issue.get("id") or f"{issue.get('kind')}:{issue.get('fingerprint')}",
-                "kind": issue.get("kind"),
-                "title": issue.get("title"),
-                "fingerprint": issue.get("fingerprint"),
-                "routes": [entry.get("path")],
-            }
-            findings.append(
-                {
-                    "request": entry.get("name"),
-                    "kind": issue.get("kind"),
-                    "title": issue.get("title"),
-                    "fingerprint": issue.get("fingerprint"),
-                    "sample_trace_id": issue.get("sample_trace_id"),
-                    "prompt": build_fix_prompt(group),
-                }
-            )
+    findings = new_findings(report.requests)
     if args.json:
         out.write(json.dumps({"findings": findings}, indent=2) + "\n")
     else:
