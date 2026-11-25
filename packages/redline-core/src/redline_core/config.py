@@ -148,6 +148,7 @@ GROUPS: dict[str, tuple[str, ...]] = {
         "json_decode_ms",
         "cache_decode_ms",
         "explain_analyze",
+        "explain_url",
     ),
     "storage": (
         "storage_path",
@@ -233,6 +234,10 @@ def mask_secrets(values: Mapping[str, Any]) -> dict[str, Any]:
             out[name] = "***"
     if isinstance(out.get("base_url"), str):
         out["base_url"] = mask_url_userinfo(out["base_url"])
+    if isinstance(out.get("explain_url"), str):
+        from .storage.postgres import mask_url
+
+        out["explain_url"] = mask_url(out["explain_url"])
     if isinstance(out.get("storage_url"), str):
         from .storage.postgres import mask_url
 

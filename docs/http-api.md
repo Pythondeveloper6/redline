@@ -617,6 +617,17 @@ when it cannot be computed. Verdicts and sort order are explained in
 [History](history.md#before-and-after-comparing-periods): regressed means p95 up 20% **and**
 5 ms, or average queries up by 1.
 
+### Database capabilities and plans
+
+| Request | Returns |
+|---|---|
+| `GET api/database/capabilities?db=default&refresh=1` | `{db, supported, vendor, principal, managed, capabilities: {estimated_plan, actual_plan, index_usage, object_definitions}}`; each capability is `{status: granted\|missing\|unknown, detail, grant}` |
+| `POST api/explain/plan` | `{"vendor": "mssql", "plan": "<xml>", "sql": ""}` analyses a pasted SQL Server plan without touching a database; same shape as `POST api/explain` plus `uploaded: true` |
+
+A plan request that fails on a missing SQL Server permission answers `403 explain_permission`
+with the grant in the message. `GET api/indexes` also carries `capabilities`, an `evidence`
+list on each suggestion and, for unused indexes, a `confidence` and `evidence`.
+
 ### Runs
 
 Load-test runs ([Load testing](load-testing.md)).

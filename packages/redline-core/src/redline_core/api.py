@@ -175,7 +175,11 @@ class RedlineAPI:
         #: :class:`~redline_core.access.Access` (meta's ``access`` block, runtime warnings).
         self.access = access
         self.framework = framework
-        self.explain_executor = explain_executor
+        self.explain_executor = (
+            _explain_url_factory(self.settings, explain_executor)
+            if self.settings.explain_url
+            else explain_executor
+        )
         self.run_launcher = run_launcher
         self.run_stopper = run_stopper
         self._index_cache: dict[tuple[float, str], tuple[float, dict[str, Any]]] = {}
@@ -349,6 +353,10 @@ class RedlineAPI:
             return self.issues(params) if method == "GET" else _not_allowed()
         if path == "api/explain":
             return self.explain(body) if method == "POST" else _not_allowed()
+        if path == "api/explain/plan":
+            return self.explain_plan(body) if method == "POST" else _not_allowed()
+        if path == "api/database/capabilities":
+            return self.database_capabilities(params) if method == "GET" else _not_allowed()
         return error(404, "not_found", f"No API endpoint at {path!r}.")
 
     # handlers --------------------------------------------------------------
@@ -633,6 +641,60 @@ class RedlineAPI:
         except ExplainError as exc:
             return error(exc.status, exc.code, exc.message)
         return 200, result.to_dict()
+
+    def explain_plan(self, body: bytes | str | Mapping[str, Any] | None) -> Response:
+        """Analyse a plan the caller pastes or uploads (``{"vendor": "mssql", "plan": "<xml>"}``).
+
+        Nothing is executed and no database is touched: for sites where no login may read
+        plans from the application, a plan saved from the database's own tools is enough.
+        """
+        parsed = _json_body(body)
+        if not isinstance(parsed, Mapping):
+            return parsed
+        vendor = str(parsed.get("vendor", "mssql"))
+        plan = parsed.get("plan")
+        if vendor != "mssql":
+            return error(400, "unsupported_vendor", "Plan upload supports SQL Server XML plans.")
+        if not isinstance(plan, str) or not plan.strip() or len(plan) > 5_000_000:
+            return error(400, "invalid_body", "'plan' must be the plan XML (up to 5 MB).")
+        sql = parsed.get("sql", "")
+        if not isinstance(sql, str):
+            return error(400, "invalid_body", "'sql' must be text.")
+        from .explain_mssql import analyze_mssql
+        from .plan_analysis import render_text
+
+        try:
+            analysis = analyze_mssql(plan, sql)
+        except Exception:
+            return error(422, "explain_failed", "The plan could not be parsed as SQL Server XML.")
+        return 200, {
+            "vendor": "mssql",
+            "analyzed": "RunTimeInformation" in plan,
+            "uploaded": True,
+            "plan": plan,
+            "text": render_text(analysis.tree),
+            "tree": analysis.tree.to_dict(),
+            "findings": [f.to_dict() for f in analysis.findings],
+            "suggested_indexes": list(analysis.suggested_indexes),
+        }
+
+    def database_capabilities(self, params: Mapping[str, Any]) -> Response:
+        """What the plan login may do (``GET api/database/capabilities?db=alias``)."""
+        from .database_capabilities import capabilities_for
+
+        alias = _str_param(params, "db") or "default"
+        refresh = _str_param(params, "refresh") in ("1", "true")
+        executor = self.explain_executor(alias, "mssql") if self.explain_executor else None
+        if executor is None:
+            return 200, {
+                "db": alias,
+                "vendor": None,
+                "supported": False,
+                "capabilities": {},
+                "message": f"No plan-capable database connection for {alias!r}.",
+            }
+        report = capabilities_for(f"{alias}", executor, "mssql", refresh=refresh)
+        return 200, {"db": alias, "supported": True, **(report or {})}
 
     # v0.2 ------------------------------------------------------------------
     def _ext(self, name: str) -> Callable[..., Any]:
@@ -1087,6 +1149,50 @@ class RedlineAPI:
         if self.run_stopper is None:
             return error(501, "not_supported", "This adapter cannot stop load runs.")
         return 200, {"stopped": bool(self.run_stopper(run_id))}
+
+
+def _explain_url_factory(settings: Settings, fallback: Any) -> Any:
+    """An ``explain_executor`` that runs plans on the separate ``explain_url`` login for the
+    databases of that vendor, and leaves the others to ``fallback``."""
+    state: dict[str, Any] = {}
+    lock = threading.Lock()
+
+    def factory(alias: str, vendor: str) -> Any:
+        from .vendors import get_vendor
+
+        try:
+            from sqlalchemy.engine import make_url
+        except ImportError:  # pragma: no cover - core has no SQLAlchemy without the extra
+            return fallback(alias, vendor) if fallback else None
+        with lock:
+            if "executor" not in state:
+                try:
+                    url = make_url(str(settings.explain_url))
+                    state["vendor"] = get_vendor(url.get_backend_name()).name
+                    state["engine"] = _make_explain_engine(url)
+                except Exception:
+                    capture_failure("Redline explain_url engine could not be created")
+                    state["executor"] = None
+                    state["vendor"] = None
+                else:
+                    from .contrib.sqlalchemy import build_executor
+
+                    state["executor"] = build_executor(
+                        state["engine"], state["vendor"], lambda: None
+                    )
+        if state.get("executor") is not None and state.get("vendor") == vendor:
+            return state["executor"]
+        return fallback(alias, vendor) if fallback else None
+
+    return factory
+
+
+def _make_explain_engine(url: Any) -> Any:
+    from sqlalchemy import create_engine
+
+    if "+async" in str(url.drivername) or str(url.drivername).endswith(("asyncpg", "aiosqlite")):
+        raise ValueError("explain_url needs a synchronous driver")
+    return create_engine(url, pool_size=1, max_overflow=0, pool_pre_ping=True)
 
 
 _REMOTE_FLAG = "registered_remote"

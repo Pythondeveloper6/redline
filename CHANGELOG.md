@@ -12,6 +12,14 @@ version is below `1.0` the public API may change between minor versions.
 
 ### Added
 
+- SQL Server plan and index tools check their permissions first. A one-time probe reports
+  `estimated_plan`, `actual_plan`, `index_usage` and `object_definitions` as granted, missing
+  (with the exact `GRANT`) or unknown (`GET api/database/capabilities`, `redline doctor`);
+  a plan request that hits a missing permission answers `403 explain_permission` with the
+  grant instead of a raw driver error. The new `explain_url` setting runs plans on a separate
+  login, `POST api/explain/plan` analyses a pasted XML plan without touching a database, and
+  index suggestions list their evidence and lose a confidence level when catalog visibility
+  is partial. Managed-instance differences are documented.
 - N+1 findings in raw SQL (`text()` or driver SQL) get a real rewrite instead of a hint: a diff
   at the callsite that replaces the per-row SELECT with one `IN` query over all the keys,
   chunked to the database's parameter limit (stated per vendor) and grouped back by the key,

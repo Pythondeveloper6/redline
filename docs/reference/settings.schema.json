@@ -138,6 +138,11 @@
       "type": "boolean",
       "default": false
     },
+    "explain_url": {
+      "type": "string",
+      "nullable": true,
+      "default": null
+    },
     "extra_stores": {
       "type": "array",
       "items": {

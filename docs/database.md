@@ -95,6 +95,62 @@ of things to check.
 If the store cannot compute the workload (a custom store without `sql_workload`), the tab
 says the advisor is not available and the API answers `501 not_supported`.
 
+## SQL Server permissions and capabilities
+
+Every SQL Server plan and catalog feature needs one specific database permission. Application
+logins are normally least-privilege, so Redline asks the server once (`HAS_PERMS_BY_NAME`,
+which reads nothing from your tables and changes nothing) and reports four capabilities:
+
+| Capability | Needs | Used for |
+|---|---|---|
+| `estimated_plan` | `SHOWPLAN` | the **Plan** button (`SET SHOWPLAN_XML ON`) |
+| `actual_plan` | `SHOWPLAN` and the right to run the query | actual plans (`SET STATISTICS XML ON`) |
+| `index_usage` | `VIEW SERVER STATE` (`VIEW DATABASE STATE` on Azure SQL and SQL Server 2022+) | unused indexes (`sys.dm_db_index_usage_stats`) |
+| `object_definitions` | `VIEW DEFINITION` | seeing the existing indexes, so a suggestion is not for an index that exists |
+
+Each is `granted`, `missing` (with the exact `GRANT` for your administrator) or `unknown`
+(the probe itself failed). See them with `GET api/database/capabilities?db=default`, and
+`redline doctor` lists them when a plan login is configured (`explain_url` or the
+`REDLINE_DATABASE_URL` environment variable):
+
+```text
+ok    database    SQL Server at mssql+pyodbc://svc:***@host/shop as svc
+warn  db:estimat  This login cannot read estimated plans (SHOWPLAN). Ask the DBA: GRANT SHOWPLAN TO [svc];
+ok    db:index_u  Read index usage statistics (VIEW ... STATE).
+```
+
+A plan request that hits a missing permission now answers `403 explain_permission` naming
+the permission and the grant, instead of a raw driver error. Three ways around a missing
+grant:
+
+- **A separate plan login.** Set `explain_url` (a synchronous SQLAlchemy URL such as
+  `mssql+pyodbc://planner:***@host/shop?driver=ODBC+Driver+18+for+SQL+Server`). EXPLAIN,
+  plan and catalog requests for SQL Server databases use it, so the application's own login
+  stays least-privilege. The password is masked everywhere settings are shown.
+- **Paste or upload a plan.** Save the XML plan from SSMS or Azure Data Studio and
+  `POST api/explain/plan` with `{"vendor": "mssql", "plan": "<ShowPlanXML...>"}`; it is
+  analysed with the same Showplan analysis, nothing is executed and no database is touched
+  (it works even when `read_only` is on).
+- **Ask for the grant** shown above.
+
+Index suggestions list the **evidence** they were built from (workload, whether a scan was
+seen in a plan, whether the existing indexes could be read), and their confidence drops one
+level when the probe shows catalog visibility is partial, because a login that cannot see
+every object may be missing an index that already exists.
+
+### Managed SQL Server (Azure SQL and similar)
+
+Known differences from a self-managed instance, from the vendor documentation. A live managed
+instance is not yet part of the qualification matrix, so treat this as expected behaviour to
+verify, not a tested claim:
+
+- Index usage counters reset on a **failover**, a restart or a scale operation, so "unused"
+  only means unused since then; Redline says so next to every unused-index result.
+- Server-level views are restricted; use `VIEW DATABASE STATE` (the probe reports which
+  grant is needed on a managed instance).
+- Tier limits and automatic tuning can change plans and may drop or create indexes on their
+  own; compare Redline's suggestions with what the service already recommends.
+
 ## Unused indexes
 
 On **PostgreSQL** and **SQL Server**, Redline lists indexes that have **never been scanned**

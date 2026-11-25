@@ -233,6 +233,9 @@ class Settings:
 
     # explain
     explain_analyze: bool = False
+    #: A SQLAlchemy URL for a separate, plan-capable login (``mssql+pyodbc://...``): EXPLAIN,
+    #: plan and catalog requests use it so the application's own login stays least-privilege.
+    explain_url: str | None = None
 
     # storage & retention (``0`` or ``None`` disables a rule)
     max_rows: int | None = 10_000
@@ -660,6 +663,13 @@ def _validate(s: Settings) -> None:
     for name in ("sample_rate", "profile_sample_rate"):
         if not 0.0 <= getattr(s, name) <= 1.0:
             raise SettingsError(f"Redline setting {name!r} must be between 0 and 1.")
+    if s.explain_url is not None:
+        _check_type(s, "explain_url", (str,), "a SQLAlchemy URL or None")
+        if not re.match(r"^[A-Za-z][A-Za-z0-9+._-]*://", s.explain_url.strip()):
+            raise SettingsError(
+                "Redline setting 'explain_url' must be a SQLAlchemy URL such as "
+                "mssql+pyodbc://user:password@host/db?driver=..."
+            )
     _check_type(s, "storage_path", (str,), "a string or os.PathLike")
     if s.storage_url is not None:
         _check_type(s, "storage_url", (str,), "a postgresql:// URL or None")

@@ -4395,6 +4395,62 @@ of things to check.
 If the store cannot compute the workload (a custom store without `sql_workload`), the tab
 says the advisor is not available and the API answers `501 not_supported`.
 
+## SQL Server permissions and capabilities
+
+Every SQL Server plan and catalog feature needs one specific database permission. Application
+logins are normally least-privilege, so Redline asks the server once (`HAS_PERMS_BY_NAME`,
+which reads nothing from your tables and changes nothing) and reports four capabilities:
+
+| Capability | Needs | Used for |
+|---|---|---|
+| `estimated_plan` | `SHOWPLAN` | the **Plan** button (`SET SHOWPLAN_XML ON`) |
+| `actual_plan` | `SHOWPLAN` and the right to run the query | actual plans (`SET STATISTICS XML ON`) |
+| `index_usage` | `VIEW SERVER STATE` (`VIEW DATABASE STATE` on Azure SQL and SQL Server 2022+) | unused indexes (`sys.dm_db_index_usage_stats`) |
+| `object_definitions` | `VIEW DEFINITION` | seeing the existing indexes, so a suggestion is not for an index that exists |
+
+Each is `granted`, `missing` (with the exact `GRANT` for your administrator) or `unknown`
+(the probe itself failed). See them with `GET api/database/capabilities?db=default`, and
+`redline doctor` lists them when a plan login is configured (`explain_url` or the
+`REDLINE_DATABASE_URL` environment variable):
+
+```text
+ok    database    SQL Server at mssql+pyodbc://svc:***@host/shop as svc
+warn  db:estimat  This login cannot read estimated plans (SHOWPLAN). Ask the DBA: GRANT SHOWPLAN TO [svc];
+ok    db:index_u  Read index usage statistics (VIEW ... STATE).
+```
+
+A plan request that hits a missing permission now answers `403 explain_permission` naming
+the permission and the grant, instead of a raw driver error. Three ways around a missing
+grant:
+
+- **A separate plan login.** Set `explain_url` (a synchronous SQLAlchemy URL such as
+  `mssql+pyodbc://planner:***@host/shop?driver=ODBC+Driver+18+for+SQL+Server`). EXPLAIN,
+  plan and catalog requests for SQL Server databases use it, so the application's own login
+  stays least-privilege. The password is masked everywhere settings are shown.
+- **Paste or upload a plan.** Save the XML plan from SSMS or Azure Data Studio and
+  `POST api/explain/plan` with `{"vendor": "mssql", "plan": "<ShowPlanXML...>"}`; it is
+  analysed with the same Showplan analysis, nothing is executed and no database is touched
+  (it works even when `read_only` is on).
+- **Ask for the grant** shown above.
+
+Index suggestions list the **evidence** they were built from (workload, whether a scan was
+seen in a plan, whether the existing indexes could be read), and their confidence drops one
+level when the probe shows catalog visibility is partial, because a login that cannot see
+every object may be missing an index that already exists.
+
+### Managed SQL Server (Azure SQL and similar)
+
+Known differences from a self-managed instance, from the vendor documentation. A live managed
+instance is not yet part of the qualification matrix, so treat this as expected behaviour to
+verify, not a tested claim:
+
+- Index usage counters reset on a **failover**, a restart or a scale operation, so "unused"
+  only means unused since then; Redline says so next to every unused-index result.
+- Server-level views are restricted; use `VIEW DATABASE STATE` (the probe reports which
+  grant is needed on a managed instance).
+- Tier limits and automatic tuning can change plans and may drop or create indexes on their
+  own; compare Redline's suggestions with what the service already recommends.
+
 ## Unused indexes
 
 On **PostgreSQL** and **SQL Server**, Redline lists indexes that have **never been scanned**
@@ -10397,6 +10453,7 @@ security review yet.
 | Generator credentials leak through the run command | Information disclosure | the access token comes from `REDLINE_TOKEN` or a file, never argv; a PostgreSQL URL reaches a UI-started child through the environment and is masked in every message | environment variables are visible to the same user's processes |
 | A UI or API caller makes the generator run a command or read a file | Elevation of privilege | scenario keys `auth`, `identities`, `identities_file` and `data` are refused from `POST api/runs` (400) and only read from a scenario file; the token command runs without a shell | a scenario file is trusted like any script you run |
 | Identity or token secrets stored or logged | Information disclosure | only the identity name is recorded; header, cookie, token-command and token-request credentials are masked in the stored config; the token is never put in a log, message or error | the secret still lives in the generator process |
+| The plan login's credentials leak, or a plan upload attacks the parser | Information disclosure / DoS | `explain_url` is masked in config and API output; plan upload rejects DTDs and entities (`<!`), caps size (5 MB), elements (20,000) and depth, and never executes anything; the probe only calls `HAS_PERMS_BY_NAME` | the plan login is a second credential to protect |
 | Arbitrary SQL through EXPLAIN | Elevation of privilege | EXPLAIN takes trace/span ids, never SQL; `is_explainable` on stored text; rolled back | under `explain_analyze` a planted `SELECT` calling a side-effecting function would run (in a rolled-back transaction) |
 | Store file stolen from disk or backups | Information disclosure | redaction, retention, file permissions | no at-rest encryption |
 | Crafted request data makes redaction slow | Denial of service | redaction patterns are linear-time; error, header and identifier texts are cut before they are scanned | free-text capture still costs CPU proportional to the capture budgets |
@@ -11172,6 +11229,7 @@ See [Flamegraphs](flamegraphs.md). Needs `redline-core[profile]`.
 | `editor` | `"vscode"`, `"cursor"`, `"pycharm"`, `"idea"`, `"sublime"`, `"none"`, or a template string | `"vscode"` | Where callsite links open. A template contains `{file}` (absolute path) and `{line}`. See [Open in editor](the-ui.md#open-in-editor) |
 | `server_timing` | `"auto"` or `bool` | `"auto"` | Add a `Server-Timing` header (trace id, query count and time) to recorded responses. `auto` means on when the framework is in debug mode. See [Server-Timing and the badge](server-timing-badge.md) |
 | `badge` | `"auto"` or `bool` | `"auto"` | Inject the floating badge into HTML responses. `auto` means on when the framework is in debug mode (FastAPI, Flask and Litestar: the app's `debug` flag) |
+| `explain_url` | `str` | `None` | A SQLAlchemy URL for a separate plan-capable login (synchronous driver). EXPLAIN, plan and catalog requests for that database type use it so the application's own login stays least-privilege. The password is masked in `redline config` and the API |
 | `accept_remote_runs` | `bool` | `False` | Accept load runs registered over HTTP by a generator on another host (`POST api/runs/register`, `.../steps`, `.../finish`). Refused while `read_only` is on |
 | `load_from_ui` | `bool` | `False` | Allow starting a [load run](load-testing.md#starting-a-run-from-the-ui) from the UI (`POST api/runs`). Needs `redline-core[load]`. Off whenever `read_only` is on or the `load` feature is off |
 | `checks_from_ui` | `"auto"` or `bool` | `"auto"` | Allow starting [refactor-check](refactor-check.md) baseline and compare runs from the UI (`POST api/checks/runs`). `auto` means on only while the framework is in debug mode; `true` and `false` force it. Needs `redline-core[load]` (httpx). Off whenever `read_only` is on or the `checks` feature is off; the `production` preset sets it to `false`. Reading suites and reports is not affected |
@@ -12087,6 +12145,17 @@ An endpoint's `a` or `b` is `null` when it is new or gone, and `delta_p95_pct` i
 when it cannot be computed. Verdicts and sort order are explained in
 [History](history.md#before-and-after-comparing-periods): regressed means p95 up 20% **and**
 5 ms, or average queries up by 1.
+
+### Database capabilities and plans
+
+| Request | Returns |
+|---|---|
+| `GET api/database/capabilities?db=default&refresh=1` | `{db, supported, vendor, principal, managed, capabilities: {estimated_plan, actual_plan, index_usage, object_definitions}}`; each capability is `{status: granted\|missing\|unknown, detail, grant}` |
+| `POST api/explain/plan` | `{"vendor": "mssql", "plan": "<xml>", "sql": ""}` analyses a pasted SQL Server plan without touching a database; same shape as `POST api/explain` plus `uploaded: true` |
+
+A plan request that fails on a missing SQL Server permission answers `403 explain_permission`
+with the grant in the message. `GET api/indexes` also carries `capabilities`, an `evidence`
+list on each suggestion and, for unused indexes, a `confidence` and `evidence`.
 
 ### Runs
 

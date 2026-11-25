@@ -988,6 +988,59 @@ def _postgres_checks(url: str) -> list[tuple[str, str, str]]:
     return [("ok", "storage", f"PostgreSQL {version} at {where}, shared by every worker")]
 
 
+def _database_checks(resolved: Any, environ: Any = None) -> list[tuple[str, str, str]]:
+    """The four SQL Server capabilities (plans, index usage, definitions) as doctor lines.
+
+    Runs only when a plan login is configured: the ``explain_url`` setting, else the
+    ``REDLINE_DATABASE_URL`` environment variable. Nothing is read from user tables.
+    """
+    import os
+
+    env = os.environ if environ is None else environ
+    url = resolved.settings.explain_url or env.get("REDLINE_DATABASE_URL")
+    if not url:
+        return []
+    from .storage.postgres import mask_url
+
+    try:
+        from sqlalchemy import create_engine
+        from sqlalchemy.engine import make_url
+
+        parsed = make_url(url)
+    except Exception:
+        return [("warn", "database", "cannot read the database URL (is SQLAlchemy installed?)")]
+    from .vendors import get_vendor
+
+    vendor = get_vendor(parsed.get_backend_name()).name
+    where = mask_url(str(url))
+    if vendor != "mssql":
+        return [("ok", "database", f"{vendor} at {where}: no permission probe needed")]
+    from .database_capabilities import CAPABILITIES, probe_mssql
+
+    engine = create_engine(parsed, pool_size=1, max_overflow=0)
+    try:
+
+        def executor(sql: str, params: Any) -> list[Any]:
+            with engine.connect() as conn:
+                try:
+                    return [tuple(r) for r in conn.exec_driver_sql(sql).fetchall()]
+                finally:
+                    conn.rollback()
+
+        report = probe_mssql(executor)
+    finally:
+        engine.dispose()
+    checks = []
+    for name in CAPABILITIES:
+        cap = report["capabilities"][name]
+        status = {"granted": "ok", "missing": "warn"}.get(cap["status"], "warn")
+        detail = cap["detail"] + (f" Ask the DBA: {cap['grant']}" if cap.get("grant") else "")
+        checks.append((status, f"db:{name}"[:11], detail))
+    who = report.get("principal") or "unknown login"
+    checks.insert(0, ("ok", "database", f"SQL Server at {where} as {who}"))
+    return checks
+
+
 def _cmd_doctor(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
     if args.json:
         import io
@@ -1021,6 +1074,7 @@ def _cmd_doctor(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
     checks = _doctor_checks(
         resolved, strict=getattr(args, "strict", False), workers=getattr(args, "workers", None)
     )
+    checks.extend(_database_checks(resolved))
     if args.production:
         from .production_checks import production_checks
 

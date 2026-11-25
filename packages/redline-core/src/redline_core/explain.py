@@ -146,6 +146,12 @@ def run_explain(
     except ExplainError:
         raise
     except Exception as exc:
+        if vendor == "mssql":
+            from .database_capabilities import permission_hint
+
+            hint = permission_hint(exc)
+            if hint is not None:
+                raise ExplainError("explain_permission", hint["message"], 403) from None
         raise ExplainError("explain_failed", f"{type(exc).__name__}: {exc}", 422) from exc
     try:
         plan = _raw_plan(vendor, rows)
