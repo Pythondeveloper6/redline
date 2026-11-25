@@ -105,13 +105,18 @@ class _StepAgg:
         self.breakdown: Counter[str] = Counter()
         self.hist = Histogram()
         self.svc = Histogram()
+        self.ttfb = Histogram()
+        self.streams: dict[str, Any] = {}
+        self.websockets: dict[str, Any] = {}
+        #: kind -> worker -> highest number open at once
+        self.peaks: dict[str, dict[int, int]] = {}
         self.done: dict[int, tuple[float, bool]] = {}  # worker -> (until, partial)
         self.final = False
 
     def completed_any(self) -> bool:
         return bool(self.ok or self.errors)
 
-    def add(self, m: Mapping[str, Any]) -> None:
+    def add(self, m: Mapping[str, Any], worker: int = -1) -> None:
         self.sent += m["sent"]
         self.ok += m["ok"]
         self.errors += m["errors"]
@@ -121,6 +126,56 @@ class _StepAgg:
             self.hist.merge(Histogram.from_bytes(m["hist"]))
         if m["svc"]:
             self.svc.merge(Histogram.from_bytes(m["svc"]))
+        if m.get("ttfb"):
+            self.ttfb.merge(Histogram.from_bytes(m["ttfb"]))
+        extra = m.get("extra") or {}
+        if "streams" in extra:
+            _merge_extra(self.streams, extra["streams"], ("ttlb",), self.peaks, "streams", worker)
+        if "websockets" in extra:
+            _merge_extra(
+                self.websockets,
+                extra["websockets"],
+                ("connect", "latency"),
+                self.peaks,
+                "websockets",
+                worker,
+            )
+
+
+def _plain(extra: Mapping[str, Any]) -> dict[str, Any]:
+    """Stream/websocket numbers for a step result: histograms become p50/p95 pairs."""
+    out: dict[str, Any] = {}
+    for key, value in extra.items():
+        if isinstance(value, Histogram):
+            out[f"{key}_p50_ms"] = round(value.percentile(50), 3)
+            out[f"{key}_p95_ms"] = round(value.percentile(95), 3)
+        else:
+            out[key] = value
+    return out
+
+
+def _merge_extra(
+    into: dict[str, Any],
+    part: Mapping[str, Any],
+    hists: tuple[str, ...],
+    peaks: dict[str, dict[int, int]],
+    kind: str,
+    worker: int,
+) -> None:
+    """Add one worker's stream/websocket numbers to a step's: counts add, histograms merge,
+    and ``max_open`` is the sum of each worker's own peak (an upper bound that is tight at
+    steady state, when the workers are balanced)."""
+    for key, value in part.items():
+        if key in hists:
+            if value:
+                h = into.setdefault(key, Histogram())
+                h.merge(Histogram.from_bytes(value))
+        elif key == "max_open":
+            by_worker = peaks.setdefault(kind, {})
+            by_worker[worker] = max(by_worker.get(worker, 0), int(value))
+            into[key] = sum(by_worker.values())
+        else:
+            into[key] = into.get(key, 0) + value
 
 
 class _Window:
@@ -294,6 +349,10 @@ def _request_cfg(r: Any) -> dict[str, Any]:
         "expect": [dict(rule) for rule in r.expect],
         "max_ms": r.max_ms,
         "extract": {k: dict(v) for k, v in r.extract.items()},
+        "type": r.type,
+        "hold_s": r.hold_s,
+        "messages": list(r.messages),
+        "reply_timeout_s": r.reply_timeout_s,
     }
 
 
@@ -571,7 +630,7 @@ class _Engine:
             for step, m in msg["steps"].items():
                 agg = self.aggs.get(step)
                 if agg is not None:
-                    agg.add(m)
+                    agg.add(m, k)
                 self.window.add(m)
                 if m.get("identities"):
                     self.identity_counts.update(m["identities"])
@@ -632,6 +691,9 @@ class _Engine:
             hist=agg.hist,
             service_hist=agg.svc,
             partial=partial,
+            ttfb_hist=agg.ttfb,
+            streams=_plain(agg.streams),
+            websockets=_plain(agg.websockets),
         )
         if result.sent == 0 and result.dropped == 0 and partial:
             return

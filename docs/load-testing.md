@@ -383,6 +383,56 @@ A failed rule is counted as its own error class, `assertion`, in the error break
 `max_ms` does the same for a response slower than an agreed limit. Failure reasons never
 include body or header values.
 
+### Streams and WebSockets
+
+Every request is timed to its **first byte** (headers received) as well as to its **last byte**.
+The step table's latency is the last byte; first byte is in each step's `ttfb_p50_ms` /
+`ttfb_p95_ms` and the run summary, and the CLI prints both. A response that streams for a while
+shows the difference: the first byte is what the user feels.
+
+A request can hold a connection open instead of finishing:
+
+```toml
+[[requests]]
+name = "live feed"
+type = "stream"            # server-sent events or a chunked response
+path = "/events"
+hold_s = 30                # how long to hold it open
+weight = 1
+
+[[requests]]
+name = "chat"
+type = "websocket"         # needs: pip install "redline-core[load-websocket]"
+path = "/ws"
+messages = ["hello", { type = "ping" }]   # sent in order; each reply is timed
+hold_s = 60                # then keep the connection open this long
+reply_timeout_s = 5
+```
+
+For these, the latency in the step table is the time to the **first byte** (stream) or to the
+**handshake** (WebSocket): the hold is not latency. Each step also reports how many were held,
+events received (a server-sent event, or a chunk for other streams), messages answered, the
+**highest number open at once** (summed over the workers' own peaks, so exact only when they
+are balanced), the time to the last byte of a stream and the connect and reply latency of
+WebSockets. A held stream occupies one of the worker's `connections` and an arrival slot
+(`max_inflight`): to hold 500 at once with 2 workers set `connections = 300` or more. They
+cannot carry a request body, and headers (identities, tokens) are sent on the handshake.
+
+### Browser pages
+
+Browser-side cost (rendering, bundle size, requests per page) is out of scope: Redline does
+not drive a browser. To get the *server* side of real page loads grouped like a load run, run
+a browser automation script (any tool) that adds one header to every request of a page load:
+
+```text
+X-Redline-Run: <run id>;step=1;page=checkout-17
+```
+
+with a run registered in the app's store (`redline load` registers one; or POST
+`api/runs/register` with `accept_remote_runs`). The app tags those traces with `page`, and
+`GET api/runs/{id}/pages` sums them per page load: requests, total server time, queries and
+the slowest route.
+
 ### Identities
 
 One set of credentials makes the app see one user thousands of times: per-user caches stay
@@ -724,8 +774,9 @@ database is something to choose deliberately.
 
 ## Limits
 
-- It tests **HTTP endpoints over the network**. It does not model browsers, WebSockets or
-  think time.
+- It tests **HTTP endpoints over the network**, plus held streams and WebSocket connections
+  (see [Streams and WebSockets](#streams-and-websockets)). It does not drive a browser: see
+  [Browser pages](#browser-pages) for the recipe.
 - Latency is as measured by the generator, including the network and the generator's own
   event loop. Distrust sub-millisecond numbers.
 - Correlated bottlenecks need the app to record the load; with strong sampling, or a

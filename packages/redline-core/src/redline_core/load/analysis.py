@@ -76,6 +76,11 @@ class StepResult:
     hist: Histogram = field(default_factory=Histogram)  # latency from the scheduled time
     service_hist: Histogram = field(default_factory=Histogram)  # from the actual send
     partial: bool = False
+    #: time to first byte (headers received) of every request; ``hist`` is the time to the
+    #: last byte. For a held stream or websocket ``hist`` is the time to the first byte.
+    ttfb_hist: Histogram = field(default_factory=Histogram)
+    streams: dict[str, Any] = field(default_factory=dict)
+    websockets: dict[str, Any] = field(default_factory=dict)
 
     @property
     def completed(self) -> int:
@@ -116,6 +121,13 @@ class StepResult:
             "duration_s": _r(self.duration_s),
             "partial": self.partial,
         }
+        if self.ttfb_hist.count:
+            out["ttfb_p50_ms"] = _r(self.ttfb_hist.percentile(50))
+            out["ttfb_p95_ms"] = _r(self.ttfb_hist.percentile(95))
+        if self.streams:
+            out["streams"] = dict(self.streams)
+        if self.websockets:
+            out["websockets"] = dict(self.websockets)
         if include_hist:
             out["hist"] = base64.b64encode(self.hist.to_bytes()).decode("ascii")
             out["service_hist"] = base64.b64encode(self.service_hist.to_bytes()).decode("ascii")
@@ -292,6 +304,25 @@ def analyze(
     else:
         detail = f"knee at step {knee.step} ({knee.target_rps:g} rps): {reason}"
     extra: dict[str, Any] = {}
+    ttfb = Histogram()
+    for s in steps:
+        ttfb.merge(s.ttfb_hist)
+    if ttfb.count:
+        extra["ttfb_p50_ms"] = _r(ttfb.percentile(50))
+        extra["ttfb_p95_ms"] = _r(ttfb.percentile(95))
+    for key in ("streams", "websockets"):
+        parts = [s.__dict__[key] for s in steps if s.__dict__[key]]
+        if parts:
+            totals: dict[str, Any] = {
+                "count": sum(p.get("count", 0) for p in parts),
+                "max_open": max(p.get("max_open", 0) for p in parts),
+                "by_step": {s.step: dict(s.__dict__[key]) for s in steps if s.__dict__[key]},
+            }
+            if key == "streams":
+                totals["events"] = sum(p.get("events", 0) for p in parts)
+            else:
+                totals["messages"] = sum(p.get("messages", 0) for p in parts)
+            extra[key] = totals
     if seconds:
         rec = recovery(steps, seconds, starts or {})
         if rec:

@@ -112,7 +112,14 @@ _REQUEST_KEYS = {
     "expect",
     "max_ms",
     "extract",
+    "type",
+    "hold_s",
+    "messages",
+    "reply_timeout_s",
 }
+REQUEST_TYPES = ("http", "stream", "websocket")
+MAX_HOLD_S = 3_600.0
+MAX_MESSAGES = 100
 _FLOW_KEYS = {"name", "weight", "steps"}
 MAX_FLOW_STEPS = 50
 
@@ -137,6 +144,12 @@ class RequestSpec:
     max_ms: float | None = None  # a slower success counts as an ``assertion`` failure
     #: Variables read from the response for later steps of a flow: ``{name: source}``.
     extract: dict[str, dict[str, Any]] = field(default_factory=dict)
+    #: ``http`` (default), ``stream`` (hold a server-sent-events/chunked response open for
+    #: ``hold_s``) or ``websocket`` (connect, send ``messages``, hold ``hold_s``).
+    type: str = "http"
+    hold_s: float | None = None
+    messages: tuple[Any, ...] = ()
+    reply_timeout_s: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -159,6 +172,14 @@ class RequestSpec:
             out["max_ms"] = self.max_ms
         if self.extract:
             out["extract"] = {k: dict(v) for k, v in self.extract.items()}
+        if self.type != "http":
+            out["type"] = self.type
+        if self.hold_s is not None:
+            out["hold_s"] = self.hold_s
+        if self.messages:
+            out["messages"] = list(self.messages)
+        if self.reply_timeout_s is not None:
+            out["reply_timeout_s"] = self.reply_timeout_s
         return out
 
 
@@ -562,6 +583,39 @@ def _request(
         isinstance(max_ms, bool) or not isinstance(max_ms, (int, float)) or max_ms <= 0
     ):
         raise ScenarioError(f"must be a number > 0 (got {max_ms!r})", f"{path}.max_ms")
+    kind = raw.get("type", "http")
+    if kind not in REQUEST_TYPES:
+        raise ScenarioError(
+            f"must be one of {', '.join(REQUEST_TYPES)} (got {kind!r})", f"{path}.type"
+        )
+    hold = raw.get("hold_s")
+    if hold is not None:
+        hold = parse_duration(hold, f"{path}.hold_s")
+        if hold > MAX_HOLD_S:
+            raise ScenarioError(f"must be at most {MAX_HOLD_S:g}s", f"{path}.hold_s")
+    if kind == "stream" and not hold:
+        raise ScenarioError("a stream request needs hold_s (how long to hold it open)", path)
+    messages_raw = raw.get("messages")
+    messages: tuple[Any, ...] = ()
+    if messages_raw is not None:
+        if kind != "websocket":
+            raise ScenarioError("only a websocket request has messages", f"{path}.messages")
+        if not isinstance(messages_raw, (list, tuple)) or len(messages_raw) > MAX_MESSAGES:
+            raise ScenarioError(
+                f"must be a list of at most {MAX_MESSAGES} messages", f"{path}.messages"
+            )
+        try:
+            json.dumps(list(messages_raw))
+        except (TypeError, ValueError):
+            raise ScenarioError("messages must be JSON values", f"{path}.messages") from None
+        messages = tuple(messages_raw)
+    if kind == "websocket" and not (hold or messages):
+        raise ScenarioError("a websocket request needs messages or hold_s", path)
+    if kind != "http" and (raw.get("has_json") or raw.get("json") is not None or body):
+        raise ScenarioError("only an http request has a body", path)
+    reply_timeout = raw.get("reply_timeout_s")
+    if reply_timeout is not None:
+        reply_timeout = parse_duration(reply_timeout, f"{path}.reply_timeout_s")
     name = raw.get("name") or f"{method} {url_path}"
     if not isinstance(name, str):
         raise ScenarioError(f"must be a string (got {name!r})", f"{path}.name")
@@ -578,6 +632,10 @@ def _request(
         expect=expect_rules,
         max_ms=float(max_ms) if max_ms is not None else None,
         extract=extract,
+        type=kind,
+        hold_s=float(hold) if hold else None,
+        messages=messages,
+        reply_timeout_s=float(reply_timeout) if reply_timeout else None,
     )
 
 

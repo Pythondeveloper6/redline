@@ -571,6 +571,29 @@ def _print_final(printer: _Printer, result: Any) -> None:
             breakdown[key] = breakdown.get(key, 0) + n
     if breakdown:
         printer.line("errors: " + ", ".join(f"{k} ×{v}" for k, v in sorted(breakdown.items())))
+    if "ttfb_p95_ms" in s:
+        printer.line(
+            f"first byte: p50 {fmt_ms(s['ttfb_p50_ms'])}  p95 {fmt_ms(s['ttfb_p95_ms'])}"
+            f"  (last byte p95 {fmt_ms(s['p95_ms'])})"
+        )
+    for key, label in (("streams", "streams"), ("websockets", "websockets")):
+        if key in s:
+            part = s[key]
+            detail = (
+                f"{part['events']} events" if key == "streams" else f"{part['messages']} messages"
+            )
+            printer.line(
+                f"{label}: {part['count']} held, {detail}, peak concurrent {part['max_open']}"
+            )
+            for step_no, row in sorted(part["by_step"].items()):
+                latency = (
+                    f", reply p95 {fmt_ms(row['latency_p95_ms'])}"
+                    if "latency_p95_ms" in row
+                    else ""
+                )
+                printer.line(
+                    f"  step {step_no}: {row['count']} held, concurrent {row['max_open']}{latency}"
+                )
     limit = s.get("limiting_resource")
     if limit:
         printer.line(f"limiting resource: step {limit['step']}: {limit['detail']}")

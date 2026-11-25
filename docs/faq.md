@@ -102,7 +102,7 @@ model, corrects for coordinated omission, finds the knee, and shows which query 
 got slower at each step. See [Load testing](load-testing.md).
 
 It is deliberately smaller than Locust or k6: HTTP only, scenario files instead of
-scripting, no distributed generators, no browsers or WebSockets. If you need those, use them
+scripting, no browsers (it can hold streams and WebSocket connections open). If you need those, use them
 and tag the requests with `X-Redline-Run` so Redline can still correlate.
 
 ## Does it slow my application down?

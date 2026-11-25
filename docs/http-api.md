@@ -641,6 +641,7 @@ Load-test runs ([Load testing](load-testing.md)).
 | `POST api/runs/{id}/stop` | stop a run: `{"stopped": true}` |
 | `POST api/runs/register` | a remote generator registers a run (`201`); needs `accept_remote_runs` |
 | `POST api/runs/{id}/steps` | the generator reports one finished step (`hist` is a base64 histogram) |
+| `GET api/runs/{id}/pages` | requests of the run tagged `page=<id>`, summed per page load (browser scripts) |
 | `GET api/runs/{id}/metrics` | resource metrics per step and the `limiting_resource` verdict |
 | `POST api/runs/{id}/metrics` | the remote generator adds `{step, values: {name: number}}` from its metric sources |
 | `POST api/runs/{id}/finish` | the generator ends the run with `done`, `stopped` or `failed` |

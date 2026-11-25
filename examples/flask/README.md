@@ -114,6 +114,10 @@ many seconds p95 took to come back to its level before the burst, and a long sta
 for drift (a leak shows as `degrading`). The same shape from the command line:
 `--stages 5:20s,40:15s,5:40s`.
 
+`scenario_stream.toml` shows the first-byte vs last-byte numbers and a held `type = "stream"`
+request (set its weight above 0 and point it at your own server-sent-events route; the demo
+shop has none). A `type = "websocket"` request needs `redline-core[load-websocket]`.
+
 `scenario_flow.toml` is a journey: list the orders, take the first id from the answer and open
 that order (`extract`, `{var:order_id}`), with `expect` checks so an error body would count as
 a failure. The CLI prints the flow and each step at the end of the run.

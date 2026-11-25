@@ -12,6 +12,12 @@ version is below `1.0` the public API may change between minor versions.
 
 ### Added
 
+- Load requests are timed to the first byte as well as the last (`ttfb_p50_ms` / `ttfb_p95_ms`
+  per step and in the summary). `type = "stream"` holds a server-sent-events or chunked response
+  open for `hold_s` and counts events; `type = "websocket"` (extra `redline-core[load-websocket]`)
+  connects, sends scripted messages, times the replies and holds the connection. Each step
+  reports how many were open at once. Browser traffic can be grouped per page load with a
+  `page=<id>` part in `X-Redline-Run` (`GET api/runs/{id}/pages`).
 - A load run reports which resource ran out. While a registered run sends it traffic, each app
   worker samples its own CPU, memory, GC pauses, threads and connection pool once a second
   (`run_metrics`, off in the `production` preset); the run summary carries `resources` per

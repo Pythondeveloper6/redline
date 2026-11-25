@@ -114,6 +114,7 @@ _RUN_BOTTLENECKS = re.compile(rf"^api/runs/{_ID}/bottlenecks$")
 _RUN_STOP = re.compile(rf"^api/runs/{_ID}/stop$")
 _RUN_STEPS = re.compile(rf"^api/runs/{_ID}/steps$")
 _RUN_METRICS = re.compile(rf"^api/runs/{_ID}/metrics$")
+_RUN_PAGES = re.compile(rf"^api/runs/{_ID}/pages$")
 _RUN_FINISH = re.compile(rf"^api/runs/{_ID}/finish$")
 _ISSUE_KINDS = ISSUE_KINDS
 _BUCKETS = {"1h": 3_600.0, "1d": 86_400.0}
@@ -278,6 +279,8 @@ class RedlineAPI:
             return self.register_run(body) if method == "POST" else _not_allowed()
         if m := _RUN_STEPS.match(path):
             return self.register_step(m.group(1), body) if method == "POST" else _not_allowed()
+        if m := _RUN_PAGES.match(path):
+            return self.run_pages(m.group(1)) if method == "GET" else _not_allowed()
         if m := _RUN_METRICS.match(path):
             if method == "GET":
                 return self.run_metrics(m.group(1))
@@ -1108,6 +1111,39 @@ class RedlineAPI:
             return error(400, "invalid_body", problem)
         self._ext("save_run_step")(run_id, step)
         return 200, {"id": run_id, "step": step.step}
+
+    def run_pages(self, run_id: str) -> Response:
+        """Requests grouped by page load: traces of the run tagged ``page=<id>`` (a browser
+        script sends ``X-Redline-Run: <run>;step=<n>;page=<id>``), summed per page."""
+        if self._ext("get_run")(run_id) is None:
+            return error(404, "run_not_found", f"No run {run_id!r}.")
+        page = self.store.list(Filters(tag=("run_id", run_id)), limit=500)
+        pages: dict[str, dict[str, Any]] = {}
+        for item in page.items:
+            tags = item.get("tags") or {}
+            pid = tags.get("page")
+            if not pid:
+                continue
+            row = pages.setdefault(
+                pid,
+                {"page": pid, "requests": 0, "total_ms": 0.0, "queries": 0, "slowest": None,
+                 "started_at": item.get("started_at"), "_slow_ms": -1.0},
+            )  # fmt: skip
+            ms = float(item.get("duration_ms") or 0.0)
+            row["requests"] += 1
+            row["total_ms"] = round(row["total_ms"] + ms, 3)
+            row["queries"] += int(item.get("query_count") or 0)
+            row["started_at"] = min(row["started_at"] or 0, item.get("started_at") or 0)
+            if ms > row["_slow_ms"]:
+                row["_slow_ms"] = ms
+                row["slowest"] = {
+                    "route": item.get("route") or item.get("path"),
+                    "ms": round(ms, 3),
+                }
+        items = sorted(pages.values(), key=lambda r: -r["total_ms"])
+        for row in items:
+            row.pop("_slow_ms", None)
+        return 200, {"id": run_id, "items": items, "truncated": bool(page.next_cursor)}
 
     def run_metrics(self, run_id: str) -> Response:
         """Resource metrics sampled during a run, per step, and the likely limiting resource."""

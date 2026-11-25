@@ -59,7 +59,26 @@ STOP_POLL_S = 0.05
 
 
 class _Acc:
-    __slots__ = ("breakdown", "dropped", "errors", "hist", "identities", "ok", "sent", "svc")
+    __slots__ = (
+        "breakdown",
+        "dropped",
+        "errors",
+        "hist",
+        "identities",
+        "ok",
+        "s_count",
+        "s_events",
+        "s_max_open",
+        "s_ttlb",
+        "sent",
+        "svc",
+        "ttfb",
+        "w_connect",
+        "w_count",
+        "w_latency",
+        "w_max_open",
+        "w_messages",
+    )
 
     def __init__(self) -> None:
         self.sent = 0
@@ -70,9 +89,38 @@ class _Acc:
         self.identities: Counter[str] = Counter()
         self.hist = Histogram()
         self.svc = Histogram()
+        self.ttfb = Histogram()  # time to first byte (every request)
+        # held streams (server-sent events, chunked responses)
+        self.s_count = self.s_events = self.s_max_open = 0
+        self.s_ttlb = Histogram()  # time to last byte: when the hold ended
+        # websockets
+        self.w_count = self.w_messages = self.w_max_open = 0
+        self.w_connect = Histogram()
+        self.w_latency = Histogram()
+
+    def extras(self) -> dict[str, Any]:
+        out: dict[str, Any] = {}
+        if self.s_count or self.s_max_open:
+            out["streams"] = {
+                "count": self.s_count,
+                "events": self.s_events,
+                "max_open": self.s_max_open,
+                "ttlb": self.s_ttlb.to_bytes(),
+            }
+        if self.w_count or self.w_max_open:
+            out["websockets"] = {
+                "count": self.w_count,
+                "messages": self.w_messages,
+                "max_open": self.w_max_open,
+                "connect": self.w_connect.to_bytes(),
+                "latency": self.w_latency.to_bytes() if self.w_latency.count else b"",
+            }
+        return out
 
     def to_msg(self) -> dict[str, Any]:
         return {
+            "ttfb": self.ttfb.to_bytes() if self.ttfb.count else b"",
+            "extra": self.extras(),
             "identities": dict(self.identities),
             "sent": self.sent,
             "ok": self.ok,
@@ -87,9 +135,13 @@ class _Acc:
 class _Ctx:
     """The per-arrival state shared by every request of a flow."""
 
-    __slots__ = ("headers", "lookup", "run_value", "variables")
+    __slots__ = ("headers", "lookup", "observed_end", "run_value", "step", "variables")
 
     def __init__(self) -> None:
+        self.step = 0
+        #: perf_counter time to take as the end of the latency (first byte of a held stream,
+        #: the websocket handshake) instead of the end of the request; ``None`` = the end.
+        self.observed_end: float | None = None
         self.headers: dict[str, str] = {}
         self.lookup: Any = None
         self.run_value = ""
@@ -176,6 +228,8 @@ class _Worker:
         ] + [("flow", f) for f in cfg.get("flows") or () if f["weight"] > 0]
         self.weights = [spec["weight"] for _, spec in self.items]
         self.flow_window: dict[str, _FlowAcc] = {}
+        self.open_streams = 0
+        self.open_ws = 0
         self.headers = dict(cfg.get("headers") or {})
         self.run_header = cfg["run_id"]
         self.window: dict[int, _Acc] = {}
@@ -395,6 +449,7 @@ class _Worker:
         """What one arrival shares across all its requests: the identity, the data row
         and the variables a flow extracts."""
         ctx = _Ctx()
+        ctx.step = step
         ctx.lookup = self.feed.new_context(self.rng) if self.feed is not None else None
         ctx.headers = dict(self.headers)
         if self.tokens is not None:
@@ -436,10 +491,19 @@ class _Worker:
                     render_data(req["body"], lookup), variables
                 ).encode()
             path = render_path(req["path"], self.rng, lookup, variables)
+            kind = req.get("type") or "http"
+            if kind == "websocket":
+                return await self._websocket(req, ctx, headers, path)
+            if kind == "stream":
+                return await self._stream(req, ctx, path, kwargs)
             async with self.sem:
                 sent_at = time.perf_counter()
-                response = await self.client.request(req["method"], path, **kwargs)
-            elapsed_ms = (time.perf_counter() - sent_at) * 1000.0
+                async with self.client.stream(req["method"], path, **kwargs) as response:
+                    first_byte = time.perf_counter()
+                    await response.aread()
+                end = time.perf_counter()
+            self._acc(ctx.step).ttfb.record((first_byte - sent_at) * 1000.0)
+            elapsed_ms = (end - sent_at) * 1000.0
         except asyncio.CancelledError:
             raise
         except ExtractError:
@@ -463,10 +527,129 @@ class _Worker:
                 return "extract", sent_at
         return None, sent_at
 
+    async def _stream(
+        self, req: dict[str, Any], ctx: _Ctx, path: str, kwargs: dict[str, Any]
+    ) -> tuple[str | None, float | None]:
+        """Hold a server-sent-events or chunked response open for ``hold_s`` and count events.
+
+        The latency recorded for the request is the time to the first byte; the hold is not
+        latency. It takes no slot of the request semaphore (the connection pool of the
+        client still bounds how many streams can be open: raise ``connections``)."""
+        acc = self._acc(ctx.step)
+        hold = float(req["hold_s"])
+        events = 0
+        sent_at = time.perf_counter()
+        self.open_streams += 1
+        acc.s_max_open = max(acc.s_max_open, self.open_streams)
+        failure: str | None = None
+        first = end = sent_at
+        try:
+            async with self.client.stream(req["method"], path, **kwargs) as response:
+                first = time.perf_counter()
+                expect = req.get("expect_status")
+                if not (response.status_code in expect if expect else response.status_code < 400):
+                    return str(response.status_code), sent_at
+                sse = "text/event-stream" in response.headers.get("content-type", "")
+
+                async def consume() -> None:
+                    nonlocal events
+                    buf = b""
+                    async for chunk in response.aiter_bytes():
+                        if not sse:
+                            events += 1
+                            continue
+                        buf = (buf + chunk)[-65_536:]
+                        while b"\n\n" in buf:
+                            buf = buf.split(b"\n\n", 1)[1]
+                            events += 1
+
+                try:
+                    await asyncio.wait_for(consume(), timeout=hold)
+                except asyncio.TimeoutError:
+                    pass  # held for the whole time: that is the point
+                end = time.perf_counter()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            failure = type(exc).__name__
+        finally:
+            self.open_streams -= 1
+        if failure is not None:
+            return failure, sent_at
+        acc = self._acc(ctx.step)  # looked up again: a flush may have swapped it out
+        acc.ttfb.record((first - sent_at) * 1000.0)
+        acc.s_ttlb.record((end - sent_at) * 1000.0)
+        acc.s_count += 1
+        acc.s_events += events
+        ctx.observed_end = first
+        return None, sent_at
+
+    async def _websocket(
+        self, req: dict[str, Any], ctx: _Ctx, headers: dict[str, str], path: str
+    ) -> tuple[str | None, float | None]:
+        """Connect, send the scripted messages (timing each reply) and hold the connection."""
+        try:
+            import websockets
+        except ImportError:
+            return "websockets_missing", None
+        acc = self._acc(ctx.step)
+        base = (
+            str(self.cfg["base_url"])
+            .replace("http://", "ws://", 1)
+            .replace("https://", "wss://", 1)
+        )
+        timeout = float(req.get("reply_timeout_s") or self.cfg["timeout_s"])
+        hold = float(req.get("hold_s") or 0.0)
+        sent_at = time.perf_counter()
+        counted_open = False
+        latencies: list[float] = []
+        connected = sent_at
+        try:
+            kwargs: dict[str, Any] = {"open_timeout": float(self.cfg["timeout_s"])}
+            header_arg = "additional_headers"
+            try:
+                import inspect
+
+                if header_arg not in inspect.signature(websockets.connect).parameters:
+                    header_arg = "extra_headers"
+            except (TypeError, ValueError):
+                pass
+            kwargs[header_arg] = headers
+            async with websockets.connect(base + path, **kwargs) as ws:
+                connected = time.perf_counter()
+                self.open_ws += 1
+                counted_open = True
+                self._acc(ctx.step).w_max_open = max(self._acc(ctx.step).w_max_open, self.open_ws)
+                for message in req.get("messages") or ():
+                    t = time.perf_counter()
+                    await ws.send(message if isinstance(message, str) else jsonlib.dumps(message))
+                    await asyncio.wait_for(ws.recv(), timeout=timeout)
+                    latencies.append((time.perf_counter() - t) * 1000.0)
+                deadline = connected + hold
+                while not self.stopping and time.perf_counter() < deadline:
+                    await asyncio.sleep(min(0.2, max(0.0, deadline - time.perf_counter())))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            return type(exc).__name__, sent_at
+        finally:
+            if counted_open:
+                self.open_ws -= 1
+        acc = self._acc(ctx.step)
+        acc.w_count += 1
+        acc.w_messages += len(latencies)
+        acc.w_connect.record((connected - sent_at) * 1000.0)
+        for ms in latencies:
+            acc.w_latency.record(ms)
+        acc.ttfb.record((connected - sent_at) * 1000.0)
+        ctx.observed_end = connected
+        return None, sent_at
+
     async def _one(self, scheduled: float, step: int, item: tuple[str, dict[str, Any]]) -> None:
         kind, spec = item
         sent_at: float | None = None
         failure: str | None = None
+        ctx: _Ctx | None = None
         try:
             ctx = self._new_ctx(step)
             if kind == "req":
@@ -480,6 +663,8 @@ class _Worker:
             failure = type(exc).__name__
         finally:
             end = time.perf_counter()
+            if kind == "req" and ctx is not None and ctx.observed_end is not None:
+                end = ctx.observed_end  # a held stream or websocket: latency ends at the first byte
             acc = self._acc(step)
             acc.hist.record((end - scheduled) * 1000.0)
             if sent_at is not None:

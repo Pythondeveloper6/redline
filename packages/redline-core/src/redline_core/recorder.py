@@ -1502,6 +1502,8 @@ def _apply_run_header(builder: TraceBuilder, headers: Any) -> None:
                 builder.tags["identity"] = v2.strip()
             elif k2.strip() == "flow" and _IDENTITY_TAG.fullmatch(v2.strip()):
                 builder.tags["flow"] = v2.strip()
+            elif k2.strip() == "page" and _IDENTITY_TAG.fullmatch(v2.strip()):
+                builder.tags["page"] = v2.strip()
             elif k2.strip() == "fstep" and v2.strip().isdigit() and len(v2.strip()) <= 3:
                 builder.tags["fstep"] = v2.strip()
 
