@@ -32,6 +32,7 @@ They share a few rules:
 | Azure Blob Storage | `instrument_azure_blob()` | `custom` upload/download/delete spans (`client="azure_blob"`) | none |
 | asyncpg | `instrument_asyncpg()` | `sql` spans | `asyncpg` |
 | psycopg 3 | `instrument_psycopg()` | `sql` spans | `psycopg` |
+| Threads and pools | `instrument_threads()` | carries the request into `Thread` and `ThreadPoolExecutor` work; spans get `data["thread"]` | none |
 | Marshmallow | `instrument_marshmallow()` | `serializer` spans | none |
 | Strawberry | `RedlineExtension` | `resolver` spans | `strawberry` |
 | Graphene | `RedlineMiddleware` | `resolver` spans | `graphene` |
@@ -194,6 +195,22 @@ For any other client, wrap it yourself with `instrument_client_method`
 ([Extending](extending.md#instrumenting-a-client)). `auto_instrument="on"` also instruments
 these when they are installed; the default `"warn"` lists them if installed and inactive.
 Asynchronous drivers (motor, aiokafka) are not covered; wrap their coroutine methods with the helper.
+
+## Threads and pools
+
+```python
+from redline_core.contrib.threads import instrument_threads
+
+instrument_threads()
+```
+
+Not a client but a gap in what is attributed: SQL, cache and HTTP calls made on a plain
+`threading.Thread` or a `ThreadPoolExecutor` worker belong to no request, because those
+threads do not inherit `contextvars`. `instrument_threads()` patches `ThreadPoolExecutor.submit`
+and `Thread.start` so the work runs in a copy of the request's context. The spans appear under
+the request, each with the thread's name in `data["thread"]`. It is process-wide, reversible
+with `uninstrument_threads()`, and never enabled by `auto_instrument`. Work that outlives the
+request is not recorded. Details and limits: [Work on threads and pools](async-blocking.md#work-on-threads-and-pools).
 
 ## GraphQL
 

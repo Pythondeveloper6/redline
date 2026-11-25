@@ -110,8 +110,11 @@ the id of the innermost open span. The consequences:
 - `asgiref.sync_to_async`, `loop.run_in_executor` with `contextvars.copy_context()` and
   Starlette's threadpool (which runs your `def` endpoints) copy context into the worker
   thread, so their queries attribute correctly.
-- A bare `threading.Thread` does **not** copy context. Work started that way is not
-  attributed to any request. That is by design: it is not part of the request.
+- A bare `threading.Thread` and a plain `ThreadPoolExecutor` do **not** copy context, so work
+  started that way is not attributed to any request. If that work is part of the request,
+  call [`instrument_threads()`](async-blocking.md#work-on-threads-and-pools): it copies the
+  context into new threads and pool tasks, and spans recorded there carry the thread's name.
+  The trace builder is thread-safe: spans from several threads are appended under a lock.
 - When no trace is active, every hook is one `ContextVar.get()` and a `None` check.
 - Once a trace is finished, late hooks (a background task that outlives the response)
   are ignored rather than attached to a closed trace.

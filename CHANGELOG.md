@@ -67,6 +67,12 @@ The project moves from alpha to beta.
 - Load runs: `api/runs/{id}/bottlenecks` gains an item of kind `other` (key `other:uncovered`)
   with the per-request time no span covers, per step. Existing `sql` and `route` items are
   unchanged.
+- `instrument_threads()` (opt-in, reversible with `uninstrument_threads()`, idempotent) copies the
+  request context into `ThreadPoolExecutor.submit` and `Thread.start` work. SQL and other spans
+  recorded on worker threads stay under the request and carry the thread name in
+  `span.data["thread"]`; spans from concurrent threads are recorded safely. Work that outlives
+  the request is not recorded. Listed as `threads` in `redline instrumentation`, never enabled by
+  `auto_instrument`.
 
 ### Changed
 

@@ -923,8 +923,11 @@ the id of the innermost open span. The consequences:
 - `asgiref.sync_to_async`, `loop.run_in_executor` with `contextvars.copy_context()` and
   Starlette's threadpool (which runs your `def` endpoints) copy context into the worker
   thread, so their queries attribute correctly.
-- A bare `threading.Thread` does **not** copy context. Work started that way is not
-  attributed to any request. That is by design: it is not part of the request.
+- A bare `threading.Thread` and a plain `ThreadPoolExecutor` do **not** copy context, so work
+  started that way is not attributed to any request. If that work is part of the request,
+  call [`instrument_threads()`](async-blocking.md#work-on-threads-and-pools): it copies the
+  context into new threads and pool tasks, and spans recorded there carry the thread's name.
+  The trace builder is thread-safe: spans from several threads are appended under a lock.
 - When no trace is active, every hook is one `ContextVar.get()` and a `None` check.
 - Once a trace is finished, late hooks (a background task that outlives the response)
   are ignored rather than attached to a closed trace.
@@ -5062,6 +5065,46 @@ The overhead is the timer callback, a few microseconds every 5 ms per busy loop.
 | Litestar | Lag monitor (the app runs inside it while a request is recorded) |
 | Django on WSGI, Flask | No event loop to watch: not applicable |
 
+## Work on threads and pools
+
+Offloading work to a thread is the usual fix for blocking the loop, and it creates a new
+blind spot: a plain `threading.Thread` or `ThreadPoolExecutor` worker does not inherit the
+request's `contextvars`, so the queries and calls made there are recorded against no request
+and the time shows up as [unattributed](detectors.md#unattributed-time).
+
+```python
+from redline_core.contrib.threads import instrument_threads
+
+instrument_threads()      # once, at startup
+```
+
+From then on, when a request is being recorded, `ThreadPoolExecutor.submit` (and so `map` and
+`loop.run_in_executor`) and `Thread.start` run the work in a copy of the current context, as
+`contextvars.copy_context().run` would:
+
+- the spans stay **under the request**, with the span that was open at the call as parent;
+- each span recorded on another thread has the thread's name in `span.data["thread"]`
+  (`ThreadPoolExecutor-0_1`, or the `name=` you gave a `Thread`), so three queries run on a
+  three-worker pool show as three SQL spans with three distinct thread names;
+- spans from several threads can be recorded at once; the trace builder appends them under a
+  lock.
+
+`uninstrument_threads()` restores both methods; calling `instrument_threads()` twice is
+harmless. Outside a recorded request the wrappers do nothing. It is not enabled by
+`auto_instrument`, and `redline instrumentation` lists it as `threads`.
+
+Limits:
+
+- Work still running when the request finishes is **not** recorded. The trace is closed, so
+  later spans are dropped; they are not attached to a finished request and are not turned
+  into a separate job the way [background tasks](fastapi.md#in-process-background-tasks)
+  are. Wait for the futures before returning if you want them counted.
+- Only threads started *inside* a recorded request get its context. Long-lived pool workers
+  created earlier keep a clean context between tasks; each task gets its own copy.
+- Threads whose name starts with `redline` (the store's writer, the loop watchdog) are never
+  touched. `ProcessPoolExecutor` and `multiprocessing` are not covered: a child process has no
+  recorder.
+
 ## Limits
 
 - The lag monitor measures a loop that is *late*, which is the right signal but is not proof
@@ -7919,6 +7962,7 @@ They share a few rules:
 | Azure Blob Storage | `instrument_azure_blob()` | `custom` upload/download/delete spans (`client="azure_blob"`) | none |
 | asyncpg | `instrument_asyncpg()` | `sql` spans | `asyncpg` |
 | psycopg 3 | `instrument_psycopg()` | `sql` spans | `psycopg` |
+| Threads and pools | `instrument_threads()` | carries the request into `Thread` and `ThreadPoolExecutor` work; spans get `data["thread"]` | none |
 | Marshmallow | `instrument_marshmallow()` | `serializer` spans | none |
 | Strawberry | `RedlineExtension` | `resolver` spans | `strawberry` |
 | Graphene | `RedlineMiddleware` | `resolver` spans | `graphene` |
@@ -8081,6 +8125,22 @@ For any other client, wrap it yourself with `instrument_client_method`
 ([Extending](extending.md#instrumenting-a-client)). `auto_instrument="on"` also instruments
 these when they are installed; the default `"warn"` lists them if installed and inactive.
 Asynchronous drivers (motor, aiokafka) are not covered; wrap their coroutine methods with the helper.
+
+## Threads and pools
+
+```python
+from redline_core.contrib.threads import instrument_threads
+
+instrument_threads()
+```
+
+Not a client but a gap in what is attributed: SQL, cache and HTTP calls made on a plain
+`threading.Thread` or a `ThreadPoolExecutor` worker belong to no request, because those
+threads do not inherit `contextvars`. `instrument_threads()` patches `ThreadPoolExecutor.submit`
+and `Thread.start` so the work runs in a copy of the request's context. The spans appear under
+the request, each with the thread's name in `data["thread"]`. It is process-wide, reversible
+with `uninstrument_threads()`, and never enabled by `auto_instrument`. Work that outlives the
+request is not recorded. Details and limits: [Work on threads and pools](async-blocking.md#work-on-threads-and-pools).
 
 ## GraphQL
 

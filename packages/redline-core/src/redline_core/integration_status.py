@@ -26,7 +26,13 @@ _INTEGRATIONS = (
         "_originals",
     ),
     ("azure_blob", "azure.storage.blob", "redline_core.contrib.azure_blob", "_originals"),
+    ("threads", "concurrent.futures", "redline_core.contrib.threads", "_originals"),
 )
+
+#: Integrations that are only ever switched on deliberately. ``threads`` is standard library
+#: (always "installed") and changes how threads behave, so an inactive one is not a warning
+#: and ``auto_instrument`` never turns it on.
+_OPT_IN_ONLY = frozenset({"threads"})
 
 
 def _installed(module_name: str) -> bool:
@@ -63,7 +69,9 @@ def integration_status() -> list[dict[str, bool | str]]:
 def integration_warnings(statuses: list[dict[str, bool | str]]) -> list[str]:
     """Explain installed but inactive integrations; this is not an activity report."""
     inactive = [
-        str(item["name"]) for item in statuses if item["installed"] and not item["instrumented"]
+        str(item["name"])
+        for item in statuses
+        if item["installed"] and not item["instrumented"] and item["name"] not in _OPT_IN_ONLY
     ]
     if not inactive:
         return []
