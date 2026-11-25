@@ -262,8 +262,10 @@ def test_generate_from_stages_text_and_list(reader):
         store=reader,
     )
     assert listed["validation"]["valid"] is True
-    for bad in ("nonsense", 5, []):
+    for bad in ("nonsense", 5):
         assert "error" in call_tool("generate_scenario_from_stages", {"stages": bad}, store=reader)
+    empty = call_tool("generate_scenario_from_stages", {"stages": []}, store=reader)
+    assert empty["validation"]["valid"] is False  # reported, not raised
 
 
 # ------------------------------------------------------------------ gated tools
