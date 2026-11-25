@@ -53,6 +53,14 @@ have finished, the way independent users on the internet behave. When the server
 down, requests pile up, queues grow and latency climbs, which is what happens in
 production. Redline uses the open model: you choose requests per second, not users.
 
+Many internal applications are sized by a fixed number of logged-in users, not by a rate.
+For that, keep the open model and add **sessions**: an arrival starts one *session* (a flow),
+the session waits `think_s` between its steps like a person reading a page, and by Little's
+law the number of sessions in flight is the arrival rate times the session length. 20 arrivals
+per second with 5 s of think time holds about 100 sessions at once, and the run reports the
+peak per step ([Sessions and think time](#sessions-and-think-time)). The offered load still
+does not fall when the server slows.
+
 ### Coordinated omission
 
 A load generator that waits for each response before sending the next one measures the
@@ -365,6 +373,31 @@ whole flow. The run summary has a `flows` entry (runs, errors, p50/p95/p99, per-
 percentiles) that the CLI prints, and the app's traces carry `flow` and `fstep` tags next to
 `run_id` and `step`, so the bottleneck table gets rows for every step of the journey. Plain
 requests and flows can be mixed; each arrival picks one by weight.
+
+### Sessions and think time
+
+A flow can model a user instead of a burst:
+
+```toml
+[[flows]]
+name = "shopper"
+think_s = [2, 6]          # seconds between steps: a number, "3s", or a [min, max] range
+own_connection = true     # each session opens its own connection, like a separate browser
+
+[[flows.steps]]
+path = "/products"
+
+[[flows.steps]]
+path = "/products/{var:id}"
+```
+
+`think_s` is picked at random per pause (seeded by the scenario `seed`) and a stop cuts it
+short. The flow's latency includes the pauses, a step's own latency does not. With
+`own_connection` the session does not share the worker's keep-alive pool: it connects, sends
+its steps and closes, so the server sees as many connections as there are sessions. Every
+step of the run table reports the **peak sessions in flight** (summed over the workers' own
+peaks), printed by the CLI and in `summary.sessions`. To hold N sessions of length L seconds,
+use `rps = N / L`.
 
 ### Response checks
 

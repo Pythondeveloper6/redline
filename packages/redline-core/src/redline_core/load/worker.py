@@ -63,6 +63,7 @@ class _Acc:
         "breakdown",
         "dropped",
         "errors",
+        "f_max_open",
         "hist",
         "identities",
         "ok",
@@ -95,6 +96,7 @@ class _Acc:
         self.s_ttlb = Histogram()  # time to last byte: when the hold ended
         # websockets
         self.w_count = self.w_messages = self.w_max_open = 0
+        self.f_max_open = 0  # sessions (flows) in flight at once
         self.w_connect = Histogram()
         self.w_latency = Histogram()
 
@@ -107,6 +109,8 @@ class _Acc:
                 "max_open": self.s_max_open,
                 "ttlb": self.s_ttlb.to_bytes(),
             }
+        if self.f_max_open:
+            out["sessions"] = {"max_open": self.f_max_open}
         if self.w_count or self.w_max_open:
             out["websockets"] = {
                 "count": self.w_count,
@@ -135,10 +139,11 @@ class _Acc:
 class _Ctx:
     """The per-arrival state shared by every request of a flow."""
 
-    __slots__ = ("headers", "lookup", "observed_end", "run_value", "step", "variables")
+    __slots__ = ("client", "headers", "lookup", "observed_end", "run_value", "step", "variables")
 
     def __init__(self) -> None:
         self.step = 0
+        self.client: Any = None  # a session's own connection; ``None`` = the shared pool
         #: perf_counter time to take as the end of the latency (first byte of a held stream,
         #: the websocket handshake) instead of the end of the request; ``None`` = the end.
         self.observed_end: float | None = None
@@ -230,6 +235,7 @@ class _Worker:
         self.flow_window: dict[str, _FlowAcc] = {}
         self.open_streams = 0
         self.open_ws = 0
+        self.open_sessions = 0
         self.headers = dict(cfg.get("headers") or {})
         self.run_header = cfg["run_id"]
         self.window: dict[int, _Acc] = {}
@@ -498,7 +504,9 @@ class _Worker:
                 return await self._stream(req, ctx, path, kwargs)
             async with self.sem:
                 sent_at = time.perf_counter()
-                async with self.client.stream(req["method"], path, **kwargs) as response:
+                async with (ctx.client or self.client).stream(
+                    req["method"], path, **kwargs
+                ) as response:
                     first_byte = time.perf_counter()
                     await response.aread()
                 end = time.perf_counter()
@@ -681,31 +689,66 @@ class _Worker:
     async def _flow(
         self, scheduled: float, flow: dict[str, Any], ctx: _Ctx
     ) -> tuple[str | None, float | None]:
-        """Run a flow's steps in order; the first failure ends it and counts once."""
+        """Run a flow's steps in order; the first failure ends it and counts once.
+
+        One arrival is one session: it waits ``think_s`` between steps (a user reading the
+        page), may hold a connection of its own, and counts as one concurrent session while
+        it lasts."""
+        import httpx
+
         name, n_steps = flow["name"], len(flow["steps"])
+        think = flow.get("think_s")
         first_sent: float | None = None
         failure: str | None = None
-        for index, req in enumerate(flow["steps"]):
-            tag = f";flow={identity_tag(flow['name'])};fstep={index + 1}"
-            started = time.perf_counter()
-            failure, sent_at = await self._send(req, ctx, tag)
-            if first_sent is None:
-                first_sent = sent_at
-            # looked up each time: a flush between steps swaps the accumulator out
-            stats = self._flow_acc(name, n_steps)
-            step_stats = stats.steps[index]
-            step_stats.count += 1
-            step_stats.hist.record((time.perf_counter() - started) * 1000.0)
-            if failure is not None:
-                step_stats.errors += 1
-                stats.breakdown[failure] += 1
-                break
+        own: Any = None
+        self.open_sessions += 1
+        acc = self._acc(ctx.step)
+        acc.f_max_open = max(acc.f_max_open, self.open_sessions)
+        try:
+            if flow.get("own_connection"):
+                own = ctx.client = httpx.AsyncClient(
+                    base_url=self.cfg["base_url"],
+                    limits=httpx.Limits(max_connections=1, max_keepalive_connections=1),
+                    timeout=httpx.Timeout(float(self.cfg["timeout_s"])),
+                    follow_redirects=False,
+                    headers={"User-Agent": "redline-load"},
+                )
+            for index, req in enumerate(flow["steps"]):
+                if index and think:
+                    await self._think(self.rng.uniform(think[0], think[1]))
+                tag = f";flow={identity_tag(flow['name'])};fstep={index + 1}"
+                started = time.perf_counter()
+                failure, sent_at = await self._send(req, ctx, tag)
+                if first_sent is None:
+                    first_sent = sent_at
+                # looked up each time: a flush between steps swaps the accumulator out
+                stats = self._flow_acc(name, n_steps)
+                step_stats = stats.steps[index]
+                step_stats.count += 1
+                step_stats.hist.record((time.perf_counter() - started) * 1000.0)
+                if failure is not None:
+                    step_stats.errors += 1
+                    stats.breakdown[failure] += 1
+                    break
+        finally:
+            self.open_sessions -= 1
+            if own is not None:
+                await own.aclose()
         stats = self._flow_acc(name, n_steps)
         stats.count += 1
         stats.hist.record((time.perf_counter() - scheduled) * 1000.0)
         if failure is not None:
             stats.errors += 1
         return failure, first_sent
+
+    async def _think(self, seconds: float) -> None:
+        """Sleep like a user between steps; a stop cuts it short."""
+        deadline = time.perf_counter() + seconds
+        while not self.stopping:
+            left = deadline - time.perf_counter()
+            if left <= 0:
+                return
+            await asyncio.sleep(min(left, STOP_POLL_S))
 
     def _flow_acc(self, name: str, steps: int) -> _FlowAcc:
         acc = self.flow_window.get(name)

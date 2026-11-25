@@ -594,6 +594,11 @@ def _print_final(printer: _Printer, result: Any) -> None:
                 printer.line(
                     f"  step {step_no}: {row['count']} held, concurrent {row['max_open']}{latency}"
                 )
+    if "sessions" in s:
+        parts = ", ".join(
+            f"step {n}: {row['max_open']}" for n, row in sorted(s["sessions"]["by_step"].items())
+        )
+        printer.line(f"sessions in flight (peak): {s['sessions']['max_open']}  ({parts})")
     limit = s.get("limiting_resource")
     if limit:
         printer.line(f"limiting resource: step {limit['step']}: {limit['detail']}")

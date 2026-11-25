@@ -12,6 +12,9 @@ version is below `1.0` the public API may change between minor versions.
 
 ### Added
 
+- A flow can model a user: `think_s` (a number or `[min, max]` range) pauses between its steps
+  and `own_connection` gives each session its own connection. Each step reports the peak number
+  of sessions in flight, so 20 arrivals per second with 5 s of think time shows about 100.
 - Load requests are timed to the first byte as well as the last (`ttfb_p50_ms` / `ttfb_p95_ms`
   per step and in the summary). `type = "stream"` holds a server-sent-events or chunked response
   open for `hold_s` and counts events; `type = "websocket"` (extra `redline-core[load-websocket]`)

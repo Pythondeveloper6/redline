@@ -6,6 +6,7 @@ timeout_s = 10
 [[flows]]
 name = "browse and open"
 weight = 3
+think_s = [1, 3]        # a user reads the list before opening an order
 
 [[flows.steps]]
 name = "list orders"

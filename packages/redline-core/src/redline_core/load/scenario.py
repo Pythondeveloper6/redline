@@ -120,7 +120,7 @@ _REQUEST_KEYS = {
 REQUEST_TYPES = ("http", "stream", "websocket")
 MAX_HOLD_S = 3_600.0
 MAX_MESSAGES = 100
-_FLOW_KEYS = {"name", "weight", "steps"}
+_FLOW_KEYS = {"name", "weight", "steps", "think_s", "own_connection"}
 MAX_FLOW_STEPS = 50
 
 _PLACEHOLDER = re.compile(r"\{([^{}]*)\}")
@@ -190,13 +190,23 @@ class FlowSpec:
     name: str
     steps: tuple[RequestSpec, ...]
     weight: float = 1.0
+    #: Pause between steps, ``(min, max)`` seconds picked at random: a user reading a page.
+    think_s: tuple[float, float] | None = None
+    #: Give each session its own connection (a separate browser) instead of the shared pool.
+    own_connection: bool = False
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        out: dict[str, Any] = {
             "name": self.name,
             "weight": self.weight,
             "steps": [s.to_dict() for s in self.steps],
         }
+        if self.think_s is not None:
+            lo, hi = self.think_s
+            out["think_s"] = lo if lo == hi else [lo, hi]
+        if self.own_connection:
+            out["own_connection"] = True
+        return out
 
 
 @dataclass(frozen=True)
@@ -454,6 +464,29 @@ def _headers(value: Any, path: str) -> dict[str, str]:
     return out
 
 
+def _think(raw: Any, where: str) -> tuple[float, float] | None:
+    """``think_s``: seconds, ``"2s"``, or a ``[min, max]`` range picked uniformly."""
+    if raw is None:
+        return None
+    if isinstance(raw, (list, tuple)):
+        if len(raw) != 2:
+            raise ScenarioError("must be a number or a [min, max] pair", where)
+        lo, hi = (parse_duration(v, where) for v in raw)
+    else:
+        lo = hi = parse_duration(raw, where)
+    if hi < lo or hi > MAX_HOLD_S:
+        raise ScenarioError(f"needs min ≤ max ≤ {MAX_HOLD_S:g}s", where)
+    return float(lo), float(hi)
+
+
+def _own_connection(raw: Any, where: str) -> bool:
+    if raw is None:
+        return False
+    if not isinstance(raw, bool):
+        raise ScenarioError(f"must be true or false (got {raw!r})", where)
+    return raw
+
+
 def _flows(raw: Any, sources: set[str]) -> tuple[FlowSpec, ...]:
     from .flows import var_refs
 
@@ -502,7 +535,17 @@ def _flows(raw: Any, sources: set[str]) -> tuple[FlowSpec, ...]:
                     f"{where}.steps[{j}]",
                 )
             have.update(step.extract)
-        out.append(FlowSpec(name=name, steps=steps, weight=float(weight)))
+        out.append(
+            FlowSpec(
+                name=name,
+                steps=steps,
+                weight=float(weight),
+                think_s=_think(item.get("think_s"), f"{where}.think_s"),
+                own_connection=_own_connection(
+                    item.get("own_connection"), f"{where}.own_connection"
+                ),
+            )
+        )
     return tuple(out)
 
 

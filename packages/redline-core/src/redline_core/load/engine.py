@@ -108,6 +108,7 @@ class _StepAgg:
         self.ttfb = Histogram()
         self.streams: dict[str, Any] = {}
         self.websockets: dict[str, Any] = {}
+        self.sessions: dict[str, Any] = {}
         #: kind -> worker -> highest number open at once
         self.peaks: dict[str, dict[int, int]] = {}
         self.done: dict[int, tuple[float, bool]] = {}  # worker -> (until, partial)
@@ -131,6 +132,8 @@ class _StepAgg:
         extra = m.get("extra") or {}
         if "streams" in extra:
             _merge_extra(self.streams, extra["streams"], ("ttlb",), self.peaks, "streams", worker)
+        if "sessions" in extra:
+            _merge_extra(self.sessions, extra["sessions"], (), self.peaks, "sessions", worker)
         if "websockets" in extra:
             _merge_extra(
                 self.websockets,
@@ -480,6 +483,8 @@ class _Engine:
                     "name": f.name,
                     "weight": f.weight,
                     "steps": [_request_cfg(s) for s in f.steps],
+                    "think_s": list(f.think_s) if f.think_s else None,
+                    "own_connection": f.own_connection,
                 }
                 for f in sc.flows
             ],
@@ -694,6 +699,7 @@ class _Engine:
             ttfb_hist=agg.ttfb,
             streams=_plain(agg.streams),
             websockets=_plain(agg.websockets),
+            sessions=_plain(agg.sessions),
         )
         if result.sent == 0 and result.dropped == 0 and partial:
             return

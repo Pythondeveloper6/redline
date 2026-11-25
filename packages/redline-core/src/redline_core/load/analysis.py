@@ -81,6 +81,7 @@ class StepResult:
     ttfb_hist: Histogram = field(default_factory=Histogram)
     streams: dict[str, Any] = field(default_factory=dict)
     websockets: dict[str, Any] = field(default_factory=dict)
+    sessions: dict[str, Any] = field(default_factory=dict)
 
     @property
     def completed(self) -> int:
@@ -128,6 +129,8 @@ class StepResult:
             out["streams"] = dict(self.streams)
         if self.websockets:
             out["websockets"] = dict(self.websockets)
+        if self.sessions:
+            out["sessions"] = dict(self.sessions)
         if include_hist:
             out["hist"] = base64.b64encode(self.hist.to_bytes()).decode("ascii")
             out["service_hist"] = base64.b64encode(self.service_hist.to_bytes()).decode("ascii")
@@ -323,6 +326,12 @@ def analyze(
             else:
                 totals["messages"] = sum(p.get("messages", 0) for p in parts)
             extra[key] = totals
+    held = [s for s in steps if s.sessions]
+    if held:
+        extra["sessions"] = {
+            "max_open": max(s.sessions["max_open"] for s in held),
+            "by_step": {s.step: dict(s.sessions) for s in held},
+        }
     if seconds:
         rec = recovery(steps, seconds, starts or {})
         if rec:
