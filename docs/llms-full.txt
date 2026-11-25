@@ -5900,11 +5900,38 @@ A profile says how the rate changes over time.
 | `constant` | one step at a fixed rate | `rps`, `duration_s` |
 | `ramp` | the rate rises (or falls) linearly | `start_rps`, `end_rps`, `duration_s`, `step_duration_s` (default 5 s) |
 | `steps` | a staircase | `start_rps`, `end_rps`, `step_rps`, `step_duration_s` (default 30 s) |
+| `stages` | any shape: spike, soak, a pause | `stages`: a list of `{ rps, duration_s }` (`rps = 0` is a pause) |
 
 Results are reported **per step**. A ramp is reported in steps too (each at the ramp's
 rate at the step's midpoint), so the knee finder works on it. Prefer `steps` when looking
 for a knee: each step is long enough for a stable p95, and "the server held 70 rps and
 broke at 80" is a sentence you can act on.
+
+### Spikes, soaks and custom shapes
+
+`stages` runs an ordered list of `{ rps, duration_s }` stages, each reported as one step:
+
+```toml
+[profile]
+stages = [
+  { rps = 10,  duration_s = "1m" },    # normal
+  { rps = 200, duration_s = "30s" },   # the spike
+  { rps = 10,  duration_s = "3m" },    # does it recover?
+]
+```
+
+On the command line: `--stages 10:1m,200:30s,10:3m`. A soak is one long stage
+(`--stages 40:30m`). Two extra analyses make these shapes useful:
+
+- **Recovery.** A step where the rate *falls* never decides the knee (that is recovery, not
+  saturation). Instead the summary reports, for each such step, the p95 before the spike, the
+  peak, and how many seconds after the step began p95 was back within 25% of its level before
+  the spike for three seconds running (`recovered_after_s`, or `null` if it never was).
+- **Drift.** Any step of 30 s or more is checked for slow growth, comparing its first third
+  with its last: `degrading` when p95 grew by 25% and at least 5 ms with a positive slope, or
+  the error rate climbed by a percentage point; otherwise `stable`. The summary has the slope
+  in ms per minute, and `drift_verdict` is `degrading` if any step is. A leak shows up here
+  long before the knee.
 
 `stop_on` ends the run after the first step that breaches a limit, so a test does not keep
 hammering a server that has already fallen over:
@@ -6164,6 +6191,7 @@ SCENARIO = {
 |---|---|
 | `--rps N` | constant rate |
 | `--ramp A:B` | ramp from A to B rps over `--duration` |
+| `--stages RPS:DURATION,...` | ordered stages, for example `10:1m,200:30s,10:3m` (spike) or `40:30m` (soak) |
 | `--steps A:B:STEP` | steps from A to B rps, STEP apart, each `--step-duration` |
 | `--duration 60s` | total duration (default 30 s for constant and ramp) |
 | `--step-duration 30s` | length of each step |
@@ -6186,7 +6214,7 @@ SCENARIO = {
 | `--quiet`, `-q` | only print the final table |
 | `--ui-url URL` | the Redline UI address printed in the "See bottlenecks in the Redline UI at ..." line after the run. Default: the scenario's host plus the `mount_path` setting (from `redline.toml` or `REDLINE_MOUNT_PATH`), else `/_redline` |
 
-`--rps`, `--ramp` and `--steps` are mutually exclusive. `redline load init` writes
+`--rps`, `--ramp`, `--steps` and `--stages` are mutually exclusive. `redline load init` writes
 scenarios; see [Generating scenarios](#generating-scenarios).
 
 Exit codes: `0` ok, `1` a `--fail-*` threshold was breached or the run failed, `2` usage or
@@ -6351,6 +6379,7 @@ starting point and edit it.
 | `--top 10` | endpoints to keep |
 | `--include-writes` | also include POST/PUT/PATCH/DELETE (written with `weight = 0`) |
 | `--data-dir DIR` | with `--from-traces`: write each endpoint's distinct paths as CSV here and use them as `zipf` data sources |
+| `--stages RPS:DURATION,...` | write a stages profile into the scenario |
 | `--identities-file FILE`, `--identity-mode MODE` | add `identities_file` and `identity_mode` to the scenario |
 | `--base-url URL` | set `base_url` |
 | `-o, --out PATH` | output file; `.toml` or `.json`; `-` prints to stdout (default `scenario.toml`) |

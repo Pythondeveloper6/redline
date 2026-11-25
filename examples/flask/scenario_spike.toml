@@ -1,0 +1,21 @@
+name = "flask shop: spike and recovery"
+description = "Normal load, a burst, then normal load again: does p95 come back, and how fast?"
+base_url = "http://127.0.0.1:8012"
+timeout_s = 10
+
+[[requests]]
+name = "orders"
+path = "/orders"
+weight = 3
+
+[[requests]]
+name = "order detail"
+path = "/orders/{random_int:1:300}"
+weight = 2
+
+[profile]
+stages = [
+  { rps = 5,  duration_s = "20s" },
+  { rps = 40, duration_s = "15s" },
+  { rps = 5,  duration_s = "40s" },
+]

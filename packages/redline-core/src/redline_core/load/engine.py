@@ -225,7 +225,7 @@ def run(
     engine = _Engine(sc, plans, n_workers, run_id, stop_event, sinks, emit)
     status, message = engine.execute()
     steps = engine.finished_steps
-    summary = analyze(steps)
+    summary = analyze(steps, engine.seconds, {p.index: p.start_s for p in plans})
     if engine.flow_stats:
         by_name = {f.name: f for f in sc.flows}
         summary["flows"] = {

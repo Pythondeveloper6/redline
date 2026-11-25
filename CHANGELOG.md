@@ -12,6 +12,10 @@ version is below `1.0` the public API may change between minor versions.
 
 ### Added
 
+- A `stages` load profile (`--stages 10:1m,200:30s,10:3m`) describes spikes, soaks and any
+  custom shape. A step where the rate falls no longer decides the knee; the run summary reports
+  how long p95 took to return to its pre-spike level (`recovery`) and checks long steps for
+  slow growth in p95 and error rate (`drift`, `drift_verdict` of `stable` or `degrading`).
 - SQL Server plan and index tools check their permissions first. A one-time probe reports
   `estimated_plan`, `actual_plan`, `index_usage` and `object_definitions` as granted, missing
   (with the exact `GRANT`) or unknown (`GET api/database/capabilities`, `redline doctor`);

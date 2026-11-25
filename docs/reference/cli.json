@@ -1220,6 +1220,13 @@
         },
         {
           "name": [
+            "--stages"
+          ],
+          "required": false,
+          "help": "ordered stages, e.g. 10:30s,200:20s,10:60s for a spike (rps 0 pauses)"
+        },
+        {
+          "name": [
             "--duration"
           ],
           "required": false,
@@ -1427,6 +1434,13 @@
               ],
               "required": false,
               "help": "with --from-traces: write the distinct paths seen per endpoint as CSV files here and use them as zipf data sources instead of one sample path"
+            },
+            {
+              "name": [
+                "--stages"
+              ],
+              "required": false,
+              "help": "write a stages profile, e.g. 10:30s,200:20s,10:60s for a spike"
             },
             {
               "name": [

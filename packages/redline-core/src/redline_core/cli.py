@@ -56,6 +56,23 @@ def _numbers(value: str, count: int, label: str) -> list[float]:
     return nums
 
 
+def _stages_arg(value: str) -> list[dict[str, Any]]:
+    from .load.profile import ScenarioError, parse_duration
+
+    stages = []
+    for part in value.split(","):
+        rps, sep, duration = part.strip().partition(":")
+        try:
+            if not sep:
+                raise ValueError
+            stages.append({"rps": float(rps), "duration_s": parse_duration(duration)})
+        except (ValueError, ScenarioError):
+            raise argparse.ArgumentTypeError(
+                f"expected RPS:DURATION,... such as 10:30s,200:20s (got {part.strip()!r})"
+            ) from None
+    return stages
+
+
 def _fraction(value: str) -> float:
     text = value.strip()
     try:
@@ -88,6 +105,11 @@ def _configure_load(p: argparse.ArgumentParser) -> None:
     shape.add_argument("--rps", type=float, metavar="N", help="constant rate (requests/s)")
     shape.add_argument("--ramp", metavar="A:B", help="ramp linearly from A to B rps")
     shape.add_argument("--steps", metavar="A:B:STEP", help="steps from A to B rps, +STEP each")
+    shape.add_argument(
+        "--stages",
+        metavar="RPS:DURATION,...",
+        help="ordered stages, e.g. 10:30s,200:20s,10:60s for a spike (rps 0 pauses)",
+    )
     p.add_argument("--duration", type=_duration, metavar="60s", help="total duration")
     p.add_argument("--step-duration", type=_duration, metavar="30s", help="duration of each step")
     p.add_argument("--poisson", action="store_true", help="Poisson arrivals (default fixed)")
@@ -163,6 +185,8 @@ def _cli_profile(args: argparse.Namespace, scenario: Any) -> Any:
         data["duration_s"] = args.duration or base.get("duration_s") or 30
         if args.step_duration:
             data["step_duration_s"] = args.step_duration
+    elif args.stages:
+        data = {"mode": "stages", "stages": _stages_arg(args.stages)}
     elif args.steps:
         a, b, step = _numbers(args.steps, 3, "A:B:STEP")
         data = {"mode": "steps", "start_rps": a, "end_rps": b, "step_rps": step}
@@ -547,6 +571,21 @@ def _print_final(printer: _Printer, result: Any) -> None:
             breakdown[key] = breakdown.get(key, 0) + n
     if breakdown:
         printer.line("errors: " + ", ".join(f"{k} ×{v}" for k, v in sorted(breakdown.items())))
+    for rec in s.get("recovery") or []:
+        when = (
+            f"recovered after {rec['recovered_after_s']:g}s"
+            if rec["recovered_after_s"] is not None
+            else "did not recover within the stage"
+        )
+        printer.line(
+            f"recovery: step {rec['step']} ({rec['target_rps']:g} rps) p95 {when} "
+            f"(before {fmt_ms(rec['baseline_p95_ms'])}, peak {fmt_ms(rec['peak_p95_ms'])})"
+        )
+    for d in s.get("drift") or []:
+        printer.line(
+            f"drift: step {d['step']} {d['verdict']} (p95 {fmt_ms(d['first_third_p95_ms'])} → "
+            f"{fmt_ms(d['last_third_p95_ms'])}, {d['p95_slope_ms_per_min']:+.1f} ms/min)"
+        )
     for name, flow in (s.get("flows") or {}).items():
         printer.line(
             f"flow {name}: ran {flow['count']}  errors {flow['errors']}  "
@@ -581,6 +620,11 @@ def _configure_init(p: argparse.ArgumentParser) -> None:
         metavar="DIR",
         help="with --from-traces: write the distinct paths seen per endpoint as CSV files "
         "here and use them as zipf data sources instead of one sample path",
+    )
+    p.add_argument(
+        "--stages",
+        metavar="RPS:DURATION,...",
+        help="write a stages profile, e.g. 10:30s,200:20s,10:60s for a spike",
     )
     p.add_argument(
         "--identities-file",
@@ -632,6 +676,8 @@ def _cmd_init(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
                 store.close()
         if args.data_dir and not args.from_traces:
             raise ValueError("--data-dir needs --from-traces")
+        if args.stages:
+            data["profile"] = {"mode": "stages", "stages": _stages_arg(args.stages)}
         if args.identities_file:
             data["identities_file"] = args.identities_file
             if args.identity_mode:
