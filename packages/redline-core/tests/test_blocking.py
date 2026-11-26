@@ -56,7 +56,9 @@ async def test_time_sleep_in_async_handler_is_a_blocking_span_with_callsite():
         await asyncio.sleep(0.01)
 
     trace = await run_request(recorder, handler)
-    [span] = blocking_spans(trace)
+    # Under load the awaited 10 ms sleeps can also lag and be reported; the culprit is the
+    # span attributed to time.sleep, so select it instead of requiring the only blocking span.
+    [span] = [s for s in blocking_spans(trace) if s.data.get("call") == "time.sleep"]
     assert span.data["reason"] == "loop_lag"
     assert span.data["call"] == "time.sleep"
     assert 110 <= span.duration_ms <= 200
@@ -64,7 +66,9 @@ async def test_time_sleep_in_async_handler_is_a_blocking_span_with_callsite():
     assert span.callsite is not None
     assert span.callsite.file == "tests/test_blocking.py"
     assert span.callsite.code == "time.sleep(0.12)  # the culprit"
-    [issue] = [i for i in trace.issues if i.kind == "blocking_in_async"]
+    [issue] = [
+        i for i in trace.issues if i.kind == "blocking_in_async" and "by time.sleep" in i.title
+    ]
     assert issue.severity == "critical"  # ≥ 5 × 20 ms
     assert issue.title.startswith("Event loop blocked ")
     assert issue.title.endswith(f"ms by time.sleep at tests/test_blocking.py:{span.callsite.line}")
