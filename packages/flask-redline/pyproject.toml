@@ -63,7 +63,7 @@ dev = [
     "flask-sqlalchemy>=3.1",
     "asgiref>=3.8",
     "pyinstrument>=5.0",
-    "ruff>=0.8",
+    "ruff>=0.17.5",
 ]
 
 [tool.uv.sources]
