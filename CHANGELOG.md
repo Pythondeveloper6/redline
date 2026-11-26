@@ -159,6 +159,9 @@ tests:
   and bounds its cache.
 - A run registered over HTTP is no longer marked failed by the dead-process check on stores
   that once launched a UI run.
+- Check-run cleanup removes the private configuration containing raw request headers before
+  deleting the PID completion marker, so observers cannot see a finished run while its secrets
+  remain on disk.
 - A stray `.bak` file was removed from the package source.
 
 ## 0.5.0b1 (2026-11-12)
