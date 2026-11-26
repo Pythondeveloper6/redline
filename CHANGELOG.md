@@ -12,6 +12,12 @@ version is below `1.0` the public API may change between minor versions.
 
 ### Added
 
+- `redline load init` ends a TOML scenario with a commented-out example of the optional
+  keys (`[auth]`, `[[flows]]`, `extract`, `expect`, `max_ms`, `think_s`, `own_connection`).
+  Uncomment a line to use that key.
+- `redline instrumentation` lists each loaded raw DB-API driver as `dbapi:<driver>` and shows
+  whether `instrument_dbapi` wraps it, so raw-cursor SQL that is not recorded shows up as a
+  blind spot. These rows never trigger the auto-instrument warning.
 - Load runs can span several generator hosts. `redline load agent` runs workers for a
   controller (`redline load ... --agents https://gen1:7700,https://gen2:7700`); the controller
   sends each agent its share of one global step plan and a shared start time (clock offsets are

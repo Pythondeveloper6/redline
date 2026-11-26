@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -176,6 +177,23 @@ def test_init_from_openapi(tmp_path, capsys):
     assert all(r.method == "GET" for r in sc.requests)
     # existing file is not overwritten without --force
     assert cli.main(["load", "init", "--from-openapi", str(spec), "-o", str(out)]) == 2
+
+
+@pytest.mark.skipif(sys.version_info < (3, 11), reason="tomllib")
+def test_init_writes_optional_keys_that_parse_once_uncommented(tmp_path, capsys):
+    spec = tmp_path / "openapi.json"
+    spec.write_text(json.dumps(OPENAPI))
+    out = tmp_path / "scenario.toml"
+    assert cli.main(["load", "init", "--from-openapi", str(spec), "-o", str(out)]) == 0
+    text = out.read_text()
+    assert "# [auth]" in text and "# [[flows]]" in text
+    uncommented = re.sub(r"(?m)^# (?=[\[a-z])", "", text)
+    out.write_text(uncommented)
+    sc = load_scenario(out)
+    assert sc.auth is not None and sc.auth.refresh_before_s == 30
+    (flow,) = sc.flows
+    assert [s.path for s in flow.steps] == ["/items", "/items/{var:id}"]
+    assert flow.steps[1].max_ms == 500
 
 
 def test_init_from_openapi_with_writes_to_stdout(tmp_path, capsys):

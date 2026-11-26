@@ -631,7 +631,9 @@ SCENARIO = {
 | `--ui-url URL` | the Redline UI address printed in the "See bottlenecks in the Redline UI at ..." line after the run. Default: the scenario's host plus the `mount_path` setting (from `redline.toml` or `REDLINE_MOUNT_PATH`), else `/_redline` |
 
 `--rps`, `--ramp`, `--steps` and `--stages` are mutually exclusive. `redline load init` writes
-scenarios; see [Generating scenarios](#generating-scenarios).
+scenarios; see [Generating scenarios](#generating-scenarios). A TOML scenario it writes ends
+with a commented-out example of the optional keys (`[auth]`, `[[flows]]` with `extract`,
+`expect`, `max_ms`, `think_s` and `own_connection`): uncomment the lines you need and edit them.
 
 Exit codes: `0` ok, `1` a `--fail-*` threshold was breached or the run failed, `2` usage or
 scenario error, `130` interrupted with Ctrl-C (the partial results are still saved).

@@ -850,7 +850,10 @@ def _cmd_init(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
     except Exception as exc:
         err.write(f"redline load init: {exc}\n")
         return EXIT_USAGE
-    text = generate.to_json(data) if args.out.endswith(".json") else generate.to_toml(data)
+    if args.out.endswith(".json"):
+        text = generate.to_json(data)
+    else:
+        text = generate.to_toml(data) + generate.OPTIONAL_KEYS
     if args.out == "-":
         out.write(text)
         return EXIT_OK

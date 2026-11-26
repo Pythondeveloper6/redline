@@ -63,7 +63,29 @@ def integration_status() -> list[dict[str, bool | str]]:
                 "instrumented": _is_instrumented(contrib_module, state),
             }
         )
+    statuses += _dbapi_status()
     return statuses
+
+
+#: DB-API drivers whose own ``connect()`` bypasses SQLAlchemy. Not auto-instrumented: SQLAlchemy
+#: also calls ``connect()``, so wrapping a driver an engine uses would record its SQL twice.
+_DBAPI_DRIVERS = ("psycopg2", "pymysql", "MySQLdb", "pyodbc", "pymssql", "oracledb", "cx_Oracle")
+
+
+def _dbapi_status() -> list[dict[str, bool | str]]:
+    """One row per loaded raw driver: statements sent through its own ``connect()`` are a
+    blind spot until ``instrument_dbapi(module)`` is called (``source="raw_cursor"`` spans)."""
+    return [
+        {
+            "name": f"dbapi:{name}",
+            "installed": True,
+            "module_loaded": True,
+            "instrumented": getattr(sys.modules[name], "_redline_original_connect", None)
+            is not None,
+        }
+        for name in _DBAPI_DRIVERS
+        if name in sys.modules
+    ]
 
 
 def integration_warnings(statuses: list[dict[str, bool | str]]) -> list[str]:
@@ -71,7 +93,10 @@ def integration_warnings(statuses: list[dict[str, bool | str]]) -> list[str]:
     inactive = [
         str(item["name"])
         for item in statuses
-        if item["installed"] and not item["instrumented"] and item["name"] not in _OPT_IN_ONLY
+        if item["installed"]
+        and not item["instrumented"]
+        and item["name"] not in _OPT_IN_ONLY
+        and not str(item["name"]).startswith("dbapi:")
     ]
     if not inactive:
         return []

@@ -496,6 +496,34 @@ def _toml_value(value: Any) -> str:
     return json.dumps(str(value))
 
 
+#: Appended (commented out) to TOML written by ``redline load init``, so the optional keys
+#: are one uncomment away. Every line starts with "# "; removing that prefix gives valid TOML.
+OPTIONAL_KEYS = """
+# --- Optional: uncomment and edit. See docs/load-testing.md for every key. ---
+#
+# [auth]                                 # a token fetched before the run, refreshed during it
+# provider = "command"                   # "command", "request" or "python"
+# command = ["get-token", "--env", "perf"]
+# ttl_s = 900
+# refresh_before_s = 30
+#
+# [[flows]]                              # a journey: one arrival runs its steps in order
+# name = "browse"
+# weight = 1
+# think_s = [2, 6]                       # pause between steps (sessions); omit for none
+# own_connection = true                  # one connection per session, like a browser
+#
+# [[flows.steps]]
+# path = "/items"
+# extract = { id = "$.items[0].id" }     # save a value for later steps as {var:id}
+# expect = [{ json = "$.items" }]        # response checks: json, contains, min_bytes, header
+#
+# [[flows.steps]]
+# path = "/items/{var:id}"
+# max_ms = 500                           # slower than this counts as an error
+"""
+
+
 def to_toml(scenario: Mapping[str, Any]) -> str:
     """A small TOML writer for scenario dicts (scalars, inline tables, ``[[requests]]``)."""
     lines: list[str] = ["# Redline load scenario – see `redline load --help`.", ""]

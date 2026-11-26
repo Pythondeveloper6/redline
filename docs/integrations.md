@@ -174,6 +174,11 @@ instrument_dbapi(sqlite3)  # patches sqlite3.connect; undo with uninstrument_dba
 Limits: statements run through `connection.connection.cursor()` of a SQLAlchemy
 `Connection` and connections opened before `instrument_dbapi` was called are not recorded.
 
+`redline instrumentation` lists every loaded raw driver (psycopg2, pymysql, MySQLdb, pyodbc,
+pymssql, oracledb, cx_Oracle) as `dbapi:<driver>: active` or `inactive`. Inactive means SQL
+sent through that driver's own `connect()` is not recorded. `auto_instrument` never wraps a
+driver, because SQLAlchemy calls the same `connect()` and the SQL would be recorded twice.
+
 ## Marshmallow
 
 ```python
