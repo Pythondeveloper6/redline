@@ -228,9 +228,17 @@ def test_logs_serialised_on_trace_roundtrip():
 def test_unused_handler_costs_little():
     make()
     n = 20_000
+    # Pytest's log-capture handler formats and stores every record; that cost is not
+    # part of Redline's idle LogRecordFactory hook. Keep the records from propagating
+    # to root while still allowing the factory to run for each enabled log call.
+    previous_propagate = log.propagate
+    log.propagate = False
     t0 = time.perf_counter()
-    for _ in range(n):
-        log.info("nothing active")
+    try:
+        for _ in range(n):
+            log.info("nothing active")
+    finally:
+        log.propagate = previous_propagate
     per_call_us = (time.perf_counter() - t0) / n * 1e6
     assert per_call_us < 50  # generous: one contextvar read + logging's own overhead
 
