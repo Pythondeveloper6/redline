@@ -8,7 +8,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). While the
 version is below `1.0` the public API may change between minor versions.
 
-## Unreleased: 0.5.0b2
+## 0.5.0b2 (2026-11-26)
 
 ### Added
 
@@ -206,7 +206,7 @@ The project moves from alpha to beta.
 - `instrument_client_method` and `client_span` (`redline_core`, `redline_core.extending`) record a
   call to any client library as a span with client, operation, target, duration, payload size
   and error class, so a database, queue or storage client without an integration is no longer
-  invisible. See [Extending](docs/extending.md#instrumenting-a-client).
+  invisible. See "Instrumenting a client" in `docs/extending.md`.
 - First-party, opt-in integrations built on it: `instrument_pymongo()`, `instrument_kafka()`
   (kafka-python `KafkaProducer.send`), `instrument_pika()` (`basic_publish`),
   `instrument_google_cloud_storage()` and `instrument_azure_blob()`. Each imports its library

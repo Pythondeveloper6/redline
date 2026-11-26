@@ -12913,7 +12913,7 @@ setting and the feature and not `read_only`) and `access: {policy, login, read_o
 
 ## Things to know
 
-- **The API is not versioned.** The development release is `0.5.0b1`: the shape may change between beta
+- **The API is not versioned.** The development release is `0.5.0b2`: the shape may change between beta
   releases. The frontend and the core ship together, so they never disagree.
 - **Redacted values are redacted in the API too.** There is no way to ask for the
   original.
@@ -13692,7 +13692,7 @@ a breaking store change would be announced one minor release ahead.
 
 ## How finished is this?
 
-**Beta, and open source.** This checkout develops `0.5.0b1` under the
+**Beta, and open source.** This checkout develops `0.5.0b2` under the
 `Development Status :: 4 - Beta` classifier and MIT licence. Published prereleases are
 available on PyPI; they may lag this branch. [Getting started](getting-started.md#install)
 covers both published and local workspace installs. Profile, Analyze, Stress and Compare/CI

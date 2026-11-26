@@ -4,7 +4,7 @@
 
 ## How finished is this?
 
-**Beta, and open source.** This checkout develops `0.5.0b1` under the
+**Beta, and open source.** This checkout develops `0.5.0b2` under the
 `Development Status :: 4 - Beta` classifier and MIT licence. Published prereleases are
 available on PyPI; they may lag this branch. [Getting started](getting-started.md#install)
 covers both published and local workspace installs. Profile, Analyze, Stress and Compare/CI

@@ -20,7 +20,7 @@ from ._sqlalchemy import instrument_engine
 from .plugin import RedlinePlugin, install_if_dev
 from .suggest import SQLAlchemyFixSuggester
 
-__version__ = "0.5.0b1"
+__version__ = "0.5.0b2"
 
 __all__ = [
     "RedlineHTTPError",
