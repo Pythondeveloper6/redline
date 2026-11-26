@@ -18,6 +18,17 @@ version is below `1.0` the public API may change between minor versions.
 - `redline instrumentation` lists each loaded raw DB-API driver as `dbapi:<driver>` and shows
   whether `instrument_dbapi` wraps it, so raw-cursor SQL that is not recorded shows up as a
   blind spot. These rows never trigger the auto-instrument warning.
+- `instrument_client_method` (and its context-manager form `client_span`) wraps one method
+  of any client as a client span, recording kind, operation, target, duration, payload size
+  and error. New opt-in integrations built on it: pymongo, Kafka (`kafka`), pika, Google Cloud
+  Storage and Azure Blob Storage. `auto_instrument` covers them.
+- An `unattributed_time` detector flags a web request when no span covers at least
+  `unattributed_time_ms` (100 ms) and at least `unattributed_time_ratio` (half) of its time.
+  On a load run, that uncovered time appears as an `other` row in the bottleneck table.
+- `redline_core.contrib.threads.instrument_threads()` runs `ThreadPoolExecutor.submit` (so
+  `map` and `run_in_executor`) and `Thread.start` in a copy of the request's context. Their
+  SQL and outbound calls stay under the request, and each span carries the thread name in
+  `span.data["thread"]`. Opt-in only; `uninstrument_threads()` undoes it.
 - Load runs can span several generator hosts. `redline load agent` runs workers for a
   controller (`redline load ... --agents https://gen1:7700,https://gen2:7700`); the controller
   sends each agent its share of one global step plan and a shared start time (clock offsets are
