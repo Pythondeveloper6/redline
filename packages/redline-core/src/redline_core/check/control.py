@@ -201,7 +201,10 @@ def stop_check(run_id: str, store_path: str | os.PathLike[str]) -> bool:
 
 def _cleanup(run_id: str, store_path: str) -> None:
     rdir = _runs_dir(store_path)
-    for suffix in (".pid", ".stop", ".check.json"):
+    # The PID file is the completion marker observed by callers. Remove the private
+    # configuration before dropping it, so no observer sees a finished run while raw
+    # request headers remain on disk.
+    for suffix in (".check.json", ".stop", ".pid"):
         try:
             (rdir / f"{run_id}{suffix}").unlink()
         except FileNotFoundError:

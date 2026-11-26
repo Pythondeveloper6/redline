@@ -6,6 +6,7 @@ import json
 import os
 import sys
 import time
+from pathlib import Path
 
 import pytest
 
@@ -442,6 +443,30 @@ def test_run_check_done(store, monkeypatch, tmp_path):
     assert run["suite"]["headers"]["Authorization"] == MASK
     assert seen["suite"]["headers"]["Authorization"] == "Bearer s3cret"
     assert not (rdir / "r1.check.json").exists()  # raw headers removed
+
+
+def test_cleanup_removes_private_config_before_pid_marker(tmp_path, monkeypatch):
+    """Observers must not see a completed pid marker while raw headers remain on disk."""
+    rdir = tmp_path / "runs"
+    rdir.mkdir()
+    store_path = tmp_path / "redline.db"
+    pid = rdir / "r1.pid"
+    stop = rdir / "r1.stop"
+    config = rdir / "r1.check.json"
+    pid.write_text("123")
+    stop.write_text("")
+    config.write_text('{"headers":{"Authorization":"Bearer secret"}}')
+
+    original_unlink = Path.unlink
+
+    def check_before_pid_unlink(path, *args, **kwargs):
+        if path == pid:
+            assert not config.exists(), "private run config must be removed before the pid marker"
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", check_before_pid_unlink)
+    control._cleanup("r1", str(store_path))
+    assert not pid.exists() and not stop.exists() and not config.exists()
 
 
 def test_run_check_compare_loads_baseline(store, monkeypatch):
