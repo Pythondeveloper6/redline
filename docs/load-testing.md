@@ -528,6 +528,7 @@ identity (one virtual user per process).
 
 Only the identity **name** is ever recorded: as the `identity` tag on the app's traces
 (filter with `tag=identity:alice`), and as per-identity request counts in the run summary.
+`GET api/runs/{id}/bottlenecks?identity=alice` splits the bottleneck table to one user.
 Header and cookie values are masked in the stored run config.
 
 ### Data feeds

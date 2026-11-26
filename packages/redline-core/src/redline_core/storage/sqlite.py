@@ -1779,7 +1779,9 @@ class SQLStore(CheckStoreMixin):
                 raise
         return n
 
-    def run_bottlenecks(self, run_id: str, limit: int = 50) -> Bottlenecks | None:
+    def run_bottlenecks(
+        self, run_id: str, limit: int = 50, identity: str | None = None
+    ) -> Bottlenecks | None:
         """Per step, the queries (``trace_sql``) and routes of the traces the run tagged.
 
         ``mean_ms`` is per execution (per request for routes), ``p95_ms`` the 95th percentile
@@ -1788,7 +1790,8 @@ class SQLStore(CheckStoreMixin):
         0.01 ms). One extra item, ``kind="other"``, is the per-request time covered by no span
         (:mod:`redline_core.coverage`), read from up to the run's 2000 latest requests; it is
         omitted when every request is fully covered. ``None`` when there is neither such a run
-        nor any trace tagged with it.
+        nor any trace tagged with it. ``identity`` keeps only the requests one load identity
+        sent (the ``identity`` tag), so the table can be split per user.
         """
         steps_rows = self._query(
             "SELECT step, target_rps FROM run_steps WHERE run_id = ? ORDER BY step", (run_id,)
@@ -1796,14 +1799,21 @@ class SQLStore(CheckStoreMixin):
         tagged = (
             "FROM trace_tags r JOIN trace_tags s ON s.trace_id = r.trace_id AND s.key = 'step' "
             "{join} WHERE r.key = 'run_id' AND r.value = ?"
+            + (
+                " AND r.trace_id IN (SELECT trace_id FROM trace_tags "
+                "WHERE key = 'identity' AND value = ?)"
+                if identity
+                else ""
+            )
         )
+        tag_params: tuple[Any, ...] = (run_id, identity) if identity else (run_id,)
         # key -> step -> [count, total_ms, per-request means, sample trace]
         acc: dict[tuple[str, str], dict[int, builtins.list[Any]]] = defaultdict(dict)
         labels: dict[tuple[str, str], str] = {}
         for r in self._query(
             "SELECT s.value, q.fingerprint, q.sql, q.count, q.total_ms, q.trace_id "
             + tagged.format(join="JOIN trace_sql q ON q.trace_id = r.trace_id"),
-            (run_id,),
+            tag_params,
         ):
             step = _int_or_none(r[0])
             if step is None:
@@ -1814,7 +1824,7 @@ class SQLStore(CheckStoreMixin):
         for r in self._query(
             "SELECT s.value, t.method, coalesce(t.route, t.path), t.duration_ms, t.id "
             + tagged.format(join="JOIN traces t ON t.id = r.trace_id"),
-            (run_id,),
+            tag_params,
         ):
             step = _int_or_none(r[0])
             if step is None:
@@ -1827,7 +1837,7 @@ class SQLStore(CheckStoreMixin):
             "SELECT s.value, t.duration_ms, t.body, t.id "
             + tagged.format(join="JOIN traces t ON t.id = r.trace_id")
             + " ORDER BY t.started_at DESC LIMIT ?",
-            (run_id, _OTHER_SAMPLE),
+            (*tag_params, _OTHER_SAMPLE),
         ):
             step = _int_or_none(r[0])
             gap = _uncovered_from_body(r[2], float(r[1]))

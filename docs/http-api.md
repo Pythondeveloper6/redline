@@ -636,7 +636,7 @@ Load-test runs ([Load testing](load-testing.md)).
 |---|---|
 | `GET api/runs?limit=50` | `{"items": [Run]}`, newest first, steps included |
 | `GET api/runs/{id}` | one run |
-| `GET api/runs/{id}/bottlenecks` | what got slower, per step |
+| `GET api/runs/{id}/bottlenecks?identity=NAME` | what got slower, per step (optionally only one load identity's requests) |
 | `POST api/runs` | start a run (`202`) |
 | `POST api/runs/{id}/stop` | stop a run: `{"stopped": true}` |
 | `POST api/runs/register` | a remote generator registers a run (`201`); needs `accept_remote_runs` |

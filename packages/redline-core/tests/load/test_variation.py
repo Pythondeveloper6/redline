@@ -385,3 +385,32 @@ def test_load_init_writes_data_files_and_identity_keys(tmp_path, capsys):
     rows = (tmp_path / "data" / "ep1.csv").read_text().split()
     assert rows[0] == "path" and len(rows) == 4  # header + 3 distinct paths
     assert os.path.exists(out)
+
+
+def test_the_bottleneck_table_can_be_split_by_identity(tmp_path):
+    from redline_core.api import RedlineAPI
+    from redline_core.conf import Settings
+    from redline_core.recorder import Recorder
+    from redline_core.runs import Run
+    from redline_core.storage import SQLiteStore
+
+    store = SQLiteStore(str(tmp_path / "b.db"), background=False)
+    store.save_run(Run(id="r1", name="x", status="running"))
+    rec = Recorder(Settings(run_metrics=False), store)
+    for path, who in (("/a", "alice"), ("/a", "alice"), ("/b", "bob")):
+        header = {"X-Redline-Run": f"r1;step=1;identity={who}"}
+        with rec.recording(method="GET", path=path, headers=header):
+            pass
+    store.flush()
+    api = RedlineAPI(store, Settings())
+
+    def routes(params):
+        status, data = api.dispatch("GET", "api/runs/r1/bottlenecks", params)
+        assert status == 200
+        return {i["label"] for i in data["items"] if i["kind"] == "route"}
+
+    assert routes({}) == {"GET /a", "GET /b"}
+    assert routes({"identity": "alice"}) == {"GET /a"}
+    assert routes({"identity": "bob"}) == {"GET /b"}
+    assert api.dispatch("GET", "api/runs/r1/bottlenecks", {"identity": "a b"})[0] == 400
+    store.close()

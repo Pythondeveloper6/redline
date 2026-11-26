@@ -296,7 +296,7 @@ class RedlineAPI:
                 return self.start_run(body, base_url)
             return _not_allowed()
         if m := _RUN_BOTTLENECKS.match(path):
-            return self.run_bottlenecks(m.group(1)) if method == "GET" else _not_allowed()
+            return self.run_bottlenecks(m.group(1), params) if method == "GET" else _not_allowed()
         if m := _RUN_STOP.match(path):
             return self.stop_run(m.group(1)) if method == "POST" else _not_allowed()
         if m := _RUN.match(path):
@@ -998,8 +998,12 @@ class RedlineAPI:
             return error(404, "run_not_found", f"No run {run_id!r}.")
         return 200, run.to_dict()
 
-    def run_bottlenecks(self, run_id: str) -> Response:
-        result = self._ext("run_bottlenecks")(run_id)
+    def run_bottlenecks(self, run_id: str, params: Mapping[str, Any] | None = None) -> Response:
+        identity = _str_param(params or {}, "identity")
+        if identity is not None and not re.fullmatch(r"[A-Za-z0-9_.@-]{1,64}", identity):
+            return error(400, "invalid_filter", "identity must be an identity name.")
+        fn = self._ext("run_bottlenecks")
+        result = fn(run_id, identity=identity) if identity else fn(run_id)
         if result is None:
             return error(404, "run_not_found", f"No run {run_id!r}.")
         return 200, result.to_dict()

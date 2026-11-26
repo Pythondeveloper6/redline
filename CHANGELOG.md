@@ -73,6 +73,7 @@ version is below `1.0` the public API may change between minor versions.
   run summary and CLI report each flow and step (traces carry `flow` and `fstep` tags).
   `expect` rules and `max_ms` on any request turn a `200` with an error body, an empty list or
   a slow success into an `assertion` failure instead of a success.
+- `GET api/runs/{id}/bottlenecks?identity=NAME` splits the bottleneck table per load identity.
 - Load scenarios can vary the offered load. `identities` / `identities_file` give many users
   (`round_robin`, `random` or `sticky`, `${VAR}` for secrets, only the name is recorded as the
   `identity` trace tag and in the run summary); `[[data]]` files fill `{data:source.column}`
