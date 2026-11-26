@@ -107,7 +107,7 @@ def test_atomic_decorator_and_long_transaction(client, latest):
     [tx] = kinds(trace, "transaction")
     assert tx.data["outcome"] == "commit" and tx.duration_ms >= 30
     [issue] = [i for i in trace.issues if i.kind == "long_transaction"]
-    assert issue.severity == "warning"
+    assert issue.severity == ("critical" if tx.duration_ms >= 50 else "warning")
     assert "on default" in issue.title
 
 
