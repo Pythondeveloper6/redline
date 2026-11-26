@@ -46,12 +46,20 @@ import re
 import runpy
 import sys
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from .profile import Profile, ScenarioError, _unknown, parse_duration, parse_profile
+from .variation import (
+    AuthSpec,
+    DataSource,
+    data_refs,
+    parse_auth,
+    parse_data_sources,
+    parse_identities,
+)
 
 __all__ = [
     "METHODS",
@@ -84,8 +92,36 @@ _SCENARIO_KEYS = {
     "max_inflight",
     "seed",
     "ui_url",
+    "identities",
+    "identities_file",
+    "identity_mode",
+    "data",
+    "auth",
+    "flows",
+    "metric_sources",
 }
-_REQUEST_KEYS = {"name", "method", "path", "weight", "headers", "json", "body", "expect_status"}
+_REQUEST_KEYS = {
+    "name",
+    "method",
+    "path",
+    "weight",
+    "headers",
+    "json",
+    "body",
+    "expect_status",
+    "expect",
+    "max_ms",
+    "extract",
+    "type",
+    "hold_s",
+    "messages",
+    "reply_timeout_s",
+}
+REQUEST_TYPES = ("http", "stream", "websocket")
+MAX_HOLD_S = 3_600.0
+MAX_MESSAGES = 100
+_FLOW_KEYS = {"name", "weight", "steps", "think_s", "own_connection"}
+MAX_FLOW_STEPS = 50
 
 _PLACEHOLDER = re.compile(r"\{([^{}]*)\}")
 _RANDOM_INT = re.compile(r"^random_int:(-?\d+):(-?\d+)$")
@@ -103,6 +139,17 @@ class RequestSpec:
     body: str | None = None
     has_json: bool = False
     expect_status: tuple[int, ...] | None = None  # None = any status < 400
+    #: Response rules (see :mod:`redline_core.load.flows`); a failed rule is an ``assertion`` error.
+    expect: tuple[dict[str, Any], ...] = ()
+    max_ms: float | None = None  # a slower success counts as an ``assertion`` failure
+    #: Variables read from the response for later steps of a flow: ``{name: source}``.
+    extract: dict[str, dict[str, Any]] = field(default_factory=dict)
+    #: ``http`` (default), ``stream`` (hold a server-sent-events/chunked response open for
+    #: ``hold_s``) or ``websocket`` (connect, send ``messages``, hold ``hold_s``).
+    type: str = "http"
+    hold_s: float | None = None
+    messages: tuple[Any, ...] = ()
+    reply_timeout_s: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -119,6 +166,46 @@ class RequestSpec:
             out["body"] = self.body
         if self.expect_status is not None:
             out["expect_status"] = list(self.expect_status)
+        if self.expect:
+            out["expect"] = [dict(r) for r in self.expect]
+        if self.max_ms is not None:
+            out["max_ms"] = self.max_ms
+        if self.extract:
+            out["extract"] = {k: dict(v) for k, v in self.extract.items()}
+        if self.type != "http":
+            out["type"] = self.type
+        if self.hold_s is not None:
+            out["hold_s"] = self.hold_s
+        if self.messages:
+            out["messages"] = list(self.messages)
+        if self.reply_timeout_s is not None:
+            out["reply_timeout_s"] = self.reply_timeout_s
+        return out
+
+
+@dataclass(frozen=True)
+class FlowSpec:
+    """An ordered journey one arrival runs: each step may extract values for the next."""
+
+    name: str
+    steps: tuple[RequestSpec, ...]
+    weight: float = 1.0
+    #: Pause between steps, ``(min, max)`` seconds picked at random: a user reading a page.
+    think_s: tuple[float, float] | None = None
+    #: Give each session its own connection (a separate browser) instead of the shared pool.
+    own_connection: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        out: dict[str, Any] = {
+            "name": self.name,
+            "weight": self.weight,
+            "steps": [s.to_dict() for s in self.steps],
+        }
+        if self.think_s is not None:
+            lo, hi = self.think_s
+            out["think_s"] = lo if lo == hi else [lo, hi]
+        if self.own_connection:
+            out["own_connection"] = True
         return out
 
 
@@ -139,6 +226,18 @@ class Scenario:
     ui_url: str | None = None
     source: str | None = None
     extra: dict[str, Any] = field(default_factory=dict)  # private ``_keys``, kept verbatim
+    #: Named header/cookie sets picked per request (see :mod:`redline_core.load.variation`).
+    identities: tuple[dict[str, Any], ...] = ()
+    identities_file: str | None = None
+    identity_mode: str = "round_robin"
+    #: CSV / JSON Lines files filling ``{data:source.column}``.
+    data: tuple[DataSource, ...] = ()
+    auth: AuthSpec | None = None
+    base_dir: str | None = None  # relative file paths resolve against this
+    #: Weighted journeys; each arrival starts one flow or one plain request.
+    flows: tuple[FlowSpec, ...] = ()
+    #: ``module:function`` callables returning ``{name: number}`` per step (local files only).
+    metric_sources: tuple[str, ...] = ()
 
     def replace(self, **changes: Any) -> Scenario:
         from dataclasses import replace
@@ -162,6 +261,20 @@ class Scenario:
             out["seed"] = self.seed
         if self.ui_url is not None:
             out["ui_url"] = self.ui_url
+        if self.identities:
+            out["identities"] = [dict(i) for i in self.identities]
+        if self.identities_file:
+            out["identities_file"] = self.identities_file
+        if self.identities or self.identities_file:
+            out["identity_mode"] = self.identity_mode
+        if self.data:
+            out["data"] = [d.to_dict() for d in self.data]
+        if self.auth is not None:
+            out["auth"] = self.auth.to_dict()
+        if self.flows:
+            out["flows"] = [f.to_dict() for f in self.flows]
+        if self.metric_sources:
+            out["metric_sources"] = list(self.metric_sources)
         return out
 
 
@@ -238,14 +351,34 @@ def parse_scenario(
         else DEFAULT_TIMEOUT_S
     )
 
+    base_dir = str(Path(source).resolve().parent) if source and Path(source).is_file() else None
+    identities, identities_file, identity_mode = parse_identities(data)
+    sources = parse_data_sources(data.get("data"), base_dir)
+    auth = parse_auth(data.get("auth"))
+
     raw_requests = data.get("requests")
-    if raw_requests is None:
+    raw_flows = data.get("flows")
+    if raw_requests is None and raw_flows is None:
         raise ScenarioError("is required: a list of requests to send", "requests")
-    if not isinstance(raw_requests, (list, tuple)) or not raw_requests:
-        raise ScenarioError("must be a non-empty list", "requests")
-    requests = tuple(_request(r, i) for i, r in enumerate(raw_requests))
-    if not any(r.weight > 0 for r in requests):
-        raise ScenarioError("at least one request needs a weight > 0", "requests")
+    names = {d.name for d in sources}
+    requests: tuple[RequestSpec, ...] = ()
+    if raw_requests is not None:
+        if not isinstance(raw_requests, (list, tuple)) or (not raw_requests and not raw_flows):
+            raise ScenarioError("must be a non-empty list", "requests")
+        requests = tuple(_request(r, i, names) for i, r in enumerate(raw_requests))
+    flows = _flows(raw_flows, names)
+    sources_raw = data.get("metric_sources")
+    metric_sources: tuple[str, ...] = ()
+    if sources_raw is not None:
+        if not isinstance(sources_raw, (list, tuple)) or any(
+            not isinstance(s, str) or not re.fullmatch(r"[\w.]+:[\w.]+", s) for s in sources_raw
+        ):
+            raise ScenarioError(
+                "must be a list of 'package.module:function' strings", "metric_sources"
+            )
+        metric_sources = tuple(sources_raw)
+    if not any(r.weight > 0 for r in requests) and not any(f.weight > 0 for f in flows):
+        raise ScenarioError("at least one request or flow needs a weight > 0", "requests")
 
     profile = parse_profile(data.get("profile"), "profile")
     workers = _int(data.get("workers"), "workers", minimum=1, maximum=MAX_WORKERS)
@@ -278,6 +411,14 @@ def parse_scenario(
         ui_url=ui_url,
         source=source,
         extra=extra,
+        identities=identities,
+        identities_file=identities_file,
+        identity_mode=identity_mode,
+        data=sources,
+        auth=auth,
+        base_dir=base_dir,
+        flows=flows,
+        metric_sources=metric_sources,
     )
 
 
@@ -323,16 +464,115 @@ def _headers(value: Any, path: str) -> dict[str, str]:
     return out
 
 
-def _request(raw: Any, index: int) -> RequestSpec:
-    path = f"requests[{index}]"
+def _think(raw: Any, where: str) -> tuple[float, float] | None:
+    """``think_s``: seconds, ``"2s"``, or a ``[min, max]`` range picked uniformly."""
+    if raw is None:
+        return None
+    if isinstance(raw, (list, tuple)):
+        if len(raw) != 2:
+            raise ScenarioError("must be a number or a [min, max] pair", where)
+        lo, hi = (parse_duration(v, where) for v in raw)
+    else:
+        lo = hi = parse_duration(raw, where)
+    if hi < lo or hi > MAX_HOLD_S:
+        raise ScenarioError(f"needs min ≤ max ≤ {MAX_HOLD_S:g}s", where)
+    return float(lo), float(hi)
+
+
+def _own_connection(raw: Any, where: str) -> bool:
+    if raw is None:
+        return False
+    if not isinstance(raw, bool):
+        raise ScenarioError(f"must be true or false (got {raw!r})", where)
+    return raw
+
+
+def _flows(raw: Any, sources: set[str]) -> tuple[FlowSpec, ...]:
+    from .flows import var_refs
+
+    if raw is None:
+        return ()
+    if not isinstance(raw, (list, tuple)) or not raw:
+        raise ScenarioError("must be a non-empty list", "flows")
+    out: list[FlowSpec] = []
+    for i, item in enumerate(raw):
+        where = f"flows[{i}]"
+        if not isinstance(item, Mapping):
+            raise ScenarioError("must be a table with steps", where)
+        _unknown(item, _FLOW_KEYS, where)
+        name = item.get("name") or f"flow {i + 1}"
+        if not isinstance(name, str) or any(f.name == name for f in out):
+            raise ScenarioError("must be a unique string", f"{where}.name")
+        weight = item.get("weight", 1)
+        if isinstance(weight, bool) or not isinstance(weight, (int, float)) or weight < 0:
+            raise ScenarioError(f"must be a number ≥ 0 (got {weight!r})", f"{where}.weight")
+        raw_steps = item.get("steps")
+        if not isinstance(raw_steps, (list, tuple)) or not raw_steps:
+            raise ScenarioError("must be a non-empty list of requests", f"{where}.steps")
+        if len(raw_steps) > MAX_FLOW_STEPS:
+            raise ScenarioError(f"at most {MAX_FLOW_STEPS} steps", f"{where}.steps")
+        steps = tuple(
+            _request(
+                {"weight": 1, **s} if isinstance(s, Mapping) else s, j, sources, f"{where}.steps"
+            )
+            for j, s in enumerate(raw_steps)
+        )
+        have: set[str] = set()
+        for j, step in enumerate(steps):
+            used = set(var_refs(step.path))
+            for _, text in _strings_of(
+                {
+                    "headers": step.headers,
+                    "json": step.json if step.has_json else None,
+                    "body": step.body,
+                }
+            ):
+                used.update(var_refs(text))
+            missing = sorted(used - have)
+            if missing:
+                raise ScenarioError(
+                    f"uses {{var:{missing[0]}}} that no earlier step extracts",
+                    f"{where}.steps[{j}]",
+                )
+            have.update(step.extract)
+        out.append(
+            FlowSpec(
+                name=name,
+                steps=steps,
+                weight=float(weight),
+                think_s=_think(item.get("think_s"), f"{where}.think_s"),
+                own_connection=_own_connection(
+                    item.get("own_connection"), f"{where}.own_connection"
+                ),
+            )
+        )
+    return tuple(out)
+
+
+def _request(
+    raw: Any, index: int, sources: set[str] | None = None, prefix: str = "requests"
+) -> RequestSpec:
+    path = f"{prefix}[{index}]"
     if not isinstance(raw, Mapping):
         raise ScenarioError("must be a table/object with at least a path", path)
     _unknown(raw, _REQUEST_KEYS, path)
     url_path = raw.get("path")
     if not isinstance(url_path, str) or not url_path.startswith("/"):
         raise ScenarioError(f"must be a path starting with '/' (got {url_path!r})", f"{path}.path")
+    if url_path.startswith("//"):
+        raise ScenarioError(
+            "must be a path on the base_url, not a network location", f"{path}.path"
+        )
+    known = sources or set()
+
+    def declared(source: str, column: str) -> str:
+        if source not in known:
+            raise ValueError(f"unknown data source {source!r}; declare it under [[data]]")
+        return "x"
+
+    in_flow = prefix != "requests"
     try:
-        render_path(url_path, random.Random(0))
+        render_path(url_path, random.Random(0), declared, _AnyVars() if in_flow else None)
     except ValueError as exc:
         raise ScenarioError(str(exc), f"{path}.path") from None
     method = raw.get("method", "GET")
@@ -367,6 +607,58 @@ def _request(raw: Any, index: int) -> RequestSpec:
                 f"{path}.expect_status",
             )
         expect_t = tuple(items)
+    for where, text in _strings_of(raw):
+        if not in_flow and "{var:" in text:
+            raise ScenarioError(
+                "{var:...} can only be used in the steps of a flow", f"{path}.{where}"
+            )
+        for source, _ in data_refs(text):
+            if source not in known:
+                raise ScenarioError(
+                    f"unknown data source {source!r}; declare it under [[data]]", f"{path}.{where}"
+                )
+    from .flows import parse_expect, parse_extract
+
+    expect_rules = parse_expect(raw.get("expect"), f"{path}.expect")
+    extract = parse_extract(raw.get("extract"), f"{path}.extract")
+    max_ms = raw.get("max_ms")
+    if max_ms is not None and (
+        isinstance(max_ms, bool) or not isinstance(max_ms, (int, float)) or max_ms <= 0
+    ):
+        raise ScenarioError(f"must be a number > 0 (got {max_ms!r})", f"{path}.max_ms")
+    kind = raw.get("type", "http")
+    if kind not in REQUEST_TYPES:
+        raise ScenarioError(
+            f"must be one of {', '.join(REQUEST_TYPES)} (got {kind!r})", f"{path}.type"
+        )
+    hold = raw.get("hold_s")
+    if hold is not None:
+        hold = parse_duration(hold, f"{path}.hold_s")
+        if hold > MAX_HOLD_S:
+            raise ScenarioError(f"must be at most {MAX_HOLD_S:g}s", f"{path}.hold_s")
+    if kind == "stream" and not hold:
+        raise ScenarioError("a stream request needs hold_s (how long to hold it open)", path)
+    messages_raw = raw.get("messages")
+    messages: tuple[Any, ...] = ()
+    if messages_raw is not None:
+        if kind != "websocket":
+            raise ScenarioError("only a websocket request has messages", f"{path}.messages")
+        if not isinstance(messages_raw, (list, tuple)) or len(messages_raw) > MAX_MESSAGES:
+            raise ScenarioError(
+                f"must be a list of at most {MAX_MESSAGES} messages", f"{path}.messages"
+            )
+        try:
+            json.dumps(list(messages_raw))
+        except (TypeError, ValueError):
+            raise ScenarioError("messages must be JSON values", f"{path}.messages") from None
+        messages = tuple(messages_raw)
+    if kind == "websocket" and not (hold or messages):
+        raise ScenarioError("a websocket request needs messages or hold_s", path)
+    if kind != "http" and (raw.get("has_json") or raw.get("json") is not None or body):
+        raise ScenarioError("only an http request has a body", path)
+    reply_timeout = raw.get("reply_timeout_s")
+    if reply_timeout is not None:
+        reply_timeout = parse_duration(reply_timeout, f"{path}.reply_timeout_s")
     name = raw.get("name") or f"{method} {url_path}"
     if not isinstance(name, str):
         raise ScenarioError(f"must be a string (got {name!r})", f"{path}.name")
@@ -380,13 +672,57 @@ def _request(raw: Any, index: int) -> RequestSpec:
         body=body,
         has_json=has_json,
         expect_status=expect_t,
+        expect=expect_rules,
+        max_ms=float(max_ms) if max_ms is not None else None,
+        extract=extract,
+        type=kind,
+        hold_s=float(hold) if hold else None,
+        messages=messages,
+        reply_timeout_s=float(reply_timeout) if reply_timeout else None,
     )
 
 
-# ---------------------------------------------------------------------------- placeholders
-def render_path(path: str, rng: random.Random) -> str:
-    """Expand ``{random_int:A:B}``, ``{random_choice:a|b}`` and ``{uuid}``.
+def _strings_of(raw: Mapping[str, Any]) -> list[tuple[str, str]]:
+    """The strings of a request that may hold ``{data:...}`` (headers, json, body)."""
+    out: list[tuple[str, str]] = []
 
+    def walk(value: Any, where: str) -> None:
+        if isinstance(value, str):
+            out.append((where, value))
+        elif isinstance(value, Mapping):
+            for k, v in value.items():
+                walk(v, f"{where}.{k}")
+        elif isinstance(value, (list, tuple)):
+            for i, v in enumerate(value):
+                walk(v, f"{where}[{i}]")
+
+    for key in ("headers", "json", "body"):
+        if raw.get(key) is not None:
+            walk(raw[key], key)
+    return out
+
+
+# ---------------------------------------------------------------------------- placeholders
+class _AnyVars(dict):  # type: ignore[type-arg]
+    """Stands in for a flow's variables while a scenario is validated."""
+
+    def __contains__(self, key: object) -> bool:
+        return True
+
+    def __getitem__(self, key: str) -> str:
+        return "x"
+
+
+def render_path(
+    path: str,
+    rng: random.Random,
+    data: Callable[[str, str], str] | None = None,
+    variables: Mapping[str, str] | None = None,
+) -> str:
+    """Expand ``{random_int:A:B}``, ``{random_choice:a|b}``, ``{uuid}`` and, with a ``data``
+    lookup, ``{data:source.column}``.
+
+    ``{var:name}`` reads a variable extracted by an earlier step of a flow (``variables``).
     Raises ``ValueError`` for anything else in braces.
     """
     if "{" not in path:
@@ -394,6 +730,20 @@ def render_path(path: str, rng: random.Random) -> str:
 
     def sub(m: re.Match[str]) -> str:
         token = m.group(1).strip()
+        if token.startswith("var:"):
+            if variables is None:
+                raise ValueError("{var:...} can only be used in the steps of a flow")
+            name = token[4:]
+            if name not in variables:
+                from .flows import ExtractError
+
+                raise ExtractError(f"variable {name!r} was not extracted")
+            return variables[name]
+        if token.startswith("data:"):
+            ref = re.fullmatch(r"data:([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)", token)
+            if ref is None or data is None:
+                raise ValueError(f"bad placeholder {{{token}}}; use {{data:source.column}}")
+            return data(ref.group(1), ref.group(2))
         if token == "uuid":
             return uuid.UUID(int=rng.getrandbits(128), version=4).hex
         im = _RANDOM_INT.match(token)

@@ -53,6 +53,14 @@ have finished, the way independent users on the internet behave. When the server
 down, requests pile up, queues grow and latency climbs, which is what happens in
 production. Redline uses the open model: you choose requests per second, not users.
 
+Many internal applications are sized by a fixed number of logged-in users, not by a rate.
+For that, keep the open model and add **sessions**: an arrival starts one *session* (a flow),
+the session waits `think_s` between its steps like a person reading a page, and by Little's
+law the number of sessions in flight is the arrival rate times the session length. 20 arrivals
+per second with 5 s of think time holds about 100 sessions at once, and the run reports the
+peak per step ([Sessions and think time](#sessions-and-think-time)). The offered load still
+does not fall when the server slows.
+
 ### Coordinated omission
 
 A load generator that waits for each response before sending the next one measures the
@@ -146,13 +154,44 @@ run with `--no-store`, or written to another store, does not tag the app's trace
 **bottleneck** analysis joins
 those tags with the per-query summaries, so the app must be recording the load. Remember
 [sampling](production.md#sampling): in a profile that keeps 5% of requests you still get
-enough traces at high rps, but at 5 rps you may get none. Raise `sample_rate` on the
-instance under test.
+enough traces at high rps, but at 5 rps you may get none. Requests tagged with a run that
+is registered in the app's store and running are always kept (`sampled_by` is `run`), so a
+low-rate step still produces traces without changing `sample_rate`.
 
 The run itself (its steps and latency histograms) is written to the same store the app
 uses. The default is `.redline/redline.db` in the working directory, and `--store` points
 elsewhere, so run the command from the app's directory or pass the path. The UI then lists
 it under **Load**.
+
+### Checking that the app records the run
+
+Before the first step, `redline load` can send one harmless request (the scenario's first
+enabled `GET`, tagged `step=probe`, which the bottleneck analysis ignores) and look for the
+trace it should have produced. If none appears it says why it usually happens: the app uses
+a different store than the run, sampling dropped the request, or recording is disabled.
+
+- With `--store-url` or `--register-url` the probe is on by default and only warns.
+- With a file store it is off, so existing runs send no extra request; add `--probe` to turn
+  it on.
+- `--require-recording` stops the run (status `failed`) instead of warning.
+- `--no-probe` skips it; `--probe-timeout 10s` waits longer for a slow writer.
+
+### Generator and application on different machines
+
+When the generator runs on another host (or the app runs in a container) there is no shared
+file, and a run written to a local file would tag none of the app's traces. Two options:
+
+- **Shared store.** Point both at the same PostgreSQL database:
+  `redline load scenario.toml --store-url postgresql://...` (or set `storage_url` in the
+  project's config, which `redline load` picks up when `--store` is not given). The URL's
+  password is never printed.
+- **Register over HTTP.** With no shared store, the generator tells the application about
+  the run: `redline load scenario.toml --register-url https://app.example/_redline`.
+  The application must enable `accept_remote_runs` (off by default, and always off while
+  `read_only` is on). The Redline access token is read from `REDLINE_TOKEN` or
+  `--token-file`, never from the command line. The generator checks the application is
+  reachable and accepts the token before the first request, and only runs registered this
+  way can be changed over HTTP, never runs written by a local process.
 
 ## Profiles
 
@@ -163,11 +202,38 @@ A profile says how the rate changes over time.
 | `constant` | one step at a fixed rate | `rps`, `duration_s` |
 | `ramp` | the rate rises (or falls) linearly | `start_rps`, `end_rps`, `duration_s`, `step_duration_s` (default 5 s) |
 | `steps` | a staircase | `start_rps`, `end_rps`, `step_rps`, `step_duration_s` (default 30 s) |
+| `stages` | any shape: spike, soak, a pause | `stages`: a list of `{ rps, duration_s }` (`rps = 0` is a pause) |
 
 Results are reported **per step**. A ramp is reported in steps too (each at the ramp's
 rate at the step's midpoint), so the knee finder works on it. Prefer `steps` when looking
 for a knee: each step is long enough for a stable p95, and "the server held 70 rps and
 broke at 80" is a sentence you can act on.
+
+### Spikes, soaks and custom shapes
+
+`stages` runs an ordered list of `{ rps, duration_s }` stages, each reported as one step:
+
+```toml
+[profile]
+stages = [
+  { rps = 10,  duration_s = "1m" },    # normal
+  { rps = 200, duration_s = "30s" },   # the spike
+  { rps = 10,  duration_s = "3m" },    # does it recover?
+]
+```
+
+On the command line: `--stages 10:1m,200:30s,10:3m`. A soak is one long stage
+(`--stages 40:30m`). Two extra analyses make these shapes useful:
+
+- **Recovery.** A step where the rate *falls* never decides the knee (that is recovery, not
+  saturation). Instead the summary reports, for each such step, the p95 before the spike, the
+  peak, and how many seconds after the step began p95 was back within 25% of its level before
+  the spike for three seconds running (`recovered_after_s`, or `null` if it never was).
+- **Drift.** Any step of 30 s or more is checked for slow growth, comparing its first third
+  with its last: `degrading` when p95 grew by 25% and at least 5 ms with a positive slope, or
+  the error rate climbed by a percentage point; otherwise `stable`. The summary has the slope
+  in ms per minute, and `drift_verdict` is `degrading` if any step is. A leak shows up here
+  long before the knee.
 
 `stop_on` ends the run after the first step that breaches a limit, so a test does not keep
 hammering a server that has already fallen over:
@@ -239,6 +305,10 @@ stop_on = { error_rate = 0.05, p95_ms = 2000 }
 | `max_inflight` | `1000` | In-flight cap per worker; arrivals beyond it are counted `dropped` |
 | `seed` | random | Integer seed for placeholders and request choice, for repeatable runs |
 | `ui_url` | config `mount_path`, else `/_redline` | Where the Redline UI is mounted (path on `base_url`'s host, or a full URL); only used for the printed link |
+| `identities`, `identities_file`, `identity_mode` | none | Many users instead of one: see [Identities](#identities) |
+| `data` | none | CSV / JSON Lines files that fill `{data:source.column}`: see [Data feeds](#data-feeds) |
+| `auth` | none | A token provider refreshed during the run: see [Token refresh](#token-refresh) |
+| `flows` | none | Weighted journeys of chained requests: see [Flows](#flows). `requests` may then be empty |
 
 Durations accept a number of seconds or strings such as `"20s"`, `"2m"`.
 
@@ -254,6 +324,9 @@ Durations accept a number of seconds or strings such as `"20s"`, `"2m"`.
 | `json` | none | A JSON body; sets `Content-Type: application/json` |
 | `body` | none | A raw string body |
 | `expect_status` | any status below 400 | A list of acceptable status codes. Anything else counts as an error |
+| `expect` | none | Rules the response must satisfy: see [Response checks](#response-checks) |
+| `max_ms` | none | A success slower than this counts as an `assertion` failure |
+| `extract` | none | Values to read from the response for later steps of a [flow](#flows) |
 
 ### Placeholders
 
@@ -265,8 +338,246 @@ Rendered separately for every request:
 | `{random_choice:a\|b\|c}` | one of the listed values |
 | `{uuid}` | a fresh random UUID (32 hex digits, no dashes) |
 
+| `{data:source.column}` | a value from a [data feed](#data-feeds); also works in headers, JSON and raw bodies |
+
 Any other `{...}` in a path is an **error**, so an OpenAPI path such as `/orders/{id}` can
 never be sent by accident.
+
+### Flows
+
+Real traffic is journeys: list, open one item from that list, save it. A random detail id
+often does not exist or is not the caller's, so much of the load turns into cheap 403 and 404
+responses. A flow is an ordered list of requests that one arrival runs:
+
+```toml
+[[flows]]
+name = "browse"
+weight = 3
+
+[[flows.steps]]
+path = "/items"
+extract = { id = "$.items[0].id" }          # a JSON path (shorthand), or ...
+# extract = { tok = { header = "X-Next" }, n = { regex = "id=(\\d+)", group = 1 } }
+
+[[flows.steps]]
+path = "/items/{var:id}"                    # {var:name} works in the path, headers, JSON and body
+expect = [{ json = "$.name" }]
+```
+
+One arrival starts one flow, so the open model stays intact. The latency of a flow is
+measured from its scheduled start to the end of its last step, and each step has its own
+numbers. A failed step ends the flow and is counted **once** as a flow error, with the class
+of the failing step (a status code, an exception, `assertion`, or `extract` when a value the
+next step needs was not in the response). The identity and data row stay the same for the
+whole flow. The run summary has a `flows` entry (runs, errors, p50/p95/p99, per-step counts and
+percentiles) that the CLI prints, and the app's traces carry `flow` and `fstep` tags next to
+`run_id` and `step`, so the bottleneck table gets rows for every step of the journey. Plain
+requests and flows can be mixed; each arrival picks one by weight.
+
+### Sessions and think time
+
+A flow can model a user instead of a burst:
+
+```toml
+[[flows]]
+name = "shopper"
+think_s = [2, 6]          # seconds between steps: a number, "3s", or a [min, max] range
+own_connection = true     # each session opens its own connection, like a separate browser
+
+[[flows.steps]]
+path = "/products"
+
+[[flows.steps]]
+path = "/products/{var:id}"
+```
+
+`think_s` is picked at random per pause (seeded by the scenario `seed`) and a stop cuts it
+short. The flow's latency includes the pauses, a step's own latency does not. With
+`own_connection` the session does not share the worker's keep-alive pool: it connects, sends
+its steps and closes, so the server sees as many connections as there are sessions. Every
+step of the run table reports the **peak sessions in flight** (summed over the workers' own
+peaks), printed by the CLI and in `summary.sessions`. To hold N sessions of length L seconds,
+use `rps = N / L`.
+
+### Response checks
+
+Under load many apps answer `200` with an error body, an empty list or a truncated payload;
+by default those count as successes. Add `expect` to a request (one rule or a list):
+
+| Rule | Passes when |
+|---|---|
+| `{ json = "$.items[0].id" }` | the JSON path exists (`exists = false` to require it absent) |
+| `{ json = "$.status", equals = "ok" }` | the value equals this |
+| `{ contains = "text" }` / `{ not_contains = "text" }` | the body does / does not contain it |
+| `{ min_bytes = 200 }` | the body is at least this large |
+| `{ header = "Content-Type", contains = "json" }` | the header exists (and `equals` / `contains` match) |
+
+A failed rule is counted as its own error class, `assertion`, in the error breakdown, and
+`max_ms` does the same for a response slower than an agreed limit. Failure reasons never
+include body or header values.
+
+### Several generator hosts (agents)
+
+A generator on the machine under test distorts both sides, and one host caps the offered
+rate. Run `redline load agent` on other hosts and point the controller at them:
+
+```bash
+# on each generator host (token file mode 0600; use TLS or a private network)
+redline load agent --listen 0.0.0.0:7700 --token-file agent.token --cert agent.pem --key agent.key
+
+# on the controller
+redline load scenario.toml --steps 100:1000:100 \
+    --agents https://gen1.internal:7700,https://gen2.internal:7700 \
+    --agent-token-file agent.token --agent-ca ca.pem
+```
+
+The controller computes the step plan once and gives each agent its share of the workers
+(up to 8 each, never more than the peak rps), numbered globally, so the union of all hosts'
+arrivals is exactly the planned rate. One shared start time is converted to each agent's clock
+from a measured offset, and every agent's per-second numbers (counters and latency histograms)
+stream back and merge exactly like local workers', so steps line up to the second. The
+controller runs no workers itself unless you also pass `--workers`. Stopping the run (Ctrl-C,
+`stop_on`) stops the agents; an agent that disappears fails the run with a clear message.
+
+What the controller sends is the scenario's requests plus its identities and data rows
+**inline** (an agent reads no files), so the config, including credentials, crosses the
+network: use TLS (`--cert`/`--key`, verified with `--agent-ca`) or a private network. An agent
+needs a token (at least 16 characters), listens on `127.0.0.1` unless told otherwise, refuses
+`auth.provider` `command` and `python` (use `request`), blocks link-local and metadata targets,
+and can be limited with `--allow-target URL_PREFIX` (scheme, host and port must match exactly; names are
+resolved and every address checked, but a name that changes its answer later, DNS rebinding, is not caught: use the allow-list).
+
+Each worker also reports its own CPU use. A step where a generator worker was above 90% of a
+core is marked `generator_limited` (and listed in `summary.generator.limited_steps`): the
+generator, not the app, may have capped the rate there, so add agents before believing the
+knee.
+
+### Streams and WebSockets
+
+Every request is timed to its **first byte** (headers received) as well as to its **last byte**.
+The step table's latency is the last byte; first byte is in each step's `ttfb_p50_ms` /
+`ttfb_p95_ms` and the run summary, and the CLI prints both. A response that streams for a while
+shows the difference: the first byte is what the user feels.
+
+A request can hold a connection open instead of finishing:
+
+```toml
+[[requests]]
+name = "live feed"
+type = "stream"            # server-sent events or a chunked response
+path = "/events"
+hold_s = 30                # how long to hold it open
+weight = 1
+
+[[requests]]
+name = "chat"
+type = "websocket"         # needs: pip install "redline-core[load-websocket]"
+path = "/ws"
+messages = ["hello", { type = "ping" }]   # sent in order; each reply is timed
+hold_s = 60                # then keep the connection open this long
+reply_timeout_s = 5
+```
+
+For these, the latency in the step table is the time to the **first byte** (stream) or to the
+**handshake** (WebSocket): the hold is not latency. Each step also reports how many were held,
+events received (a server-sent event, or a chunk for other streams), messages answered, the
+**highest number open at once** (summed over the workers' own peaks, so exact only when they
+are balanced), the time to the last byte of a stream and the connect and reply latency of
+WebSockets. A held stream occupies one of the worker's `connections` and an arrival slot
+(`max_inflight`): to hold 500 at once with 2 workers set `connections = 300` or more. They
+cannot carry a request body, and headers (identities, tokens) are sent on the handshake.
+
+### Browser pages
+
+Browser-side cost (rendering, bundle size, requests per page) is out of scope: Redline does
+not drive a browser. To get the *server* side of real page loads grouped like a load run, run
+a browser automation script (any tool) that adds one header to every request of a page load:
+
+```text
+X-Redline-Run: <run id>;step=1;page=checkout-17
+```
+
+with a run registered in the app's store (`redline load` registers one; or POST
+`api/runs/register` with `accept_remote_runs`). The app tags those traces with `page`, and
+`GET api/runs/{id}/pages` sums them per page load: requests, total server time, queries and
+the slowest route.
+
+### Identities
+
+One set of credentials makes the app see one user thousands of times: per-user caches stay
+warm and row-level filters always pick the same rows. Give the run many users:
+
+```toml
+identity_mode = "round_robin"      # or "random" (seeded) or "sticky"
+identities_file = "users.csv"      # name, header:X-Api-Key, cookie:session ...
+
+[[identities]]
+name = "alice"
+headers = { Authorization = "Bearer ${ALICE_TOKEN}" }   # ${VAR} reads the environment
+cookies = { sid = "${ALICE_SID}" }
+```
+
+Inline identities come first, then the file's. CSV columns are `name`, `header:<Header-Name>`
+and `cookie:<name>`; a `.jsonl` file holds `{"name", "headers", "cookies"}` objects. A missing
+environment variable fails the run before any request, naming the variable. Header order:
+scenario `headers`, then the identity's, then the request's own.
+
+`round_robin` cycles through every identity (all workers together visit them in order),
+`random` picks with the scenario `seed`, and `sticky` gives each worker process one fixed
+identity (one virtual user per process).
+
+Only the identity **name** is ever recorded: as the `identity` tag on the app's traces
+(filter with `tag=identity:alice`), and as per-identity request counts in the run summary.
+`GET api/runs/{id}/bottlenecks?identity=alice` splits the bottleneck table to one user.
+Header and cookie values are masked in the stored run config.
+
+### Data feeds
+
+Uniform random identifiers hit rows that do not exist and hit every real row equally, so
+the page cache and query plans behave nothing like production.
+
+```toml
+[[data]]
+name = "orders"
+file = "orders.csv"      # CSV with a header row, or .jsonl
+pick = "zipf"            # "sequential", "random" or "zipf" (first rows hottest)
+zipf_s = 1.1             # skew for zipf
+
+[[requests]]
+path = "/orders/{data:orders.id}"
+json = { sku = "{data:orders.sku}" }
+```
+
+Relative files resolve against the scenario file. Every reference to one source in a request
+uses the same row. A missing file or column fails the run before any request. `zipf` and
+`random` follow the scenario `seed`. `redline load init --from-traces --data-dir DIR` writes
+the distinct paths seen per endpoint as such files, most used first, instead of one sample
+path per endpoint.
+
+### Token refresh
+
+Short-lived tokens expire mid-run and every request then fails with 401, which looks like a
+knee. An `auth` block gets a token before the run and refreshes it before it expires, outside
+the latency numbers:
+
+```toml
+[auth]
+provider = "request"                 # "command", "request" or "python"
+request = { method = "POST", path = "/login", json = { user = "load", password = "${LOAD_PW}" } }
+extract = "data.access_token"        # dotted path into the JSON response
+expires_extract = "data.expires_in"  # lifetime in seconds (or set ttl_s)
+refresh_before_s = 30
+```
+
+`command = ["get-token", "--env", "perf"]` runs a program (no shell) and reads its output;
+`callable = "package.module:function"` calls a Python function returning the token or
+`(token, ttl_s)`. The token goes in `Authorization: Bearer ...` (`header` and `prefix` change
+that). Each worker refreshes on its own; refresh calls are never counted in the histograms.
+If a refresh fails twice, the run stops with an error instead of reporting 401s as server
+errors. The stored config masks command arguments and request credentials.
+
+`auth`, `identities`, `identities_file` and `data` can run a program or read a file, so they
+are accepted only from a scenario file, never from the UI or `POST api/runs`.
 
 ### Authentication
 
@@ -294,6 +605,9 @@ SCENARIO = {
 |---|---|
 | `--rps N` | constant rate |
 | `--ramp A:B` | ramp from A to B rps over `--duration` |
+| `--stages RPS:DURATION,...` | ordered stages, for example `10:1m,200:30s,10:3m` (spike) or `40:30m` (soak) |
+| `--agents URL,URL` | run workers on remote `redline load agent` hosts; the controller runs none unless `--workers` is given |
+| `--agent-token-file PATH`, `--agent-ca PATH` | the agents' token (else `REDLINE_AGENT_TOKEN`) and the CA bundle that verifies their TLS certificates |
 | `--steps A:B:STEP` | steps from A to B rps, STEP apart, each `--step-duration` |
 | `--duration 60s` | total duration (default 30 s for constant and ramp) |
 | `--step-duration 30s` | length of each step |
@@ -303,15 +617,23 @@ SCENARIO = {
 | `--ui-url PATH\|URL` | where the Redline UI is mounted, for the printed link (overrides the scenario's `ui_url`) |
 | `--name TEXT` | run name |
 | `--store PATH` | store to write the run to (default `.redline/redline.db`) |
+| `--store-url URL` | write the run to a shared PostgreSQL store (`postgresql://...`) |
+| `--register-url URL` | register the run with the application over HTTP (needs `accept_remote_runs` there) |
+| `--token-file PATH` | file holding the Redline access token for `--register-url` (else `REDLINE_TOKEN`) |
 | `--no-store` | do not write to a store |
+| `--probe`, `--no-probe` | send (or skip) one tagged `GET` before the run to check the app records it. On by default with `--store-url` / `--register-url`, off with a file store |
+| `--require-recording` | stop the run when the probe request is not recorded (default: warn) |
+| `--probe-timeout 5s` | how long to wait for the probe trace |
 | `--json OUT` | also write the results as JSON |
 | `--fail-p95-ms X` | exit 1 if the run-wide p95 exceeds X ms |
 | `--fail-error-rate Y` | exit 1 if the error rate exceeds Y (`0.01` or `1%`) |
 | `--quiet`, `-q` | only print the final table |
 | `--ui-url URL` | the Redline UI address printed in the "See bottlenecks in the Redline UI at ..." line after the run. Default: the scenario's host plus the `mount_path` setting (from `redline.toml` or `REDLINE_MOUNT_PATH`), else `/_redline` |
 
-`--rps`, `--ramp` and `--steps` are mutually exclusive. `redline load init` writes
-scenarios; see [Generating scenarios](#generating-scenarios).
+`--rps`, `--ramp`, `--steps` and `--stages` are mutually exclusive. `redline load init` writes
+scenarios; see [Generating scenarios](#generating-scenarios). A TOML scenario it writes ends
+with a commented-out example of the optional keys (`[auth]`, `[[flows]]` with `extract`,
+`expect`, `max_ms`, `think_s` and `own_connection`): uncomment the lines you need and edit them.
 
 Exit codes: `0` ok, `1` a `--fail-*` threshold was breached or the run failed, `2` usage or
 scenario error, `130` interrupted with Ctrl-C (the partial results are still saved).
@@ -355,6 +677,45 @@ The verdict is one word:
 | `failing` | the very first step is already the knee. Lower the starting rate |
 | `no data` | no complete step |
 
+### Resources: which one ran out
+
+The knee says when the system stopped keeping up and the bottleneck table says which query
+slowed; neither says whether the app CPU, the connection pool or memory was the limit. While
+a run that is registered in the app's store is sending it traffic (and only then), each app
+worker samples itself once a second: process CPU, resident memory, garbage-collection pauses,
+threads, and the SQLAlchemy pool (size, checked out, time spent waiting for a connection).
+Samples are stored with the run and its current step (turn it off with `run_metrics = false`;
+the `production` preset does). The run summary then carries `resources` (per step, average
+and maximum of each number) and a verdict in `limiting_resource`, which the CLI prints:
+
+```text
+limiting resource: step 8: connection pool exhausted (5/5 checked out), wait time 40x the first step
+```
+
+The verdict looks at the knee step (else the last one) in this order: **pool** (every
+connection checked out and requests waiting for one), **cpu** (a worker above 85% of a core),
+**gc** (pauses of 10% of the time or more), else `unknown`. Memory that grew by 30% over the
+run is added as a note, never as the limit. `GET api/runs/{id}/metrics` returns the same.
+
+Numbers from outside the process (a database or host monitor, a cloud metrics API) come in
+through a **metric source**: a function you write that returns `{name: number}` for a time
+range, called once per step after the run:
+
+```toml
+metric_sources = ["perf_monitors:database"]   # package.module:function
+```
+
+```python
+def database(start_epoch: float, end_epoch: float) -> dict[str, float]:
+    return {"db_cpu_pct": query_my_monitor(start_epoch, end_epoch)}
+```
+
+They are stored beside the app's own samples and shown in `resources`. A source that raises
+is listed under `metric_source_errors`; it never fails the run. Sources are only read from a
+scenario file (they run your code), and a remote generator posts them to the app with
+`POST api/runs/{id}/metrics`. Database-side counters (active sessions, waits, blocking) are
+not sampled by Redline itself: a metric source is the place for them.
+
 ### Bottlenecks
 
 The **Bottlenecks** table in the UI answers "what got slower". It joins the traces tagged
@@ -364,6 +725,7 @@ with the run, step by step, with their per-fingerprint and per-route summaries:
 |---|---|
 | `sql` | mean time per execution of each query, by step |
 | `route` | mean time per request of each endpoint, by step |
+| `other` | mean time per request that no span covers (the gap between the spans, see [unattributed time](detectors.md#unattributed-time)), by step. Read from the run's 2000 latest requests; absent when every request is fully covered |
 
 Each item shows its mean and p95 at every step and a **growth** factor: the last step's
 mean divided by the first's (floored at 0.01 ms to avoid dividing by nothing). Items are
@@ -377,6 +739,7 @@ to open a sample trace, with its callsite.
 | One SQL statement's time grows 100x | a missing index or a lock; run [EXPLAIN](explain.md) on a sample |
 | Every statement grows together; routes grow | the database or its pool is saturated. Look for `pool_wait` spans ([Transactions and locks](transactions.md#pool-waits)) |
 | SQL flat, routes grow | the app itself: CPU, GIL, [blocking in async](async-blocking.md), or a downstream call |
+| The `other` row grows with the routes | time redline cannot see: CPU, or a client with no span ([wrap it](extending.md#instrumenting-a-client)) |
 | `dropped` rises with flat server latency | the generator is the limit. More workers, or another machine |
 | Errors with no matching traces | requests are rejected before the app records them (proxy, worker queue) |
 
@@ -417,8 +780,10 @@ Notes for stable CI numbers:
 
 With `load_from_ui = True` the **Load** page has a form that starts a run against the app
 that serves the UI. It is **off by default** (`403 load_disabled`) and needs
-`redline-core[load]`, a file-backed SQLite store, and a store the background process can
-write to. It is also blocked by `read_only` (`403 read_only`) and the `load` feature
+`redline-core[load]`, and either a file-backed SQLite store or the shared PostgreSQL store
+(`storage_url`), which the background process reaches through the `REDLINE_STORAGE_URL`
+environment variable. On a shared store there are no pid files to tell a killed run from a
+live one, so stopping a run whose process is gone closes it as `failed`. It is also blocked by `read_only` (`403 read_only`) and the `load` feature
 switch (`404 feature_disabled`), and the `production` preset keeps it off. Turn it on only
 in environments where load is welcome. See [Security](security.md#load-from-the-ui).
 
@@ -472,6 +837,9 @@ starting point and edit it.
 | `--window 24h` | how far back to look |
 | `--top 10` | endpoints to keep |
 | `--include-writes` | also include POST/PUT/PATCH/DELETE (written with `weight = 0`) |
+| `--data-dir DIR` | with `--from-traces`: write each endpoint's distinct paths as CSV here and use them as `zipf` data sources |
+| `--stages RPS:DURATION,...` | write a stages profile into the scenario |
+| `--identities-file FILE`, `--identity-mode MODE` | add `identities_file` and `identity_mode` to the scenario |
 | `--base-url URL` | set `base_url` |
 | `-o, --out PATH` | output file; `.toml` or `.json`; `-` prints to stdout (default `scenario.toml`) |
 | `--force` | overwrite an existing file |
@@ -482,8 +850,9 @@ database is something to choose deliberately.
 
 ## Limits
 
-- It tests **HTTP endpoints over the network**. It does not model browsers, WebSockets or
-  think time.
+- It tests **HTTP endpoints over the network**, plus held streams and WebSocket connections
+  (see [Streams and WebSockets](#streams-and-websockets)). It does not drive a browser: see
+  [Browser pages](#browser-pages) for the recipe.
 - Latency is as measured by the generator, including the network and the generator's own
   event loop. Distrust sub-millisecond numbers.
 - Correlated bottlenecks need the app to record the load; with strong sampling, or a

@@ -1,51 +1,42 @@
-"""The tools an agent may call. Every tool reads; none changes data or runs queries.
+"""The tools an agent may call.
 
-``call_tool`` never raises: bad input and missing data become ``{"error": ...}`` so a model
-can read the message and correct itself. Output is bounded in item count and string length.
+Most tools only read. ``call_tool`` never raises: bad input and missing data become
+``{"error": ...}`` so a model can read the message and correct itself. Output is bounded in
+item count and string length, and secrets (credentials in URLs, tokens, header and identity
+values) are masked on the way out.
+
+The few tools that change anything (start or stop a load run, delete a run) are *gated*: they
+are neither listed nor callable unless the operator switched them on when starting
+``redline mcp`` (see :class:`~redline_core.agent.base.ServerOptions`).
 """
 
 from __future__ import annotations
 
 import json
 import time
-from collections.abc import Callable
-from dataclasses import dataclass
 from typing import Any
 
 from .audit import AuditLog
+from .base import (
+    MAX_ITEMS,
+    OPTIONS,
+    ServerOptions,
+    Tool,
+    clip,
+    obj,
+    validate,
+)
 
-__all__ = ["TOOLS", "Tool", "call_tool"]
+__all__ = ["TOOLS", "ServerOptions", "Tool", "call_tool", "visible_tools"]
 
-MAX_ITEMS = 100
 MAX_SPANS = 50
-MAX_STR = 2000
-
-
-@dataclass(frozen=True)
-class Tool:
-    name: str
-    description: str
-    schema: dict[str, Any]
-    run: Callable[[Any, dict[str, Any]], dict[str, Any]]
-
-
-def _clip(value: Any, depth: int = 0) -> Any:
-    if isinstance(value, str):
-        return value if len(value) <= MAX_STR else value[:MAX_STR] + "…"
-    if depth > 8:
-        return None
-    if isinstance(value, dict):
-        return {str(k): _clip(v, depth + 1) for k, v in list(value.items())[:200]}
-    if isinstance(value, (list, tuple)):
-        return [_clip(v, depth + 1) for v in list(value)[:MAX_ITEMS]]
-    return value
+MAX_OUTPUT = 400_000
 
 
 def _api(store: Any) -> Any:
-    from ..api import RedlineAPI
-    from ..conf import Settings
+    from .base import _api as make
 
-    return RedlineAPI(store, Settings(read_only=True), framework="other")
+    return make(store)
 
 
 def _issues(store: Any, window: str, kind: str | None, sort: str | None) -> list[dict]:
@@ -110,15 +101,15 @@ def _instrumentation(store: Any, args: dict[str, Any]) -> dict[str, Any]:
 def _verify_fix(store: Any, args: dict[str, Any]) -> dict[str, Any]:
     from ..check.report import Report, ReportError
     from ..check.verify import verify_report
+    from .base import read_local_file
 
     path = args.get("report_path")
-    if not isinstance(path, str) or not path.endswith(".json"):
+    if not isinstance(path, str):
         raise ValueError("report_path must be the path of a compare report (.json)")
     try:
-        with open(path, encoding="utf-8") as fh:
-            report = Report.from_dict(json.load(fh))
-    except (OSError, ValueError, ReportError) as exc:
-        raise ValueError(f"could not read report: {exc}") from None
+        report = Report.from_dict(json.loads(read_local_file(path, (".json",), what="report")))
+    except (ValueError, ReportError):
+        raise ValueError("the file is not a compare report") from None
     min_samples = args.get("min_samples", 5)
     if isinstance(min_samples, bool) or not isinstance(min_samples, int) or min_samples < 0:
         raise ValueError("min_samples must be a whole number of 0 or more")
@@ -136,110 +127,118 @@ def _llm_summary(store: Any, args: dict[str, Any]) -> dict[str, Any]:
     return data
 
 
-def _obj(props: dict[str, Any], required: tuple[str, ...] = ()) -> dict[str, Any]:
-    return {
-        "type": "object",
-        "properties": props,
-        "required": list(required),
-        "additionalProperties": False,
-    }
-
-
 _WINDOW = {"type": "string", "description": "Look-back window such as 1h, 24h or 7d"}
-TOOLS: dict[str, Tool] = {
-    t.name: t
-    for t in (
-        Tool(
-            "list_issues",
-            "List performance findings recorded by redline, ranked by sampled impact. "
-            "Each has why-it-fired evidence, callsite and a suggestion.",
-            _obj(
-                {
-                    "window": _WINDOW,
-                    "kind": {"type": "string", "description": "Only this issue kind"},
-                    "limit": {"type": "integer", "minimum": 1, "maximum": MAX_ITEMS},
-                },
-            ),
-            _list_issues,
+BASE_TOOLS: tuple[Tool, ...] = (
+    Tool(
+        "list_issues",
+        "List performance findings recorded by redline, ranked by sampled impact. "
+        "Each has why-it-fired evidence, callsite and a suggestion.",
+        obj(
+            {
+                "window": _WINDOW,
+                "kind": {"type": "string", "description": "Only this issue kind"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": MAX_ITEMS},
+            },
         ),
-        Tool(
-            "explain_issue",
-            "Full detail for one finding id from list_issues.",
-            _obj({"issue_id": {"type": "string"}, "window": _WINDOW}, ("issue_id",)),
-            _explain_issue,
+        _list_issues,
+    ),
+    Tool(
+        "explain_issue",
+        "Full detail for one finding id from list_issues.",
+        obj({"issue_id": {"type": "string"}, "window": _WINDOW}, ("issue_id",)),
+        _explain_issue,
+    ),
+    Tool(
+        "get_trace",
+        "Bounded summary of one recorded request: timings, issues and its slowest spans "
+        "(no bodies, headers or logs).",
+        obj({"trace_id": {"type": "string"}}, ("trace_id",)),
+        _get_trace,
+    ),
+    Tool(
+        "instrumentation_report",
+        "What redline cannot see: inactive integrations, truncated traces, dropped writes.",
+        obj({}),
+        _instrumentation,
+    ),
+    Tool(
+        "verify_fix",
+        "After a change, read a saved `redline check compare --json` report and say whether "
+        "a finding is gone, still_present or inconclusive, and whether responses stayed equal.",
+        obj(
+            {
+                "report_path": {"type": "string"},
+                "kind": {"type": "string"},
+                "fingerprint": {"type": "string"},
+                "min_samples": {"type": "integer", "minimum": 0},
+            },
+            ("report_path", "kind"),
         ),
-        Tool(
-            "get_trace",
-            "Bounded summary of one recorded request: timings, issues and its slowest spans "
-            "(no bodies, headers or logs).",
-            _obj({"trace_id": {"type": "string"}}, ("trace_id",)),
-            _get_trace,
-        ),
-        Tool(
-            "instrumentation_report",
-            "What redline cannot see: inactive integrations, truncated traces, dropped writes.",
-            _obj({}),
-            _instrumentation,
-        ),
-        Tool(
-            "verify_fix",
-            "After a change, read a saved `redline check compare --json` report and say whether "
-            "a finding is gone, still_present or inconclusive, and whether responses stayed equal.",
-            _obj(
-                {
-                    "report_path": {"type": "string"},
-                    "kind": {"type": "string"},
-                    "fingerprint": {"type": "string"},
-                    "min_samples": {"type": "integer", "minimum": 0},
-                },
-                ("report_path", "kind"),
-            ),
-            _verify_fix,
-        ),
-        Tool(
-            "llm_summary",
-            "Sampled LLM-call tokens and counts per route and model.",
-            _obj({"window": _WINDOW}),
-            _llm_summary,
-        ),
-    )
-}
+        _verify_fix,
+    ),
+    Tool(
+        "llm_summary",
+        "Sampled LLM-call tokens and counts per route and model.",
+        obj({"window": _WINDOW}),
+        _llm_summary,
+    ),
+)
 
 
-def _validate(tool: Tool, args: Any) -> None:
-    if not isinstance(args, dict):
-        raise ValueError("arguments must be an object")
-    props = tool.schema["properties"]
-    unknown = set(args) - set(props)
-    if unknown:
-        raise ValueError(f"unknown argument(s): {', '.join(sorted(map(str, unknown)))}")
-    for name in tool.schema["required"]:
-        if not isinstance(args.get(name), str) or not args[name]:
-            raise ValueError(f"{name} is required")
-    for name, value in args.items():
-        kind = props[name].get("type")
-        if kind == "string" and not isinstance(value, str):
-            raise ValueError(f"{name} must be a string")
-        if kind == "integer" and (isinstance(value, bool) or not isinstance(value, int)):
-            raise ValueError(f"{name} must be a whole number")
+def _register() -> dict[str, Tool]:
+    from .tools_analysis import ANALYSIS_TOOLS
+    from .tools_runs import RUN_TOOLS
+
+    tools: dict[str, Tool] = {t.name: t for t in BASE_TOOLS}
+    for tool in (*RUN_TOOLS, *ANALYSIS_TOOLS):
+        if tool.name in tools:
+            raise RuntimeError(f"duplicate tool {tool.name}")
+        tools[tool.name] = tool
+    return tools
 
 
-def call_tool(name: str, args: Any, *, store: Any, audit: AuditLog | None = None) -> dict[str, Any]:
+TOOLS: dict[str, Tool] = {}
+
+
+def visible_tools(options: ServerOptions | None = None) -> list[Tool]:
+    """The tools a server started with ``options`` offers (gated ones only when enabled)."""
+    options = options or ServerOptions()
+    return [t for t in TOOLS.values() if options.allows(t.gate)]
+
+
+def call_tool(
+    name: str,
+    args: Any,
+    *,
+    store: Any,
+    audit: AuditLog | None = None,
+    options: ServerOptions | None = None,
+) -> dict[str, Any]:
     """Run one tool; always returns a JSON-safe dict, ``{"error": message}`` on any failure."""
     start = time.perf_counter()
     ok = True
+    options = options or ServerOptions()
+    token = OPTIONS.set(options)
     try:
         tool = TOOLS.get(name)
-        if tool is None:
-            raise ValueError(f"unknown tool {str(name)[:60]!r}; available: {', '.join(TOOLS)}")
-        _validate(tool, args)
-        result = _clip(tool.run(store, args))
+        if tool is None or not options.allows(tool.gate):
+            available = ", ".join(t.name for t in visible_tools(options))
+            raise ValueError(f"unknown tool {str(name)[:60]!r}; available: {available}")
+        validate(tool, args)
+        result = clip(tool.run(store, args), max_str=tool.max_str)
+        if len(json.dumps(result, default=str)) > MAX_OUTPUT:
+            raise ValueError("the result is too large; narrow the request (window, limit, ids)")
     except Exception as exc:  # a tool must never take the server down
         ok = False
         result = {"error": str(exc)[:500] or type(exc).__name__}
+    finally:
+        OPTIONS.reset(token)
     if audit is not None:
         try:
             audit.record(str(name), args, ok, (time.perf_counter() - start) * 1000.0)
         except OSError:
             pass
     return result
+
+
+TOOLS.update(_register())

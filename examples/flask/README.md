@@ -25,6 +25,7 @@ then hit the endpoints:
 | `GET /orders/1` | a healthy view; aggregates as `/orders/<int:order_id>` |
 | `GET /report/duplicates` | the same query four times |
 | `GET /audit/search?q=refund` | slow query; open EXPLAIN to see the full table scan and a suggested index |
+| `GET /audit/raw` | SQL run through `engine.raw_connection().cursor()`: a SQL span with `source` `raw_cursor`, not hidden from the trace |
 | `GET /slow` | slow view spent in `time.sleep` |
 | `GET /boom` | an unhandled `ZeroDivisionError` (500) with its traceback |
 | `GET /pricing` | outbound `httpx` calls as `http_out` spans (`instrument_httpx()`) |
@@ -101,6 +102,36 @@ app's store. `--store` matters: the CLI defaults to `.redline/redline.db` relati
 you run it, which is the repository root here, not the app's store. Then open the Load page
 at **http://127.0.0.1:8012/_redline/#/load** (the CLI prints the link to this run) to see the
 per-step latency, the knee, and the bottlenecks found under load.
+
+`scenario_users.toml` shows the realistic-load keys: twenty invented users from `users.csv`
+(`identities_file`, one per request, so per-user caches are not all warm) and a skewed
+order-id feed from `order_ids.csv` (`[[data]]` with `pick = "zipf"`, so a few orders are hot).
+Run it the same way; the traces carry an `identity` tag, and only the name is recorded,
+never the key or session.
+
+`scenario_spike.toml` uses a `stages` profile (5, then 40, then 5 rps): the summary reports how
+many seconds p95 took to come back to its level before the burst, and a long stage is checked
+for drift (a leak shows as `degrading`). The same shape from the command line:
+`--stages 5:20s,40:15s,5:40s`.
+
+`scenario_stream.toml` shows the first-byte vs last-byte numbers and a held `type = "stream"`
+request (set its weight above 0 and point it at your own server-sent-events route; the demo
+shop has none). A `type = "websocket"` request needs `redline-core[load-websocket]`.
+
+`scenario_flow.toml` is a journey: list the orders, take the first id from the answer and open
+that order (`extract`, `{var:order_id}`), with `expect` checks so an error body would count as
+a failure. The CLI prints the flow and each step at the end of the run.
+
+If the generator runs on another machine (or the app in a container), it has no access to
+that store file. Either point both at one PostgreSQL store (`--store-url postgresql://...`) or,
+with `accept_remote_runs = true` on the app, register the run over HTTP:
+
+```bash
+REDLINE_TOKEN=... uv run --package redline-core --extra load redline load \
+    examples/flask/scenario.toml --register-url http://127.0.0.1:8012/_redline --require-recording
+```
+
+Both send one tagged probe request first and say so when the app does not record the run.
 
 ## v0.4 real-work playground
 

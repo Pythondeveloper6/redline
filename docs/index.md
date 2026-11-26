@@ -305,9 +305,9 @@ the [FAQ](faq.md)).
 
 Read this table with its omissions in mind. If you need cross-service traces, alerting, or
 fleet dashboards, use Sentry or Logfire (Redline can sit beside them). If you need a mature,
-scriptable, distributed load generator, use Locust or k6: Redline's load tester is HTTP-only
-and scenario-file driven, and its value is the correlation with what happened inside the
-server. Where this table says "No" for another tool it means "not as a built-in feature", and
+scriptable, large-scale distributed load generator, use Locust or k6: Redline's load tester is
+scenario-file driven (HTTP, held streams and WebSockets, optionally spread over a few
+generator hosts), and its value is the correlation with what happened inside the server. Where this table says "No" for another tool it means "not as a built-in feature", and
 tools change: check theirs.
 
 ## Requirements

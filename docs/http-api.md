@@ -105,6 +105,8 @@ cookie and `X-CSRFToken`.
 | 403 | `forbidden` | The policy refused: not a loopback client or `Host` under `local`, a client outside `allowed_ips`, a loopback peer with forwarding headers and no `trusted_proxies`, `framework` with a hook that returned false (or no hook), `custom` returned false, or your dependency raised `403` |
 | 403 | `open_refused` | `access = "open"` without `REDLINE_ALLOW_OPEN=1` |
 | 403 | `csrf_failed` | The CSRF check failed (see above; on Django also Django's own check) |
+| 403 | `remote_runs_disabled` | `POST api/runs/register` (or `.../steps`, `.../finish`) while `accept_remote_runs` is off |
+| 403 | `run_not_remote` | `.../steps` or `.../finish` for a run that was not registered over HTTP |
 | 403 | `load_disabled` | `POST api/runs` while `load_from_ui` is off |
 | 403 | `checks_from_ui_disabled` | `POST api/checks/runs` while `checks_from_ui` is off (or `auto` outside debug mode) |
 | 403 | `read_only` | A state-changing call while `read_only` is on |
@@ -615,6 +617,17 @@ when it cannot be computed. Verdicts and sort order are explained in
 [History](history.md#before-and-after-comparing-periods): regressed means p95 up 20% **and**
 5 ms, or average queries up by 1.
 
+### Database capabilities and plans
+
+| Request | Returns |
+|---|---|
+| `GET api/database/capabilities?db=default&refresh=1` | `{db, supported, vendor, principal, managed, capabilities: {estimated_plan, actual_plan, index_usage, object_definitions}}`; each capability is `{status: granted\|missing\|unknown, detail, grant}` |
+| `POST api/explain/plan` | `{"vendor": "mssql", "plan": "<xml>", "sql": ""}` analyses a pasted SQL Server plan without touching a database; same shape as `POST api/explain` plus `uploaded: true` |
+
+A plan request that fails on a missing SQL Server permission answers `403 explain_permission`
+with the grant in the message. `GET api/indexes` also carries `capabilities`, an `evidence`
+list on each suggestion and, for unused indexes, a `confidence` and `evidence`.
+
 ### Runs
 
 Load-test runs ([Load testing](load-testing.md)).
@@ -623,9 +636,15 @@ Load-test runs ([Load testing](load-testing.md)).
 |---|---|
 | `GET api/runs?limit=50` | `{"items": [Run]}`, newest first, steps included |
 | `GET api/runs/{id}` | one run |
-| `GET api/runs/{id}/bottlenecks` | what got slower, per step |
+| `GET api/runs/{id}/bottlenecks?identity=NAME` | what got slower, per step (optionally only one load identity's requests) |
 | `POST api/runs` | start a run (`202`) |
 | `POST api/runs/{id}/stop` | stop a run: `{"stopped": true}` |
+| `POST api/runs/register` | a remote generator registers a run (`201`); needs `accept_remote_runs` |
+| `POST api/runs/{id}/steps` | the generator reports one finished step (`hist` is a base64 histogram) |
+| `GET api/runs/{id}/pages` | requests of the run tagged `page=<id>`, summed per page load (browser scripts) |
+| `GET api/runs/{id}/metrics` | resource metrics per step and the `limiting_resource` verdict |
+| `POST api/runs/{id}/metrics` | the remote generator adds `{step, values: {name: number}}` from its metric sources |
+| `POST api/runs/{id}/finish` | the generator ends the run with `done`, `stopped` or `failed` |
 | `DELETE api/runs/{id}` | delete a finished run: `{"deleted": 1}` |
 
 Runs started from the UI go through the same validation as a scenario file. A run's
@@ -663,7 +682,9 @@ A `Run`:
 }
 ```
 
-`kind` is `sql` or `route`. Items are sorted by `growth` (last step's mean over the first's),
+`kind` is `sql`, `route` or `other` (at most one item: the per-request time covered by no
+span, key `other:uncovered`, no callsite; clients that only know `sql` and `route` can skip
+it). Items are sorted by `growth` (last step's mean over the first's),
 top 50. It is `404 run_not_found` when there is neither the run nor a trace tagged with it.
 
 `POST api/runs` starts a run **against the app that serves the UI**:
@@ -835,7 +856,7 @@ setting and the feature and not `read_only`) and `access: {policy, login, read_o
 
 ## Things to know
 
-- **The API is not versioned.** The development release is `0.5.0b1`: the shape may change between beta
+- **The API is not versioned.** The development release is `0.5.0b2`: the shape may change between beta
   releases. The frontend and the core ship together, so they never disagree.
 - **Redacted values are redacted in the API too.** There is no way to ask for the
   original.

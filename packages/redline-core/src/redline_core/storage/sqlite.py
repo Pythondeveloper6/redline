@@ -44,6 +44,7 @@ from typing import TYPE_CHECKING, Any
 
 from redline_core.diagnostics import capture_failure
 
+from ..coverage import uncovered_ms
 from ..histogram import Histogram
 from ..model import Callsite, Issue, Trace
 from ..runs import Run, RunStep
@@ -308,6 +309,9 @@ class SQLStore(CheckStoreMixin):
     """
 
     path: str
+    #: The writer validates ``X-Redline-Run`` tags against the runs table, so the recorder may
+    #: keep a sampled-out request of a registered run (``sampled_by="run"``).
+    validates_run_tags = True
     #: Errors of the database driver (caught where a failed read must not stop a write).
     _db_errors: tuple[type[BaseException], ...] = (sqlite3.Error,)
     #: The newest trace per SQL fingerprint (``{where}`` filters ``trace_sql``).
@@ -627,6 +631,11 @@ class SQLStore(CheckStoreMixin):
         self._runs_cache = (now, ids)
         return ids
 
+    def is_known_run(self, run_id: str) -> bool:
+        """Whether ``run_id`` is a load run that is running or ended under a minute ago (a
+        cached read: cheap enough for the request path)."""
+        return run_id in self._known_runs()
+
     def _check_run_tags(self, traces: list[Trace]) -> list[Trace]:
         """Drop ``run_id``/``step`` tags (from ``X-Redline-Run``, which any client can send)
         unless the run exists in this store and is running (or just ended): a made-up
@@ -637,6 +646,8 @@ class SQLStore(CheckStoreMixin):
         out = []
         for t in traces:
             if "run_id" in t.tags and t.tags["run_id"] not in known:
+                if t.tags.get("sampled_by") == "run":
+                    continue  # kept only because of the tag; a made-up run forces nothing
                 tags = {k: v for k, v in t.tags.items() if k not in ("run_id", "step")}
                 t = dataclasses.replace(t, tags=tags)
             out.append(t)
@@ -1036,12 +1047,19 @@ class SQLStore(CheckStoreMixin):
         traces by design and is kept; ``history=True`` wipes it too.
         """
         self._check_pid()
+        if history:
+            self._ensure_metrics()
         with self._lock:
             c = self._conn
             c.execute("BEGIN IMMEDIATE")
             try:
                 n = int(c.execute("SELECT COUNT(*) FROM traces").fetchone()[0])
-                for table in (*_TRACE_TABLES, "traces", *(_HISTORY_TABLES if history else ())):
+                tables = (
+                    *_TRACE_TABLES,
+                    "traces",
+                    *(("run_metrics", *_HISTORY_TABLES) if history else ()),
+                )
+                for table in tables:
                     c.execute(f"DELETE FROM {table}")
                 c.execute("COMMIT")
             except BaseException:
@@ -1094,6 +1112,7 @@ class SQLStore(CheckStoreMixin):
             return 0
         cutoff = (time.time() if now is None else now) - retention_s
         self._check_pid()
+        self._ensure_metrics()
         n = 0
         with self._lock:
             c = self._conn
@@ -1105,6 +1124,8 @@ class SQLStore(CheckStoreMixin):
                     "DELETE FROM lifecycle_hourly WHERE bucket + 3600 <= ?",
                     "DELETE FROM releases WHERE last_seen < ?",
                     "DELETE FROM issue_index WHERE last_seen < ?",
+                    "DELETE FROM run_metrics WHERE run_id IN (SELECT id FROM runs WHERE "
+                    "created_at < ? AND status != 'running')",
                     "DELETE FROM run_steps WHERE run_id IN (SELECT id FROM runs WHERE "
                     "created_at < ? AND status != 'running')",
                     "DELETE FROM runs WHERE created_at < ? AND status != 'running'",
@@ -1608,7 +1629,9 @@ class SQLStore(CheckStoreMixin):
         if not os.path.isdir(os.path.join(os.path.dirname(os.path.abspath(self.path)), "runs")):
             return
         rows = self._query(
-            "SELECT id FROM runs WHERE status = 'running' AND created_at < ?",
+            # a run registered over HTTP has no local process and no pid file: never reaped here
+            "SELECT id FROM runs WHERE status = 'running' AND created_at < ? "
+            "AND config NOT LIKE '%\"registered_remote\": true%'",
             (time.time() - self.RUN_GRACE_S,),
         )
         if not rows:
@@ -1660,13 +1683,94 @@ class SQLStore(CheckStoreMixin):
             steps[s["run_id"]].append(_run_step(s))
         return [_run(r, steps[r["id"]]) for r in rows]
 
+    # resource metrics of a run (sampled by the application during the run) --------------
+    _metrics_ready = False
+    #: Most samples kept per run; the oldest go first.
+    MAX_METRIC_SAMPLES = 20_000
+
+    def _ensure_metrics(self) -> None:
+        """Create the ``run_metrics`` table when missing (idempotent; no schema bump, so older
+        and newer Redline versions can share one store)."""
+        if self._metrics_ready:
+            return
+        self._write_now(
+            [
+                (
+                    "CREATE TABLE IF NOT EXISTS run_metrics (run_id TEXT NOT NULL, "
+                    "step INTEGER NOT NULL, ts DOUBLE PRECISION NOT NULL, pid INTEGER NOT NULL, "
+                    "data TEXT NOT NULL)",
+                    (),
+                ),
+                ("CREATE INDEX IF NOT EXISTS run_metrics_run ON run_metrics (run_id, step)", ()),
+            ]
+        )
+        self._metrics_ready = True
+
+    def save_run_metrics(
+        self,
+        run_id: str,
+        step: int,
+        data: dict[str, Any],
+        *,
+        pid: int = 0,
+        ts: float | None = None,
+    ) -> None:
+        """Store one sample of named numbers (``cpu_pct``, ``rss_mb``, ``pool_checked_out`` ...)
+        taken at ``ts`` by process ``pid`` while ``step`` of the run was in progress."""
+        clean = {
+            str(k)[:64]: float(v)
+            for k, v in list(data.items())[:60]
+            if isinstance(v, (int, float)) and not isinstance(v, bool) and v == v
+        }
+        if not clean:
+            return
+        self._ensure_metrics()
+        self._write_now(
+            [
+                (
+                    "INSERT INTO run_metrics (run_id, step, ts, pid, data) VALUES (?, ?, ?, ?, ?)",
+                    (
+                        run_id,
+                        int(step),
+                        time.time() if ts is None else float(ts),
+                        int(pid),
+                        json.dumps(clean),
+                    ),
+                ),
+                (
+                    "DELETE FROM run_metrics WHERE run_id = ? AND ts < "
+                    "(SELECT MIN(ts) FROM (SELECT ts FROM run_metrics WHERE run_id = ? "
+                    "ORDER BY ts DESC LIMIT ?) AS keep)",
+                    (run_id, run_id, self.MAX_METRIC_SAMPLES),
+                ),
+            ]
+        )
+
+    def run_metric_samples(self, run_id: str) -> builtins.list[dict[str, Any]]:
+        """Every stored sample of the run, oldest first: ``{step, ts, pid, **values}``."""
+        self._ensure_metrics()
+        rows = self._query(
+            "SELECT step, ts, pid, data FROM run_metrics WHERE run_id = ? ORDER BY ts, pid",
+            (run_id,),
+        )
+        out = []
+        for r in rows:
+            try:
+                values = json.loads(r[3])
+            except ValueError:
+                continue
+            out.append({"step": int(r[0]), "ts": float(r[1]), "pid": int(r[2]), **values})
+        return out
+
     def delete_run(self, run_id: str) -> int:
         """Delete a run and its steps (its tagged traces stay); returns 1 or 0."""
         self._check_pid()
+        self._ensure_metrics()
         with self._lock:
             c = self._conn
             c.execute("BEGIN IMMEDIATE")
             try:
+                c.execute("DELETE FROM run_metrics WHERE run_id = ?", (run_id,))
                 c.execute("DELETE FROM run_steps WHERE run_id = ?", (run_id,))
                 n = c.execute("DELETE FROM runs WHERE id = ?", (run_id,)).rowcount
                 c.execute("COMMIT")
@@ -1675,13 +1779,19 @@ class SQLStore(CheckStoreMixin):
                 raise
         return n
 
-    def run_bottlenecks(self, run_id: str, limit: int = 50) -> Bottlenecks | None:
+    def run_bottlenecks(
+        self, run_id: str, limit: int = 50, identity: str | None = None
+    ) -> Bottlenecks | None:
         """Per step, the queries (``trace_sql``) and routes of the traces the run tagged.
 
         ``mean_ms`` is per execution (per request for routes), ``p95_ms`` the 95th percentile
         of each request's mean, ``count`` executions (requests). ``growth`` is the mean in the
         last step the item appears in over the mean in the first (the first floored at
-        0.01 ms). ``None`` when there is neither such a run nor any trace tagged with it.
+        0.01 ms). One extra item, ``kind="other"``, is the per-request time covered by no span
+        (:mod:`redline_core.coverage`), read from up to the run's 2000 latest requests; it is
+        omitted when every request is fully covered. ``None`` when there is neither such a run
+        nor any trace tagged with it. ``identity`` keeps only the requests one load identity
+        sent (the ``identity`` tag), so the table can be split per user.
         """
         steps_rows = self._query(
             "SELECT step, target_rps FROM run_steps WHERE run_id = ? ORDER BY step", (run_id,)
@@ -1689,14 +1799,21 @@ class SQLStore(CheckStoreMixin):
         tagged = (
             "FROM trace_tags r JOIN trace_tags s ON s.trace_id = r.trace_id AND s.key = 'step' "
             "{join} WHERE r.key = 'run_id' AND r.value = ?"
+            + (
+                " AND r.trace_id IN (SELECT trace_id FROM trace_tags "
+                "WHERE key = 'identity' AND value = ?)"
+                if identity
+                else ""
+            )
         )
+        tag_params: tuple[Any, ...] = (run_id, identity) if identity else (run_id,)
         # key -> step -> [count, total_ms, per-request means, sample trace]
         acc: dict[tuple[str, str], dict[int, builtins.list[Any]]] = defaultdict(dict)
         labels: dict[tuple[str, str], str] = {}
         for r in self._query(
             "SELECT s.value, q.fingerprint, q.sql, q.count, q.total_ms, q.trace_id "
             + tagged.format(join="JOIN trace_sql q ON q.trace_id = r.trace_id"),
-            (run_id,),
+            tag_params,
         ):
             step = _int_or_none(r[0])
             if step is None:
@@ -1707,7 +1824,7 @@ class SQLStore(CheckStoreMixin):
         for r in self._query(
             "SELECT s.value, t.method, coalesce(t.route, t.path), t.duration_ms, t.id "
             + tagged.format(join="JOIN traces t ON t.id = r.trace_id"),
-            (run_id,),
+            tag_params,
         ):
             step = _int_or_none(r[0])
             if step is None:
@@ -1715,6 +1832,20 @@ class SQLStore(CheckStoreMixin):
             key = ("route", f"{r[1]} {r[2]}")
             labels[key] = key[1]
             _add_sample(acc[key], step, 1, float(r[3]), r[4])
+        other = ("other", "uncovered")
+        for r in self._query(
+            "SELECT s.value, t.duration_ms, t.body, t.id "
+            + tagged.format(join="JOIN traces t ON t.id = r.trace_id")
+            + " ORDER BY t.started_at DESC LIMIT ?",
+            (*tag_params, _OTHER_SAMPLE),
+        ):
+            step = _int_or_none(r[0])
+            gap = _uncovered_from_body(r[2], float(r[1]))
+            if step is not None and gap is not None:
+                _add_sample(acc[other], step, 1, gap, r[3])
+        if other in acc and not any(g[1] > 0 for g in acc[other].values()):
+            del acc[other]  # every request was fully covered: no row
+        labels[other] = "Other (time not covered by any span)"
         if not steps_rows and not acc:
             if not self._query("SELECT 1 FROM runs WHERE id = ?", (run_id,)):
                 return None
@@ -2278,6 +2409,23 @@ def _int_or_none(value: Any) -> int | None:
     try:
         return int(value)
     except (TypeError, ValueError):
+        return None
+
+
+#: At most this many of a run's most recent requests are read to compute the ``other`` row
+#: (it needs each request's spans, which are only stored in the trace body).
+_OTHER_SAMPLE = 2000
+
+
+def _uncovered_from_body(body: Any, duration_ms: float) -> float | None:
+    """Milliseconds of the request covered by no span, from a stored trace body."""
+    try:
+        spans = json.loads(body).get("spans", [])
+        return uncovered_ms(
+            ((s["kind"], float(s["start_ms"]), float(s["duration_ms"])) for s in spans),
+            duration_ms,
+        )
+    except (ValueError, KeyError, TypeError, AttributeError):
         return None
 
 

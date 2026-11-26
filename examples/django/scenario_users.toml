@@ -1,0 +1,21 @@
+name = "django shop: many users"
+description = "Twenty invented users take turns (identities_file), so per-user caches are not all warm."
+base_url = "http://127.0.0.1:8014"
+timeout_s = 10
+identities_file = "users.csv"
+identity_mode = "round_robin"
+
+[[requests]]
+name = "list"
+path = "/orders/"
+weight = 3
+
+[[requests]]
+name = "second endpoint"
+path = "/items/"
+weight = 2
+
+[profile]
+mode = "constant"
+rps = 20
+duration_s = "20s"

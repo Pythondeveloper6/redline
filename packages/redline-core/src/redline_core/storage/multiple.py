@@ -20,6 +20,23 @@ class TraceReader:
     issue_index = SQLiteStore.issue_index
     issues = SQLiteStore.issues
     _where = staticmethod(SQLiteStore._where)
+    # read-only views used by the agent tools (they only ever call ``_query``)
+    endpoints = SQLiteStore.endpoints
+    search_sql = SQLiteStore.search_sql
+    sql_workload = SQLiteStore.sql_workload
+    _sql_groups = SQLiteStore._sql_groups
+    _SAMPLES_SQL = SQLiteStore._SAMPLES_SQL
+    cache_stats = SQLiteStore.cache_stats
+    external_stats = SQLiteStore.external_stats
+    history = SQLiteStore.history
+    releases = SQLiteStore.releases
+    compare_periods = SQLiteStore.compare_periods
+    _issue_meta = SQLiteStore._issue_meta
+    _period_issues = SQLiteStore._period_issues
+    _period_stats = SQLiteStore._period_stats
+    _period_where = staticmethod(SQLiteStore._period_where)
+    run_bottlenecks = SQLiteStore.run_bottlenecks
+    _callsite_for = SQLiteStore._callsite_for
 
     def __init__(self, path):
         self.path = str(Path(path).resolve(strict=True))
@@ -45,6 +62,49 @@ class TraceReader:
 
     def close(self):
         self._conn.close()
+
+    # load runs, read without the dead-run reaping the writable store does on read
+    def get_run(self, run_id):
+        from .sqlite import _run, _run_step
+
+        rows = self._query("SELECT * FROM runs WHERE id = ?", (run_id,))
+        if not rows:
+            return None
+        steps = self._query("SELECT * FROM run_steps WHERE run_id = ? ORDER BY step", (run_id,))
+        return _run(rows[0], [_run_step(s) for s in steps])
+
+    def list_runs(self, limit=50):
+        from .sqlite import _run, _run_step
+
+        rows = self._query(
+            "SELECT * FROM runs ORDER BY created_at DESC, id LIMIT ?", (max(1, int(limit)),)
+        )
+        out = []
+        for r in rows:
+            steps = self._query(
+                "SELECT * FROM run_steps WHERE run_id = ? ORDER BY step", (r["id"],)
+            )
+            out.append(_run(r, [_run_step(s) for s in steps]))
+        return out
+
+    def run_metric_samples(self, run_id):
+        import json
+
+        try:
+            rows = self._query(
+                "SELECT step, ts, pid, data FROM run_metrics WHERE run_id = ? ORDER BY ts, pid",
+                (run_id,),
+            )
+        except sqlite3.OperationalError:  # no run has recorded metrics in this store yet
+            return []
+        out = []
+        for r in rows:
+            try:
+                values = json.loads(r[3])
+            except ValueError:
+                continue
+            out.append({"step": int(r[0]), "ts": float(r[1]), "pid": int(r[2]), **values})
+        return out
 
 
 class MultipleStores:

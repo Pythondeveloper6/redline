@@ -4,7 +4,7 @@
 
 ## How finished is this?
 
-**Beta, and open source.** This checkout develops `0.5.0b1` under the
+**Beta, and open source.** This checkout develops `0.5.0b2` under the
 `Development Status :: 4 - Beta` classifier and MIT licence. Published prereleases are
 available on PyPI; they may lag this branch. [Getting started](getting-started.md#install)
 covers both published and local workspace installs. Profile, Analyze, Stress and Compare/CI
@@ -102,7 +102,8 @@ model, corrects for coordinated omission, finds the knee, and shows which query 
 got slower at each step. See [Load testing](load-testing.md).
 
 It is deliberately smaller than Locust or k6: HTTP only, scenario files instead of
-scripting, no distributed generators, no browsers or WebSockets. If you need those, use them
+scripting, no browsers (it can hold streams and WebSocket connections open). It can spread
+a run over several hosts with `redline load agent`. If you need those, use them
 and tag the requests with `X-Redline-Run` so Redline can still correlate.
 
 ## Does it slow my application down?

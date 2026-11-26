@@ -15,6 +15,12 @@ messaging (see :mod:`redline_core.load.engine`).
     ``start_rps``, ``start_rps + step_rps``, … up to ``end_rps`` (inclusive), each for
     ``step_duration_s`` (default 30 s); ``duration_s``, when given, caps the total.
 
+``stages``
+    an ordered list of ``{rps, duration_s}`` stages (``rps`` may be 0 for a pause), each one
+    step: covers spike (10, 200, 10), soak (one long stage) and any custom shape. The run
+    summary then reports how long p95 took to recover after each stage where the rate fell,
+    and a long stage is checked for drift.
+
 ``stop_on`` (``error_rate`` as a fraction, ``p95_ms``) ends the run after the first step
 that breaches it; the engine evaluates it when a step has completed.
 """
@@ -40,7 +46,7 @@ __all__ = [
     "parse_rate",
 ]
 
-MODES = ("constant", "ramp", "steps")
+MODES = ("constant", "ramp", "steps", "stages")
 DEFAULT_RAMP_STEP_S = 5.0
 DEFAULT_STEPS_STEP_S = 30.0
 DEFAULT_DURATION_S = 30.0
@@ -146,6 +152,8 @@ class Profile:
     step_duration_s: float | None = None
     stop_on: StopOn = field(default_factory=StopOn)
     poisson: bool = False
+    #: ``(rps, duration_s)`` per stage for ``mode == "stages"``.
+    stages: tuple[tuple[float, float], ...] = ()
 
     # ------------------------------------------------------------------ factories
     @classmethod
@@ -179,6 +187,8 @@ class Profile:
         """How many steps :meth:`plan` yields, computed arithmetically (never builds it)."""
         if self.mode == "constant":
             return 1
+        if self.mode == "stages":
+            return len(self.stages)
         if self.mode == "ramp":
             total = float(self.duration_s or DEFAULT_DURATION_S)
             step = float(self.step_duration_s or DEFAULT_RAMP_STEP_S)
@@ -197,6 +207,12 @@ class Profile:
         if self.mode == "constant":
             assert self.rps is not None and self.duration_s is not None
             return [StepPlan(1, self.rps, 0.0, self.duration_s)]
+        if self.mode == "stages":
+            plans, start = [], 0.0
+            for i, (rate, dur) in enumerate(self.stages):
+                plans.append(StepPlan(i + 1, rate, start, dur))
+                start += dur
+            return plans
         if self.mode == "ramp":
             assert self.start_rps is not None and self.end_rps is not None
             total = float(self.duration_s or DEFAULT_DURATION_S)
@@ -232,6 +248,8 @@ class Profile:
         """Sum of the step durations, computed without building the plan."""
         if self.mode == "constant":
             return float(self.duration_s or 0.0)
+        if self.mode == "stages":
+            return float(sum(d for _, d in self.stages))
         if self.mode == "ramp":
             return float(self.duration_s or DEFAULT_DURATION_S)
         n = self.step_count()
@@ -243,6 +261,8 @@ class Profile:
         """The highest target rate, computed without building the plan."""
         if self.mode == "constant":
             return float(self.rps or 0.0)
+        if self.mode == "stages":
+            return float(max((r for r, _ in self.stages), default=0.0))
         assert self.start_rps is not None and self.end_rps is not None
         if self.mode == "ramp":
             total = float(self.duration_s or DEFAULT_DURATION_S)
@@ -263,6 +283,8 @@ class Profile:
     def describe(self) -> str:
         if self.mode == "constant":
             text = f"constant {self.rps:g} rps for {self.duration_s:g}s"
+        elif self.mode == "stages":
+            text = "stages " + ", ".join(f"{r:g} rps × {d:g}s" for r, d in self.stages)
         elif self.mode == "ramp":
             text = (
                 f"ramp {self.start_rps:g} → {self.end_rps:g} rps over "
@@ -285,6 +307,8 @@ class Profile:
             value = getattr(self, key)
             if value is not None:
                 out[key] = value
+        if self.stages:
+            out["stages"] = [{"rps": r, "duration_s": d} for r, d in self.stages]
         stop = self.stop_on.to_dict()
         if stop:
             out["stop_on"] = stop
@@ -303,6 +327,7 @@ _PROFILE_KEYS = {
     "step_duration_s",
     "stop_on",
     "poisson",
+    "stages",
 }
 
 
@@ -332,7 +357,9 @@ def parse_profile(data: Any, path: str = "profile") -> Profile:
     _unknown(data, _PROFILE_KEYS, path)
     mode = data.get("mode")
     if mode is None:  # infer
-        if "start_rps" in data or "end_rps" in data:
+        if "stages" in data:
+            mode = "stages"
+        elif "start_rps" in data or "end_rps" in data:
             mode = "steps" if "step_rps" in data else "ramp"
         else:
             mode = "constant"
@@ -363,7 +390,14 @@ def parse_profile(data: Any, path: str = "profile") -> Profile:
     if not isinstance(poisson, bool):
         raise ScenarioError(f"must be true or false (got {poisson!r})", f"{path}.poisson")
 
-    if mode == "constant":
+    if mode == "stages":
+        profile = Profile(
+            mode="stages",
+            stages=_stages(data.get("stages"), f"{path}.stages"),
+            stop_on=stop_on,
+            poisson=poisson,
+        )
+    elif mode == "constant":
         profile = Profile(
             mode="constant",
             rps=rate("rps", default=10.0),
@@ -401,6 +435,28 @@ def parse_profile(data: Any, path: str = "profile") -> Profile:
         )
     _check_limits(profile, path)
     return profile
+
+
+def _stages(raw: Any, path: str) -> tuple[tuple[float, float], ...]:
+    if not isinstance(raw, (list, tuple)) or not raw:
+        raise ScenarioError("is required: a non-empty list of {rps, duration_s}", path)
+    if len(raw) >= MAX_STEPS:
+        raise ScenarioError(f"at most {MAX_STEPS - 1} stages", path)
+    out = []
+    for i, item in enumerate(raw):
+        where = f"{path}[{i}]"
+        if not isinstance(item, Mapping):
+            raise ScenarioError("must be a table with rps and duration_s", where)
+        _unknown(item, {"rps", "duration_s"}, where)
+        if item.get("rps") is None or item.get("duration_s") is None:
+            raise ScenarioError("needs both rps and duration_s", where)
+        out.append(
+            (
+                parse_rate(item["rps"], f"{where}.rps", allow_zero=True),
+                parse_duration(item["duration_s"], f"{where}.duration_s"),
+            )
+        )
+    return tuple(out)
 
 
 def _check_limits(profile: Profile, path: str) -> None:

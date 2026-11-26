@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { api } from '../api'
-import { isUnsupported } from '../apiLoad'
+import { apiLoad, isUnsupported } from '../apiLoad'
 import { bytes, ms } from '../lib/format'
 import { useDebounced } from '../lib/hooks'
 import { registerRoute } from '../lib/routes'
@@ -12,6 +12,38 @@ import { CopyButton, Empty, ErrorBox, I, Icon, Pill, Spinner, Sql, Tabs, useAsyn
 registerRoute({ path: '/database', label: 'Database', keywords: 'sql queries index advisor unused indexes fingerprints', hint: 'SQL search and index advice' })
 
 type Tab = 'queries' | 'indexes' | 'unused'
+
+const CAP_LABELS: Record<string, string> = {
+  estimated_plan: 'Estimated plans', actual_plan: 'Actual plans', index_usage: 'Index usage statistics', object_definitions: 'Object definitions',
+}
+
+/** What the SQL Server login may do for plans and index advice, with the grant to ask for. */
+function Capabilities() {
+  const d = useAsync(() => apiLoad.capabilities('default').catch(() => null), [])
+  const data = d.data
+  if (!data || !data.supported || Object.keys(data.capabilities).length === 0) return null
+  return (
+    <section className="card p-3 mb-4" aria-label="Database permissions">
+      <div className="flex flex-wrap items-center gap-2 mb-2">
+        <h2 className="m-0 text-[13px] font-semibold">Database permissions</h2>
+        <span className="text-[12px] text-muted">{data.principal ? <>as <span className="mono">{data.principal}</span></> : null}{data.managed ? ' · managed instance' : ''}</span>
+        <span className="flex-1" />
+        <button className="btn h-6" onClick={() => apiLoad.capabilities('default', true).then(() => d.reload())}>Re-check</button>
+      </div>
+      <ul className="m-0 p-0 list-none space-y-1.5">
+        {Object.entries(data.capabilities).map(([k, c]) => (
+          <li key={k} className="flex flex-wrap items-center gap-2 text-[12.5px]">
+            <Pill tone={c.status === 'granted' ? 'ok' : c.status === 'missing' ? 'bad' : 'warn'}>{c.status}</Pill>
+            <span className="font-medium">{CAP_LABELS[k] ?? k}</span>
+            <span className="text-muted">{c.detail}</span>
+            {c.grant && <><span className="mono text-[11.5px] rounded bg-raised px-1.5">{c.grant}</span><CopyButton text={c.grant} label="Copy GRANT" className="h-6" /></>}
+          </li>
+        ))}
+      </ul>
+      <p className="m-0 mt-2 text-[11.5px] text-muted">A missing permission lowers index-advice confidence. Ask your DBA for the grant, set <span className="mono">explain_url</span> to a separate plan login, or paste a plan to <span className="mono">POST api/explain/plan</span>.</p>
+    </section>
+  )
+}
 
 function QueriesTab({ win }: { win: string }) {
   const nav = useNavigate()
@@ -90,6 +122,9 @@ function CandidateCard({ c }: { c: IndexCandidate }) {
         <CopyButton text={c.create_sql} label="Copy SQL" className="h-6 shrink-0" />
       </div>
       <div className="text-[11.5px] text-muted num">Covers {c.covers.length} {c.covers.length === 1 ? 'query' : 'queries'} · {c.queries.toLocaleString()} executions in the window</div>
+      {c.evidence && c.evidence.length > 0 && (
+        <ul className="m-0 pl-4 text-[11.5px] text-muted" aria-label="Evidence">{c.evidence.map(e => <li key={e}>{e}</li>)}</ul>
+      )}
     </div>
   )
 }
@@ -122,7 +157,7 @@ function UnusedTab({ win }: { win: string }) {
         <thead className="border-b border-line bg-raised/50"><tr><th className="th">Table</th><th className="th">Index</th><th className="th text-right">Scans</th><th className="th text-right">Size</th><th className="th" /></tr></thead>
         <tbody>{rows.map(u => (
           <tr key={u.table + u.index} className="border-b border-line last:border-0 hover:bg-raised/50">
-            <td className="td mono">{u.table}</td><td className="td mono">{u.index}</td>
+            <td className="td mono">{u.table}</td><td className="td mono">{u.index}{u.confidence && <span className="ml-2" title={(u.evidence ?? []).join(' · ')}><Pill tone={u.confidence === 'low' ? 'neutral' : 'warn'}>{u.confidence} confidence</Pill></span>}</td>
             <td className="td text-right num">{u.scans ?? '-'}</td><td className="td text-right num">{bytes(u.size_bytes)}</td>
             <td className="td text-right"><CopyButton text={u.drop_sql ?? `DROP INDEX ${u.index};`} label="Copy DROP" className="h-6" /></td>
           </tr>
@@ -144,6 +179,7 @@ export default function Database() {
         <h1 className="m-0 text-[15px] font-semibold flex-1">Database</h1>
         <WindowPicker value={win} onChange={setWin} />
       </div>
+      <Capabilities />
       <Tabs value={tab} onChange={setTab} tabs={[{ id: 'queries', label: 'Queries' }, { id: 'indexes', label: 'Index advisor' }, { id: 'unused', label: 'Unused indexes' }]} />
       <div className="pt-4">
         {tab === 'queries' && <QueriesTab win={win} />}

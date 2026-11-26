@@ -56,6 +56,23 @@ def _numbers(value: str, count: int, label: str) -> list[float]:
     return nums
 
 
+def _stages_arg(value: str) -> list[dict[str, Any]]:
+    from .load.profile import ScenarioError, parse_duration
+
+    stages = []
+    for part in value.split(","):
+        rps, sep, duration = part.strip().partition(":")
+        try:
+            if not sep:
+                raise ValueError
+            stages.append({"rps": float(rps), "duration_s": parse_duration(duration)})
+        except (ValueError, ScenarioError):
+            raise argparse.ArgumentTypeError(
+                f"expected RPS:DURATION,... such as 10:30s,200:20s (got {part.strip()!r})"
+            ) from None
+    return stages
+
+
 def _fraction(value: str) -> float:
     text = value.strip()
     try:
@@ -88,10 +105,29 @@ def _configure_load(p: argparse.ArgumentParser) -> None:
     shape.add_argument("--rps", type=float, metavar="N", help="constant rate (requests/s)")
     shape.add_argument("--ramp", metavar="A:B", help="ramp linearly from A to B rps")
     shape.add_argument("--steps", metavar="A:B:STEP", help="steps from A to B rps, +STEP each")
+    shape.add_argument(
+        "--stages",
+        metavar="RPS:DURATION,...",
+        help="ordered stages, e.g. 10:30s,200:20s,10:60s for a spike (rps 0 pauses)",
+    )
     p.add_argument("--duration", type=_duration, metavar="60s", help="total duration")
     p.add_argument("--step-duration", type=_duration, metavar="30s", help="duration of each step")
     p.add_argument("--poisson", action="store_true", help="Poisson arrivals (default fixed)")
     p.add_argument("--workers", type=int, metavar="N", help="worker processes (default ≤ 8)")
+    p.add_argument(
+        "--agents",
+        metavar="URL,URL",
+        help="run workers on remote `redline load agent` hosts (https://host:7700,...); the "
+        "controller then runs no workers itself unless --workers is given",
+    )
+    p.add_argument(
+        "--agent-token-file",
+        metavar="PATH",
+        help="file holding the agents' token (else REDLINE_AGENT_TOKEN)",
+    )
+    p.add_argument(
+        "--agent-ca", metavar="PATH", help="CA bundle to verify the agents' TLS certificates"
+    )
     p.add_argument("--base-url", metavar="URL", help="override the scenario's base_url")
     p.add_argument(
         "--ui-url",
@@ -106,7 +142,39 @@ def _configure_load(p: argparse.ArgumentParser) -> None:
         metavar="PATH",
         help=f"Redline store to write the run to (default {DEFAULT_STORE})",
     )
+    p.add_argument(
+        "--store-url",
+        metavar="URL",
+        help="write the run to a shared PostgreSQL store (postgresql://...) instead of a file; "
+        "also taken from the project's storage_url setting when --store is not given",
+    )
+    p.add_argument(
+        "--register-url",
+        metavar="URL",
+        help="register the run with the application over HTTP (its Redline mount, e.g. "
+        "https://app.example/_redline) when no store is shared; the application needs "
+        "accept_remote_runs. The access token is read from REDLINE_TOKEN or --token-file",
+    )
+    p.add_argument(
+        "--token-file", metavar="PATH", help="file holding the Redline access token (one line)"
+    )
     p.add_argument("--no-store", action="store_true", help="do not write to the store")
+    p.add_argument(
+        "--probe",
+        action="store_true",
+        help="send one tagged GET before the run and warn when the application does not "
+        "record it (on by default with --store-url or --register-url)",
+    )
+    p.add_argument("--no-probe", action="store_true", help="skip the recording probe")
+    p.add_argument(
+        "--require-recording",
+        action="store_true",
+        help="stop the run when the application does not record the probe request "
+        "(default: only warn)",
+    )
+    p.add_argument(
+        "--probe-timeout", type=_duration, metavar="5s", help="how long to wait for the probe trace"
+    )
     p.add_argument("--json", metavar="OUT", help="also write the results as JSON")
     p.add_argument("--fail-p95-ms", type=float, metavar="X", help="exit 1 if p95 > X ms")
     p.add_argument(
@@ -131,6 +199,8 @@ def _cli_profile(args: argparse.Namespace, scenario: Any) -> Any:
         data["duration_s"] = args.duration or base.get("duration_s") or 30
         if args.step_duration:
             data["step_duration_s"] = args.step_duration
+    elif args.stages:
+        data = {"mode": "stages", "stages": _stages_arg(args.stages)}
     elif args.steps:
         a, b, step = _numbers(args.steps, 3, "A:B:STEP")
         data = {"mode": "steps", "start_rps": a, "end_rps": b, "step_rps": step}
@@ -207,15 +277,42 @@ class _Printer:
             self.line(f"stopping: {data}")
 
 
-def _open_store_sink(path: str, err: TextIO) -> Any:
-    """``StoreSink`` over ``SQLiteStore(path)``, or ``None`` (with a warning)."""
-    from .load.sinks import StoreSink, store_supports_runs
+def _open_run_store(target: str) -> Any:
+    """The store a run is written to: a shared PostgreSQL store for a ``postgresql://`` URL,
+    else the SQLite file at ``target``. Raises on failure; callers never print the URL."""
+    from .storage.postgres import is_postgres_url
+
+    if is_postgres_url(target):
+        from .storage import PostgresStore
+
+        return PostgresStore(target, background=False)
     from .storage import SQLiteStore
 
+    return SQLiteStore(target, background=False)
+
+
+def _scrub(message: str, target: str) -> str:
+    """``message`` with the store URL (which can hold a password) replaced by its masked form."""
+    from .storage.postgres import is_postgres_url, mask_url
+
+    if is_postgres_url(target):
+        message = message.replace(target, mask_url(target))
+    return message
+
+
+def _open_store_sink(path: str, err: TextIO) -> Any:
+    """``StoreSink`` over the store at ``path`` (a file or a PostgreSQL URL), or ``None``
+    (with a warning)."""
+    from .load.sinks import StoreSink, store_supports_runs
+    from .storage.postgres import mask_url
+
     try:
-        store = SQLiteStore(path, background=False)
+        store = _open_run_store(path)
     except Exception as exc:
-        err.write(f"warning: cannot open the store {path}: {exc}; writing JSON only\n")
+        err.write(
+            f"warning: cannot open the store {mask_url(path)}: {_scrub(str(exc), path)}; "
+            "writing JSON only\n"
+        )
         return None
     if not store_supports_runs(store):
         store.close()
@@ -225,6 +322,98 @@ def _open_store_sink(path: str, err: TextIO) -> Any:
         )
         return None
     return StoreSink(store, close=True)
+
+
+def _mask_url(url: str) -> str:
+    from .storage.postgres import mask_url
+
+    return mask_url(url)
+
+
+def _warn_cleartext(url: str, flag: str, err: TextIO) -> None:
+    """A token or credential-bearing config over plain http to a non-loopback host."""
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(url)
+    host = (parts.hostname or "").lower()
+    if parts.scheme == "http" and host not in ("127.0.0.1", "::1", "localhost"):
+        err.write(
+            f"warning: {flag} uses plain http to {host}: the token and credentials cross the "
+            "network in clear text; use https\n"
+        )
+
+
+def _open_http_sink(args: argparse.Namespace, err: TextIO) -> Any:
+    """``HttpSink`` for ``--register-url``, checked reachable and authorised; else ``None``."""
+    from .load.sinks import HttpSink, RegisterError
+
+    url = str(args.register_url).strip()
+    if not url.lower().startswith(("http://", "https://")):
+        err.write("redline load: --register-url must be an http:// or https:// URL\n")
+        return None
+    token = os.environ.get("REDLINE_TOKEN")
+    if args.token_file:
+        try:
+            with open(args.token_file, encoding="utf-8") as fh:
+                token = fh.read().strip()
+        except OSError as exc:
+            err.write(f"redline load: cannot read --token-file: {exc.strerror or exc}\n")
+            return None
+    _warn_cleartext(url, "--register-url", err)
+    sink = HttpSink(url, token or None)
+    try:
+        sink.preflight()
+    except RegisterError as exc:
+        err.write(f"redline load: {exc}\n")
+        return None
+    return sink
+
+
+def _make_probe(
+    args: argparse.Namespace, scenario: Any, run_id: str, sinks: list[Any], err: TextIO
+) -> Any:
+    """The ``probe`` callable for ``run()``, or ``None`` (no sink can look traces up)."""
+    if args.no_probe:
+        return None
+    if not (args.probe or args.require_recording or args.store_url or args.register_url):
+        return None  # a file store keeps its old behaviour: no extra request unless asked
+    finder = next((s.has_run_trace for s in sinks if hasattr(s, "has_run_trace")), None)
+    if finder is None:
+        return None
+    from .load.probe import ProbeFailed, run_probe
+
+    def probe() -> None:
+        try:
+            run_probe(scenario, run_id, finder, timeout_s=args.probe_timeout or 5.0)
+        except ProbeFailed as exc:
+            if args.require_recording:
+                raise
+            err.write(f"warning: {exc}\nthe run continues; its bottleneck table may be empty\n")
+
+    return probe
+
+
+def _run_store_target(args: argparse.Namespace, err: TextIO) -> str | None:
+    """Where the run is stored: ``--store-url``, else ``--store`` when given, else the
+    project's ``storage_url`` setting, else the default file. ``None`` with ``--no-store``."""
+    from .storage.postgres import is_postgres_url
+
+    if args.no_store:
+        return None
+    if args.store_url:
+        if not is_postgres_url(args.store_url):
+            raise argparse.ArgumentTypeError("--store-url must be a postgresql:// URL")
+        return str(args.store_url).strip()
+    if args.store == DEFAULT_STORE:
+        try:
+            from .config import resolve_settings
+
+            configured = resolve_settings(None, project_root=os.getcwd()).settings.storage_url
+        except Exception:  # an unreadable config must not break the run
+            configured = None
+        if configured:
+            return str(configured)
+    return str(args.store)
 
 
 def _graceful_sigterm() -> Any:
@@ -243,10 +432,8 @@ def _graceful_sigterm() -> Any:
 def _fail_run(store_path: str, run_id: str, message: str) -> None:
     """Close a still-``running`` row (pre-inserted by the UI) as ``failed``, so a run that
     could not start never stays "running" forever."""
-    from .storage import SQLiteStore
-
     try:
-        store = SQLiteStore(store_path, background=False)
+        store = _open_run_store(store_path)
     except Exception:
         return
     try:
@@ -300,10 +487,11 @@ def _cmd_load(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
         if args.ui_url:
             scenario = scenario.replace(ui_url=validate_ui_url(args.ui_url, "--ui-url"))
         profile = _cli_profile(args, scenario)
+        store_target = _run_store_target(args, err)
     except ScenarioError as exc:
         err.write(f"redline load: {exc}\n")
         if args.run_id and not args.no_store:  # started by the UI: its row must not stay "running"
-            _fail_run(args.store, args.run_id, str(exc))
+            _fail_run(args.store_url or args.store, args.run_id, str(exc))
         return EXIT_USAGE
     except argparse.ArgumentTypeError as exc:
         err.write(f"redline load: {exc}\n")
@@ -312,26 +500,60 @@ def _cmd_load(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
         err.write("redline load: --workers must be ≥ 1\n")
         return EXIT_USAGE
 
+    agents, agent_token = None, None
+    if args.agents:
+        agents = [a.strip() for a in str(args.agents).split(",") if a.strip()]
+        if not all(a.startswith(("http://", "https://")) for a in agents):
+            err.write("redline load: --agents takes http(s) URLs\n")
+            return EXIT_USAGE
+        agent_token = os.environ.get("REDLINE_AGENT_TOKEN")
+        if args.agent_token_file:
+            try:
+                with open(args.agent_token_file, encoding="utf-8") as fh:
+                    agent_token = fh.read().strip()
+            except OSError as exc:
+                err.write(f"redline load: cannot read --agent-token-file: {exc.strerror or exc}\n")
+                return EXIT_USAGE
+        for agent_url in agents:
+            _warn_cleartext(agent_url, "--agents", err)
+        if not agent_token:
+            err.write(
+                "redline load: agents need a token (--agent-token-file or REDLINE_AGENT_TOKEN)\n"
+            )
+            return EXIT_USAGE
+
     import uuid
 
     run_id = args.run_id or uuid.uuid4().hex
     sinks: list[Any] = []
-    store_path = None if args.no_store else args.store
+    from .storage.postgres import is_postgres_url
+
+    if args.register_url:
+        http_sink = _open_http_sink(args, err)
+        if http_sink is None:
+            return EXIT_USAGE
+        sinks.append(http_sink)
+        store_target = None
+
+    # Stop and pid files live beside a local store; a shared PostgreSQL store has none, so
+    # they go to the default directory (the process that started the run reads them there).
+    store_path = None if store_target is None else store_target
+    control_path = DEFAULT_STORE if store_path and is_postgres_url(store_path) else store_path
     if store_path:
         sink = _open_store_sink(store_path, err)
         if sink is not None:
             sinks.append(sink)
         elif not args.json:
-            fallback = control.runs_dir(store_path) / f"{run_id}.json"
+            fallback = control.runs_dir(control_path) / f"{run_id}.json"
             err.write(f"results: {fallback}\n")
             sinks.append(JsonSink(fallback))
     if args.json:
         sinks.append(JsonSink(args.json))
 
-    stop = control.StopFile(run_id, store_path)
+    stop = control.StopFile(run_id, control_path)
     if store_path:
         stop.clear()
-        control.write_pid(run_id, store_path)
+        control.write_pid(run_id, control_path)
     previous_term = _graceful_sigterm()
     printer = _Printer(out, quiet=args.quiet)
     if not args.quiet:
@@ -344,9 +566,13 @@ def _cmd_load(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
             sink=sinks,
             stop_event=stop if store_path else None,
             workers=args.workers,
+            agents=agents,
+            agent_token=agent_token,
+            agent_verify=args.agent_ca or True,
             run_id=run_id,
             name=args.name,
             on_event=printer,
+            probe=_make_probe(args, scenario, run_id, sinks, err),
         )
     except Exception as exc:
         err.write(f"redline load: {exc}\n")
@@ -357,10 +583,13 @@ def _cmd_load(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
         if previous_term is not None:
             signal.signal(signal.SIGTERM, previous_term)
         if store_path:
-            control.cleanup(run_id, store_path)
+            control.cleanup(run_id, control_path)
 
     _print_final(printer, result)
-    if store_path and sinks and not isinstance(sinks[0], JsonSink):
+    if args.register_url:
+        shown = _mask_url(str(args.register_url)).rstrip("/")
+        printer.line(f"Open the run in Redline: {shown}/#/load/{run_id}")
+    elif store_path and sinks and not isinstance(sinks[0], JsonSink):
         ui_url = scenario.ui_url or _configured_mount()
         printer.line(f"Open the run in Redline: {_ui_hint(scenario.base_url, run_id, ui_url)}")
     if result.status == "failed":
@@ -400,6 +629,64 @@ def _print_final(printer: _Printer, result: Any) -> None:
             breakdown[key] = breakdown.get(key, 0) + n
     if breakdown:
         printer.line("errors: " + ", ".join(f"{k} ×{v}" for k, v in sorted(breakdown.items())))
+    if "ttfb_p95_ms" in s:
+        printer.line(
+            f"first byte: p50 {fmt_ms(s['ttfb_p50_ms'])}  p95 {fmt_ms(s['ttfb_p95_ms'])}"
+            f"  (last byte p95 {fmt_ms(s['p95_ms'])})"
+        )
+    for key, label in (("streams", "streams"), ("websockets", "websockets")):
+        if key in s:
+            part = s[key]
+            detail = (
+                f"{part['events']} events" if key == "streams" else f"{part['messages']} messages"
+            )
+            printer.line(
+                f"{label}: {part['count']} held, {detail}, peak concurrent {part['max_open']}"
+            )
+            for step_no, row in sorted(part["by_step"].items()):
+                latency = (
+                    f", reply p95 {fmt_ms(row['latency_p95_ms'])}"
+                    if "latency_p95_ms" in row
+                    else ""
+                )
+                printer.line(
+                    f"  step {step_no}: {row['count']} held, concurrent {row['max_open']}{latency}"
+                )
+    if "sessions" in s:
+        parts = ", ".join(
+            f"step {n}: {row['max_open']}" for n, row in sorted(s["sessions"]["by_step"].items())
+        )
+        printer.line(f"sessions in flight (peak): {s['sessions']['max_open']}  ({parts})")
+    limit = s.get("limiting_resource")
+    if limit:
+        printer.line(f"limiting resource: step {limit['step']}: {limit['detail']}")
+        if limit.get("note"):
+            printer.line(f"  note: {limit['note']}")
+    for rec in s.get("recovery") or []:
+        when = (
+            f"recovered after {rec['recovered_after_s']:g}s"
+            if rec["recovered_after_s"] is not None
+            else "did not recover within the stage"
+        )
+        printer.line(
+            f"recovery: step {rec['step']} ({rec['target_rps']:g} rps) p95 {when} "
+            f"(before {fmt_ms(rec['baseline_p95_ms'])}, peak {fmt_ms(rec['peak_p95_ms'])})"
+        )
+    for d in s.get("drift") or []:
+        printer.line(
+            f"drift: step {d['step']} {d['verdict']} (p95 {fmt_ms(d['first_third_p95_ms'])} → "
+            f"{fmt_ms(d['last_third_p95_ms'])}, {d['p95_slope_ms_per_min']:+.1f} ms/min)"
+        )
+    for name, flow in (s.get("flows") or {}).items():
+        printer.line(
+            f"flow {name}: ran {flow['count']}  errors {flow['errors']}  "
+            f"p95 {fmt_ms(flow['p95_ms'])}"
+        )
+        for fs in flow["steps"]:
+            printer.line(
+                f"  {fs['step']}. {fs['name']}: {fs['count']} ×  errors {fs['errors']}  "
+                f"p95 {fmt_ms(fs['p95_ms'])}"
+            )
     if s.get("knee_step") is not None:
         printer.line(f"knee: step {s['knee_step']} – {s.get('knee_reason')}")
     else:
@@ -407,6 +694,77 @@ def _print_final(printer: _Printer, result: Any) -> None:
     max_ok = s.get("max_ok_rps")
     printer.line(f"max ok rps: {max_ok:g}" if max_ok is not None else "max ok rps: -")
     printer.line(f"verdict: {s['verdict']} ({s.get('verdict_detail')})")
+
+
+# ============================================================================ load agent
+def _configure_agent(p: argparse.ArgumentParser) -> None:
+    p.add_argument(
+        "--listen",
+        default="127.0.0.1:7700",
+        metavar="HOST:PORT",
+        help="address to listen on (default 127.0.0.1:7700; use 0.0.0.0 only on a private network)",
+    )
+    p.add_argument(
+        "--token-file",
+        metavar="PATH",
+        help="file holding the bearer token controllers must send (else REDLINE_AGENT_TOKEN)",
+    )
+    p.add_argument("--max-workers", type=int, metavar="N", help="worker processes (default ≤ 8)")
+    p.add_argument(
+        "--allow-target",
+        action="append",
+        default=[],
+        metavar="URL_PREFIX",
+        help="only generate load against URLs starting with this (repeatable)",
+    )
+    p.add_argument("--cert", metavar="PEM", help="serve HTTPS with this certificate")
+    p.add_argument("--key", metavar="PEM", help="private key for --cert")
+
+
+def _cmd_agent(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
+    from .load.agent import AgentError, serve
+
+    token = os.environ.get("REDLINE_AGENT_TOKEN")
+    if args.token_file:
+        try:
+            with open(args.token_file, encoding="utf-8") as fh:
+                token = fh.read().strip()
+        except OSError as exc:
+            err.write(f"redline load agent: cannot read --token-file: {exc.strerror or exc}\n")
+            return EXIT_USAGE
+    if not token:
+        err.write("redline load agent: a token is required (--token-file or REDLINE_AGENT_TOKEN)\n")
+        return EXIT_USAGE
+    if bool(args.cert) != bool(args.key):
+        err.write("redline load agent: --cert and --key go together\n")
+        return EXIT_USAGE
+    try:
+        server = serve(
+            args.listen,
+            token,
+            max_workers=args.max_workers,
+            allow_targets=tuple(args.allow_target),
+            certfile=args.cert,
+            keyfile=args.key,
+        )
+    except (AgentError, OSError, ValueError) as exc:
+        err.write(f"redline load agent: {exc}\n")
+        return EXIT_USAGE
+    host, port = server.address
+    scheme = "https" if args.cert else "http"
+    out.write(
+        f"redline load agent listening on {scheme}://{host}:{port} ({server.max_workers} workers)\n"
+    )
+    if not args.cert and host not in ("127.0.0.1", "::1", "localhost"):
+        out.write("warning: no TLS; the token and scenario cross the network in clear text\n")
+    out.flush()
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.close()
+    return EXIT_OK
 
 
 # ============================================================================ load init
@@ -419,6 +777,27 @@ def _configure_init(p: argparse.ArgumentParser) -> None:
     p.add_argument("--top", type=int, default=10, help="endpoints to keep (--from-traces)")
     p.add_argument("--include-writes", action="store_true", help="also POST/PUT/PATCH/DELETE")
     p.add_argument("--base-url", metavar="URL")
+    p.add_argument(
+        "--data-dir",
+        metavar="DIR",
+        help="with --from-traces: write the distinct paths seen per endpoint as CSV files "
+        "here and use them as zipf data sources instead of one sample path",
+    )
+    p.add_argument(
+        "--stages",
+        metavar="RPS:DURATION,...",
+        help="write a stages profile, e.g. 10:30s,200:20s,10:60s for a spike",
+    )
+    p.add_argument(
+        "--identities-file",
+        metavar="FILE",
+        help="add identities_file to the scenario (CSV: name, header:<Name>, cookie:<name>)",
+    )
+    p.add_argument(
+        "--identity-mode",
+        choices=("round_robin", "random", "sticky"),
+        help="with --identities-file: how identities are picked (default round_robin)",
+    )
     p.add_argument("-o", "--out", default="scenario.toml", help="output (.toml/.json, - = stdout)")
     p.add_argument("--force", action="store_true", help="overwrite an existing file")
 
@@ -447,14 +826,34 @@ def _cmd_init(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
                     top=args.top,
                     include_writes=args.include_writes,
                     base_url=args.base_url,
+                    data_dir=args.data_dir,
+                    # the scenario names its data files relative to where the scenario is
+                    data_ref_dir=(
+                        os.path.relpath(args.data_dir, os.path.dirname(os.path.abspath(args.out)))
+                        if args.data_dir and args.out != "-"
+                        else args.data_dir
+                    ),
                 )
             finally:
                 store.close()
+        if args.data_dir and not args.from_traces:
+            raise ValueError("--data-dir needs --from-traces")
+        if args.stages:
+            data["profile"] = {"mode": "stages", "stages": _stages_arg(args.stages)}
+        if args.identities_file:
+            data["identities_file"] = args.identities_file
+            if args.identity_mode:
+                data["identity_mode"] = args.identity_mode
+        elif args.identity_mode:
+            raise ValueError("--identity-mode needs --identities-file")
         parse_scenario(data)  # never write a scenario we could not run
     except Exception as exc:
         err.write(f"redline load init: {exc}\n")
         return EXIT_USAGE
-    text = generate.to_json(data) if args.out.endswith(".json") else generate.to_toml(data)
+    if args.out.endswith(".json"):
+        text = generate.to_json(data)
+    else:
+        text = generate.to_toml(data) + generate.OPTIONAL_KEYS
     if args.out == "-":
         out.write(text)
         return EXIT_OK
@@ -800,6 +1199,59 @@ def _postgres_checks(url: str) -> list[tuple[str, str, str]]:
     return [("ok", "storage", f"PostgreSQL {version} at {where}, shared by every worker")]
 
 
+def _database_checks(resolved: Any, environ: Any = None) -> list[tuple[str, str, str]]:
+    """The four SQL Server capabilities (plans, index usage, definitions) as doctor lines.
+
+    Runs only when a plan login is configured: the ``explain_url`` setting, else the
+    ``REDLINE_DATABASE_URL`` environment variable. Nothing is read from user tables.
+    """
+    import os
+
+    env = os.environ if environ is None else environ
+    url = resolved.settings.explain_url or env.get("REDLINE_DATABASE_URL")
+    if not url:
+        return []
+    from .storage.postgres import mask_url
+
+    try:
+        from sqlalchemy import create_engine
+        from sqlalchemy.engine import make_url
+
+        parsed = make_url(url)
+    except Exception:
+        return [("warn", "database", "cannot read the database URL (is SQLAlchemy installed?)")]
+    from .vendors import get_vendor
+
+    vendor = get_vendor(parsed.get_backend_name()).name
+    where = mask_url(str(url))
+    if vendor != "mssql":
+        return [("ok", "database", f"{vendor} at {where}: no permission probe needed")]
+    from .database_capabilities import CAPABILITIES, probe_mssql
+
+    engine = create_engine(parsed, pool_size=1, max_overflow=0)
+    try:
+
+        def executor(sql: str, params: Any) -> list[Any]:
+            with engine.connect() as conn:
+                try:
+                    return [tuple(r) for r in conn.exec_driver_sql(sql).fetchall()]
+                finally:
+                    conn.rollback()
+
+        report = probe_mssql(executor)
+    finally:
+        engine.dispose()
+    checks = []
+    for name in CAPABILITIES:
+        cap = report["capabilities"][name]
+        status = {"granted": "ok", "missing": "warn"}.get(cap["status"], "warn")
+        detail = cap["detail"] + (f" Ask the DBA: {cap['grant']}" if cap.get("grant") else "")
+        checks.append((status, f"db:{name}"[:11], detail))
+    who = report.get("principal") or "unknown login"
+    checks.insert(0, ("ok", "database", f"SQL Server at {where} as {who}"))
+    return checks
+
+
 def _cmd_doctor(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
     if args.json:
         import io
@@ -833,6 +1285,7 @@ def _cmd_doctor(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
     checks = _doctor_checks(
         resolved, strict=getattr(args, "strict", False), workers=getattr(args, "workers", None)
     )
+    checks.extend(_database_checks(resolved))
     if args.production:
         from .production_checks import production_checks
 
@@ -1727,7 +2180,7 @@ def _configure_check_findings(p: argparse.ArgumentParser) -> None:
 def _cmd_check_findings(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
     import json
 
-    from .agent.fixprompt import build_fix_prompt
+    from .agent.fixprompt import new_findings
     from .check.report import Report, ReportError
 
     try:
@@ -1739,27 +2192,7 @@ def _cmd_check_findings(args: argparse.Namespace, out: TextIO, err: TextIO) -> i
     except (OSError, ValueError, ReportError) as exc:
         err.write(f"redline check findings: {args.report}: {exc}\n")
         return EXIT_USAGE
-    findings = []
-    for entry in report.requests:
-        server = entry.get("server") or {}
-        for issue in server.get("new_issues") or []:
-            group = {
-                "id": issue.get("id") or f"{issue.get('kind')}:{issue.get('fingerprint')}",
-                "kind": issue.get("kind"),
-                "title": issue.get("title"),
-                "fingerprint": issue.get("fingerprint"),
-                "routes": [entry.get("path")],
-            }
-            findings.append(
-                {
-                    "request": entry.get("name"),
-                    "kind": issue.get("kind"),
-                    "title": issue.get("title"),
-                    "fingerprint": issue.get("fingerprint"),
-                    "sample_trace_id": issue.get("sample_trace_id"),
-                    "prompt": build_fix_prompt(group),
-                }
-            )
+    findings = new_findings(report.requests)
     if args.json:
         out.write(json.dumps({"findings": findings}, indent=2) + "\n")
     else:
@@ -1965,7 +2398,10 @@ COMMANDS: dict[str, tuple[str, Callable[[argparse.ArgumentParser], None], Handle
         "run a load test (open model) against a running app",
         _configure_load,
         _cmd_load,
-        {"init": ("write a scenario file", _configure_init, _cmd_init)},
+        {
+            "init": ("write a scenario file", _configure_init, _cmd_init),
+            "agent": ("run a remote load generator for a controller", _configure_agent, _cmd_agent),
+        },
     ),
     "check": (
         "refactor check: record a baseline of read-only requests, then compare a new version",

@@ -138,6 +138,7 @@ nav:
       - LLM-call observability: llm.md
   - Load and history:
       - Load testing: load-testing.md
+      - A full performance test: full-performance-test.md
       - History and releases: history.md
   - Integrations:
       - Frameworks:

@@ -129,7 +129,20 @@ class SQLAlchemyFixSuggester:
             if raw is not None:
                 return raw
         if not candidates:
-            return None
+            # no ORM relationship matches: a multi-line text()/driver call is still rewritable
+            fix = self._raw_fix(issue, spans, callsite, filters[0][0], filters[0][1])
+            if fix is None:
+                # dynamic or unusual statement written with text(): the batched form as a block
+                if self._calls_text(callsite):
+                    return self._raw_sql(issue, spans, filters, _tables, callsite)
+                return None
+            return Suggestion(
+                summary=fix.summary,
+                code=fix.code,
+                diff=fix.diff,
+                confidence=fix.confidence,
+                docs_url=DOCS_RAW,
+            )
         ranked = self._rank(candidates, callsite)
         best = ranked[0]
         located = best[1]
@@ -169,16 +182,35 @@ class SQLAlchemyFixSuggester:
         tables: list[str],
         callsite: Any,
     ) -> Suggestion | None:
-        """A batching hint for repeated ``text()``/driver SQL without ORM metadata."""
+        """A batching rewrite (or hint) for repeated ``text()``/driver SQL without ORM metadata."""
         if not filters or not tables:
             return None
         table, column = filters[0]
+        fix = self._raw_fix(issue, spans, callsite, table, column)
+        if fix is not None:
+            return Suggestion(
+                summary=fix.summary,
+                code=fix.code,
+                diff=fix.diff,
+                confidence=fix.confidence,
+                docs_url=DOCS_RAW,
+            )
         many = bool(spans[0].data.get("many"))
         batch = (
             "executemany() already batches these writes"
             if many
             else ("replace the per-row SELECT with one IN query, or join it into the parent query")
         )
+        from .rawfix import PARAM_LIMITS, param_limit
+
+        vendor = str(spans[0].data.get("vendor") or "other")
+        limit = param_limit(vendor)
+        where = (
+            f"{vendor} allows about {limit:,}"
+            if vendor in PARAM_LIMITS
+            else "databases cap at about 1,000 to 65,000"
+        )
+        batch += f"; {where} bound parameters per statement, so send the ids in chunks above that"
         code = (
             "from sqlalchemy import bindparam, text\n"
             "\n"
@@ -196,6 +228,46 @@ class SQLAlchemyFixSuggester:
             confidence="medium" if callsite and callsite.code else "low",
             docs_url=DOCS_RAW,
         )
+
+    def _calls_text(self, callsite: Any) -> bool:
+        """Whether the statement at the callsite (up to 8 lines of it) calls ``text(``."""
+        if callsite is None:
+            return False
+        loaded = self._read(callsite.file)
+        if loaded is None:
+            return False
+        lines = loaded[2].splitlines()
+        window = lines[max(0, callsite.line - 1) : callsite.line + 7]
+        return any("text(" in line for line in window)
+
+    def _raw_fix(
+        self, issue: Issue, spans: list[Span], callsite: Any, table: str, column: str
+    ) -> Any:
+        from .rawfix import build_raw_fix
+
+        if callsite is None or bool(spans[0].data.get("many")):
+            return None
+        frames = list(getattr(callsite, "stack", ()) or ()) or [callsite]
+        vendor = str(spans[0].data.get("vendor") or "other")
+        parent = issue.extra.get("parent_table") if isinstance(issue.extra, dict) else None
+        for frame in reversed(frames):  # innermost project frame first
+            loaded = self._read(frame.file)
+            if loaded is None:
+                continue
+            _path, tree, source = loaded
+            fix = build_raw_fix(
+                source=source,
+                tree=tree,
+                display=frame.file,
+                line=frame.line,
+                vendor=vendor,
+                table=table,
+                column=column,
+                parent_table=parent if isinstance(parent, str) else None,
+            )
+            if fix is not None:
+                return fix
+        return None
 
     # ranking -----------------------------------------------------------------
     def _rank(

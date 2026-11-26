@@ -88,6 +88,8 @@ PRESETS: dict[str, dict[str, Any]] = {
         "read_only": True,
         "max_age_days": 3,
         "load_from_ui": False,
+        "accept_remote_runs": False,
+        "run_metrics": False,
         "checks_from_ui": False,
         "analysis_from_ui": False,
         "features": {"replay": False, "replay_writes": False},
@@ -127,6 +129,8 @@ PRESETS: dict[str, dict[str, Any]] = {
         "badge": False,
         "server_timing": False,
         "load_from_ui": False,
+        "accept_remote_runs": False,
+        "run_metrics": False,
         "checks_from_ui": False,
         "analysis_from_ui": False,
         "explain_analyze": False,
@@ -231,6 +235,9 @@ class Settings:
 
     # explain
     explain_analyze: bool = False
+    #: A SQLAlchemy URL for a separate, plan-capable login (``mssql+pyodbc://...``): EXPLAIN,
+    #: plan and catalog requests use it so the application's own login stays least-privilege.
+    explain_url: str | None = None
 
     # storage & retention (``0`` or ``None`` disables a rule)
     max_rows: int | None = 10_000
@@ -268,6 +275,10 @@ class Settings:
     round_trip_ms: float = 100.0
     pool_wait_ms: float = 50.0
     json_decode_ms: float = 50.0
+    #: ``unattributed_time``: a request is flagged when at least this share of it (0-1;
+    #: 0 disables the detector) *and* at least ``unattributed_time_ms`` is covered by no span.
+    unattributed_time_ratio: float = 0.5
+    unattributed_time_ms: float = 100.0
     #: LLM-call detectors (0 disables each): identical prompt repeated N times in a request,
     #: N back-to-back calls, N calls in one request, and an Anthropic prompt of N characters
     #: sent without prompt caching.
@@ -311,6 +322,13 @@ class Settings:
     # history & load testing
     history_retention_days: int | None = 90
     load_from_ui: bool = False
+    #: Accept load runs registered over HTTP by a generator on another host
+    #: (``POST api/runs/register``, ``.../steps``, ``.../finish``). Off by default and in the
+    #: ``production`` and ``staging`` presets; refused while ``read_only`` is on.
+    accept_remote_runs: bool = False
+    #: While a registered load run sends this process traffic, sample its CPU, memory, GC
+    #: pauses and connection pool once a second into the store (``GET api/runs/{id}/metrics``).
+    run_metrics: bool = True
     #: Start refactor-check runs (baseline / compare) from the UI; ``"auto"`` = only while
     #: the framework is in debug mode (``CONTRACT.md`` §19.5).
     checks_from_ui: bool | str = "auto"
@@ -561,6 +579,8 @@ def _validate(s: Settings) -> None:
         "capture_locals",
         "capture_error_details",
         "load_from_ui",
+        "accept_remote_runs",
+        "run_metrics",
         "read_only",
         "ui_enabled",
         "trust_unix_socket",
@@ -637,6 +657,8 @@ def _validate(s: Settings) -> None:
         "pool_wait_ms",
         "json_decode_ms",
         "cache_decode_ms",
+        "unattributed_time_ratio",
+        "unattributed_time_ms",
         "slow_query_ms",
         "blocking_ms",
         "slow_serializer_ms",
@@ -646,13 +668,27 @@ def _validate(s: Settings) -> None:
         _check_type(s, name, (int, float), "a number")
         if getattr(s, name) < 0:
             raise SettingsError(f"Redline setting {name!r} must not be negative.")
-    for name in ("round_trip_ms", "pool_wait_ms", "json_decode_ms", "cache_decode_ms"):
+    for name in (
+        "round_trip_ms",
+        "pool_wait_ms",
+        "json_decode_ms",
+        "cache_decode_ms",
+        "unattributed_time_ratio",
+        "unattributed_time_ms",
+    ):
         value = getattr(s, name)
         if isinstance(value, float) and not math.isfinite(value):
             raise SettingsError(f"Redline setting {name!r} must be finite.")
-    for name in ("sample_rate", "profile_sample_rate"):
+    for name in ("sample_rate", "profile_sample_rate", "unattributed_time_ratio"):
         if not 0.0 <= getattr(s, name) <= 1.0:
             raise SettingsError(f"Redline setting {name!r} must be between 0 and 1.")
+    if s.explain_url is not None:
+        _check_type(s, "explain_url", (str,), "a SQLAlchemy URL or None")
+        if not re.match(r"^[A-Za-z][A-Za-z0-9+._-]*://", s.explain_url.strip()):
+            raise SettingsError(
+                "Redline setting 'explain_url' must be a SQLAlchemy URL such as "
+                "mssql+pyodbc://user:password@host/db?driver=..."
+            )
     _check_type(s, "storage_path", (str,), "a string or os.PathLike")
     if s.storage_url is not None:
         _check_type(s, "storage_url", (str,), "a postgresql:// URL or None")

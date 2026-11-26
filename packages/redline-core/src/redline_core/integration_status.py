@@ -16,7 +16,23 @@ _INTEGRATIONS = (
     ("boto3", "boto3", "redline_core.contrib.boto3", "_wrapper"),
     ("anthropic", "anthropic", "redline_core.contrib.anthropic", "_originals"),
     ("openai", "openai", "redline_core.contrib.openai", "_originals"),
+    ("pymongo", "pymongo", "redline_core.contrib.pymongo", "_originals"),
+    ("kafka", "kafka", "redline_core.contrib.kafka", "_originals"),
+    ("pika", "pika", "redline_core.contrib.pika", "_originals"),
+    (
+        "google_cloud_storage",
+        "google.cloud.storage",
+        "redline_core.contrib.google_cloud_storage",
+        "_originals",
+    ),
+    ("azure_blob", "azure.storage.blob", "redline_core.contrib.azure_blob", "_originals"),
+    ("threads", "concurrent.futures", "redline_core.contrib.threads", "_originals"),
 )
+
+#: Integrations that are only ever switched on deliberately. ``threads`` is standard library
+#: (always "installed") and changes how threads behave, so an inactive one is not a warning
+#: and ``auto_instrument`` never turns it on.
+_OPT_IN_ONLY = frozenset({"threads"})
 
 
 def _installed(module_name: str) -> bool:
@@ -47,13 +63,40 @@ def integration_status() -> list[dict[str, bool | str]]:
                 "instrumented": _is_instrumented(contrib_module, state),
             }
         )
+    statuses += _dbapi_status()
     return statuses
+
+
+#: DB-API drivers whose own ``connect()`` bypasses SQLAlchemy. Not auto-instrumented: SQLAlchemy
+#: also calls ``connect()``, so wrapping a driver an engine uses would record its SQL twice.
+_DBAPI_DRIVERS = ("psycopg2", "pymysql", "MySQLdb", "pyodbc", "pymssql", "oracledb", "cx_Oracle")
+
+
+def _dbapi_status() -> list[dict[str, bool | str]]:
+    """One row per loaded raw driver: statements sent through its own ``connect()`` are a
+    blind spot until ``instrument_dbapi(module)`` is called (``source="raw_cursor"`` spans)."""
+    return [
+        {
+            "name": f"dbapi:{name}",
+            "installed": True,
+            "module_loaded": True,
+            "instrumented": getattr(sys.modules[name], "_redline_original_connect", None)
+            is not None,
+        }
+        for name in _DBAPI_DRIVERS
+        if name in sys.modules
+    ]
 
 
 def integration_warnings(statuses: list[dict[str, bool | str]]) -> list[str]:
     """Explain installed but inactive integrations; this is not an activity report."""
     inactive = [
-        str(item["name"]) for item in statuses if item["installed"] and not item["instrumented"]
+        str(item["name"])
+        for item in statuses
+        if item["installed"]
+        and not item["instrumented"]
+        and item["name"] not in _OPT_IN_ONLY
+        and not str(item["name"]).startswith("dbapi:")
     ]
     if not inactive:
         return []

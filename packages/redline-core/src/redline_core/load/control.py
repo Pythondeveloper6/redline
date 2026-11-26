@@ -107,6 +107,7 @@ def launch_background(
     run_id: str | None = None,
     workers: int | None = None,
     python: str | None = None,
+    store_url: str | None = None,
 ) -> str:
     """Start ``redline load`` in a detached subprocess and return the run id at once.
 
@@ -114,12 +115,16 @@ def launch_background(
     API maps to 400). The child writes the run to ``store_path`` under that id; its row
     appears once the child has started (well under a second). Stop it with
     :func:`stop_run`.
+
+    With ``store_url`` (a shared PostgreSQL store) the child writes there instead of a file;
+    the URL reaches it through the ``REDLINE_STORAGE_URL`` environment variable, never the
+    command line, and the pid/stop files live in the default ``.redline/runs`` directory.
     """
     data = scenario_from_config(config, base_url)
     scenario = load_scenario(data)  # validate before spawning anything
     _check_ui_limits(scenario)
     run_id = run_id or uuid.uuid4().hex
-    store = os.fspath(store_path or DEFAULT_STORE)
+    store = os.fspath(DEFAULT_STORE if store_url else (store_path or DEFAULT_STORE))
     rdir = ensure_private_dir(runs_dir(store), gitignore=False)
     scenario_path = rdir / f"{_safe_id(run_id)}.scenario.json"
     _write_private(scenario_path, json.dumps(data, indent=2))
@@ -140,6 +145,8 @@ def launch_background(
     log = os.fdopen(open_private(rdir / f"{run_id}.log", "ab"), "ab")
     try:
         kwargs: dict[str, Any] = {}
+        if store_url:
+            kwargs["env"] = {**os.environ, "REDLINE_STORAGE_URL": store_url}
         if os.name == "nt":  # pragma: no cover
             kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
         else:
@@ -252,18 +259,31 @@ def run_hooks(store: Any, settings: Any) -> tuple[Any, Any]:
     """``(run_launcher, run_stopper)`` for :class:`~redline_core.api.RedlineAPI`, or
     ``(None, None)`` (→ 501) unless ``settings.load_from_ui`` is on and ``store`` is a
     :class:`~redline_core.storage.SQLiteStore` backed by a real file (the background
-    ``redline load`` process writes the run into that same file).
+    ``redline load`` process writes the run into that same file) or the shared
+    :class:`~redline_core.storage.PostgresStore` (the process gets its URL through the
+    environment).
 
     The launcher pre-inserts a ``running`` :class:`~redline_core.runs.Run` row (the child
     upserts it a moment later), so ``GET api/runs/{id}`` never answers a transient 404.
     The target is always the ``base_url`` the adapter derived from the request.
-    """
-    from ..storage import SQLiteStore
 
-    if not getattr(settings, "load_from_ui", False) or not isinstance(store, SQLiteStore):
+    A shared store has no pid files beside it to judge a run dead by, so when a stop finds
+    no live process the stopper closes the still-``running`` row as ``failed`` itself.
+    """
+    from ..storage import PostgresStore, SQLiteStore
+    from ..storage.sqlite import DEAD_RUN_MESSAGE
+
+    if not getattr(settings, "load_from_ui", False):
         return None, None
-    path = os.fspath(store.path)
-    if not path or path == ":memory:" or path.startswith("file:"):
+    url: str | None = None
+    path: str | None = None
+    if isinstance(store, PostgresStore):
+        url = str(store.url)
+    elif isinstance(store, SQLiteStore):
+        path = os.fspath(store.path)
+        if not path or path == ":memory:" or path.startswith("file:"):
+            return None, None
+    else:
         return None, None
 
     def launcher(config: dict[str, Any], base_url: str | None) -> str:
@@ -273,7 +293,7 @@ def run_hooks(store: Any, settings: Any) -> tuple[Any, Any]:
 
         if not base_url:
             raise ValueError("cannot tell the application's own URL for this request")
-        run_id = launch_background(config, base_url, path)
+        run_id = launch_background(config, base_url, path, store_url=url)
         try:
             store.save_run(
                 Run(
@@ -288,8 +308,16 @@ def run_hooks(store: Any, settings: Any) -> tuple[Any, Any]:
 
     def stopper(run_id: str) -> bool:
         try:
-            return stop_run(run_id, path)
+            stopped = stop_run(run_id, path)
         except ValueError:
             return False
+        if not stopped and url is not None:
+            try:
+                run = store.get_run(run_id)
+                if run is not None and run.status == "running":
+                    store.finish_run(run_id, "failed", {"message": DEAD_RUN_MESSAGE})
+            except Exception:  # pragma: no cover - best effort
+                pass
+        return stopped
 
     return launcher, stopper

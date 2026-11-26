@@ -313,9 +313,12 @@ With `storage_url` set, every adapter builds `PostgresStore` instead of the SQLi
   by whichever worker's writer prunes, to the whole shared store.
 - **Secrets.** `redline config` and `GET api/config` show the URL with its password masked.
 
-Load tests and refactor checks **started from the UI** need a SQLite store (their background
-process writes into the store file), so those UI actions answer `501` with a shared store;
-the CLI (`redline load`, `redline check`) still records into SQLite files. `redline doctor`
+Refactor checks **started from the UI** need a SQLite store (their background
+process writes into the store file), so that UI action answers `501` with a shared store.
+Load runs started from the UI work with the shared store too: the background process gets
+the URL through `REDLINE_STORAGE_URL`.
+`redline load --store-url` writes runs to the shared store; `redline check` still records
+into SQLite files. `redline doctor`
 checks the driver and that the database answers.
 
 ## A different store

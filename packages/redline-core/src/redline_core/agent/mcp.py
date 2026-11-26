@@ -9,10 +9,12 @@ carries on.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from typing import Any, TextIO
 
 from .audit import AuditLog
-from .tools import TOOLS, call_tool
+from .base import ServerOptions
+from .tools import call_tool, visible_tools
 
 __all__ = ["serve"]
 
@@ -24,7 +26,9 @@ def _error(id_: Any, code: int, message: str) -> dict[str, Any]:
     return {"jsonrpc": "2.0", "id": id_, "error": {"code": code, "message": message}}
 
 
-def _handle(msg: Any, store: Any, audit: AuditLog | None) -> dict[str, Any] | None:
+def _handle(
+    msg: Any, store: Any, audit: AuditLog | None, options: ServerOptions | None = None
+) -> dict[str, Any] | None:
     if not isinstance(msg, dict) or msg.get("jsonrpc") != "2.0" or "method" not in msg:
         return _error(msg.get("id") if isinstance(msg, dict) else None, -32600, "Invalid request")
     method, id_, params = msg["method"], msg.get("id"), msg.get("params")
@@ -47,14 +51,14 @@ def _handle(msg: Any, store: Any, audit: AuditLog | None) -> dict[str, Any] | No
     if method == "tools/list":
         tools = [
             {"name": t.name, "description": t.description, "inputSchema": t.schema}
-            for t in TOOLS.values()
+            for t in visible_tools(options)
         ]
         return {"jsonrpc": "2.0", "id": id_, "result": {"tools": tools}}
     if method == "tools/call":
         if not isinstance(params, dict) or not isinstance(params.get("name"), str):
             return _error(id_, -32602, "tools/call needs params.name")
         args = params.get("arguments", {})
-        result = call_tool(params["name"], args, store=store, audit=audit)
+        result = call_tool(params["name"], args, store=store, audit=audit, options=options)
         return {
             "jsonrpc": "2.0",
             "id": id_,
@@ -66,11 +70,21 @@ def _handle(msg: Any, store: Any, audit: AuditLog | None) -> dict[str, Any] | No
     return _error(id_, -32601, f"Method not found: {str(method)[:60]}")
 
 
-def serve(store_path: str, stdin: TextIO, stdout: TextIO, *, audit_path: str | None = None) -> None:
+def serve(
+    store_path: str,
+    stdin: TextIO,
+    stdout: TextIO,
+    *,
+    audit_path: str | None = None,
+    options: ServerOptions | None = None,
+) -> None:
     """Serve until ``stdin`` closes. ``store_path`` must be an existing redline store."""
     from ..storage.multiple import TraceReader
 
     store = TraceReader(store_path)
+    options = options or ServerOptions()
+    if options.store_path is None:
+        options = replace(options, store_path=store_path)
     audit = AuditLog(audit_path) if audit_path else None
     try:
         while True:
@@ -85,7 +99,7 @@ def serve(store_path: str, stdin: TextIO, stdout: TextIO, *, audit_path: str | N
                 continue
             else:
                 try:
-                    reply = _handle(json.loads(line), store, audit)
+                    reply = _handle(json.loads(line), store, audit, options)
                 except json.JSONDecodeError:
                     reply = _error(None, -32700, "Parse error")
                 except RecursionError:
@@ -100,6 +114,21 @@ def serve(store_path: str, stdin: TextIO, stdout: TextIO, *, audit_path: str | N
 def configure(parser: Any) -> None:
     parser.add_argument("--store", required=True, help="path to an existing redline store")
     parser.add_argument("--audit", metavar="FILE", help="append a JSONL record of each tool call")
+    parser.add_argument(
+        "--allow-load",
+        action="store_true",
+        help="also offer start_load_run and stop_load_run (sends real traffic to --load-target)",
+    )
+    parser.add_argument(
+        "--load-target",
+        metavar="URL",
+        help="the only URL a started load run may target (required with --allow-load)",
+    )
+    parser.add_argument(
+        "--allow-delete-runs",
+        action="store_true",
+        help="also offer delete_load_run (removes a finished run from the store)",
+    )
 
 
 def command(args: Any, out: TextIO, err: TextIO) -> int:
@@ -109,5 +138,24 @@ def command(args: Any, out: TextIO, err: TextIO) -> int:
     if not os.path.isfile(args.store):
         err.write(f"redline mcp: store not found: {args.store}\n")
         return 2
-    serve(args.store, sys.stdin, out, audit_path=args.audit)
+    target = args.load_target
+    if args.allow_load or target:
+        from ..load.profile import ScenarioError
+        from ..load.scenario import validate_base_url
+
+        if not target:
+            err.write("redline mcp: --allow-load needs --load-target URL\n")
+            return 2
+        try:
+            target = validate_base_url(target, "--load-target")
+        except ScenarioError as exc:
+            err.write(f"redline mcp: {exc}\n")
+            return 2
+    options = ServerOptions(
+        store_path=args.store,
+        allow_load=bool(args.allow_load),
+        load_target=target if args.allow_load else None,
+        allow_delete_runs=bool(args.allow_delete_runs),
+    )
+    serve(args.store, sys.stdin, out, audit_path=args.audit, options=options)
     return 0

@@ -2,14 +2,16 @@
 
 [← Index](index.md)
 
-Redline has two extension points, both small `typing.Protocol`s in `redline_core`:
+Redline has two extension points, both small `typing.Protocol`s in `redline_core`, and a
+helper for making any other client visible:
 
 | Extension | You write | Use it for |
 |---|---|---|
 | [`FixSuggester`](#fixsuggester) | one method, `suggest(issue, spans)` | fix advice for another ORM, a house style, or a framework Redline does not know |
 | [`Store`](#the-store-protocol) | the storage interface | keeping traces somewhere other than the local SQLite file |
+| [`instrument_client_method`](#instrumenting-a-client) | one call per client method | spans for a database, queue or storage client Redline has no integration for |
 
-Both are **beta** surfaces: signatures may change before 1.0.
+All three are **beta** surfaces: signatures may change before 1.0.
 
 ## The data you will touch
 
@@ -149,6 +151,53 @@ project root. The file path in `Callsite.file` is relative to `project_root`.
 
 Only produce a diff when you are **sure** you found the right expression. A wrong diff is
 worse than a hint. Use `confidence` honestly: `high` means "relation and line identified".
+
+## Instrumenting a client
+
+Time spent in a client Redline cannot see shows up as [unattributed time](detectors.md#unattributed-time)
+on the request. `instrument_client_method` makes it visible: it wraps one method of a client
+class (or one object) and records every call as a span with the client name, the operation,
+a target, the duration, a payload size and, on failure, the exception class.
+
+```python
+from redline_core import instrument_client_method
+from redline_core.extending import payload_size
+
+restore = instrument_client_method(
+    acme_sdk.Client,                     # a class (all instances) or one object
+    "put",
+    client="acme",                       # span data["client"]
+    operation="write",                   # a string, or a callable (self, args, kwargs) -> str
+    target=lambda self, args, kwargs: args[0],                      # e.g. the table name
+    payload_bytes=lambda self, args, kwargs: payload_size(args[1]),  # request size
+    result_bytes=payload_size,           # response size, from the return value
+)
+# restore() puts the original method back
+```
+
+| Property | Behaviour |
+|---|---|
+| Span | kind `custom` (override with `kind=`), name `acme write orders`, data `client`, `op`, `target`, `payload_bytes`, `error`, and `result_bytes` when given |
+| Sizes | `payload_size(value)` measures only bytes-like and text values; anything else is `None` rather than serialized to be measured |
+| Errors | the exception class name only, never its message; the exception is re-raised unchanged |
+| Safety | a hook that raises is ignored (the call still runs and is recorded); the target is redacted and capped at 200 characters |
+| Async | coroutine functions are wrapped as coroutines |
+| Idempotent | wrapping an already wrapped method does nothing; the undo function restores the original and does nothing if another patch replaced yours |
+| Cost | outside a traced request, one `ContextVar` read per call |
+
+Use it on instance methods; static and class methods are not supported. For code you cannot
+patch, `client_span` is the context-manager form:
+
+```python
+from redline_core import client_span
+
+with client_span("acme", "scan", target="orders") as info:
+    rows = acme_client.scan("orders")
+    info["payload_bytes"] = len(rows)
+```
+
+The first-party [pymongo, Kafka, pika, Google Cloud Storage and Azure Blob integrations](integrations.md#data-stores-queues-and-object-storage)
+are built on this helper.
 
 ## The `Store` protocol
 

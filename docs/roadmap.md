@@ -15,6 +15,7 @@ promise; production readiness still depends on the [deployment validation gate](
 | 0.3 | **Compare / CI**: refactor checks, endpoint budgets, pytest and source analysis | Released; continued in 0.4 |
 | **0.4** | Real-world SQL failures, jobs, privacy and bounded capture | Development; Compose qualification green, main CI and live deployment pending |
 | 0.5 | Jobs, schema and the remaining report items | Planned; several items already landed in 0.4 |
+| **0.5.0b2** | Full performance testing of a multi-user application: realistic offered load (identities, data feeds, token refresh, flows, think time), spike/soak profiles, resource metrics, raw-SQL capture and fixes, SQL Server permissions, shared-store and remote runs, remote generator agents, streams and WebSockets, full MCP tool set | **Built** on the release branch; live managed-SQL-Server and shared-PostgreSQL qualification pending |
 | 0.6 | OpenTelemetry, more workers, Postgres store and AI policy | Planned; several items already landed in 0.4 |
 | 1.0 | Hardened production mode and the long tail | Planned |
 

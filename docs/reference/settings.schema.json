@@ -3,6 +3,10 @@
   "title": "Redline settings",
   "type": "object",
   "properties": {
+    "accept_remote_runs": {
+      "type": "boolean",
+      "default": false
+    },
     "access": {
       "type": "string",
       "default": "local"
@@ -133,6 +137,11 @@
     "explain_analyze": {
       "type": "boolean",
       "default": false
+    },
+    "explain_url": {
+      "type": "string",
+      "nullable": true,
+      "default": null
     },
     "extra_stores": {
       "type": "array",
@@ -376,6 +385,10 @@
       "type": "number",
       "default": 100.0
     },
+    "run_metrics": {
+      "type": "boolean",
+      "default": true
+    },
     "sample_rate": {
       "type": "number",
       "default": 1.0
@@ -461,6 +474,14 @@
     "ui_enabled": {
       "type": "boolean",
       "default": true
+    },
+    "unattributed_time_ms": {
+      "type": "number",
+      "default": 100.0
+    },
+    "unattributed_time_ratio": {
+      "type": "number",
+      "default": 0.5
     },
     "unbounded_rows": {
       "type": "integer",

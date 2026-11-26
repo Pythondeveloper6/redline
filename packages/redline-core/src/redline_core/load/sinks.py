@@ -26,9 +26,11 @@ from ..redact import MASK
 from .analysis import StepResult
 
 __all__ = [
+    "HttpSink",
     "JsonSink",
     "MemorySink",
     "MultiSink",
+    "RegisterError",
     "RunMeta",
     "RunSink",
     "StoreSink",
@@ -65,27 +67,87 @@ def redact_config(config: Mapping[str, Any], redactor: Any = None) -> dict[str, 
         out["headers"] = headers(out["headers"])
     if isinstance(out.get("base_url"), str):
         out["base_url"] = r.url(out["base_url"])
+
+    def request(item: Any) -> Any:
+        if not isinstance(item, Mapping):
+            return item
+        item = dict(item)
+        if "headers" in item:
+            item["headers"] = headers(item["headers"])
+        if isinstance(item.get("path"), str):
+            item["path"] = r.url(item["path"])
+        if isinstance(item.get("name"), str):  # defaults to "METHOD path"
+            item["name"] = r.text(item["name"])
+        if "json" in item:
+            item["json"] = r.mapping(item["json"])
+        if isinstance(item.get("body"), str):
+            hdrs = item.get("headers")
+            hdrs = hdrs if isinstance(hdrs, Mapping) else {}
+            ctype = next((v for k, v in hdrs.items() if k.lower() == "content-type"), None)
+            item["body"] = r.body(item["body"], ctype)[0]
+        return item
+
     requests = out.get("requests")
     if isinstance(requests, (list, tuple)):
-        items = []
-        for item in requests:
-            if isinstance(item, Mapping):
-                item = dict(item)
-                if "headers" in item:
-                    item["headers"] = headers(item["headers"])
-                if isinstance(item.get("path"), str):
-                    item["path"] = r.url(item["path"])
-                if isinstance(item.get("name"), str):  # defaults to "METHOD path"
-                    item["name"] = r.text(item["name"])
-                if "json" in item:
-                    item["json"] = r.mapping(item["json"])
-                if isinstance(item.get("body"), str):
-                    hdrs = item.get("headers")
-                    hdrs = hdrs if isinstance(hdrs, Mapping) else {}
-                    ctype = next((v for k, v in hdrs.items() if k.lower() == "content-type"), None)
-                    item["body"] = r.body(item["body"], ctype)[0]
-            items.append(item)
-        out["requests"] = items
+        out["requests"] = [request(item) for item in requests]
+    flows = out.get("flows")
+    if isinstance(flows, (list, tuple)):
+        out["flows"] = [
+            {**f, "steps": [request(s) for s in f.get("steps", ())]}
+            if isinstance(f, Mapping)
+            else f
+            for f in flows
+        ]
+    for table in (out.get("auth"),):
+        request = table.get("request") if isinstance(table, Mapping) else None
+        if isinstance(request, Mapping):
+            for key in ("path", "base_url"):  # a token or userinfo can sit in the URL
+                if isinstance(request.get(key), str):
+                    request = {**request, key: r.url(request[key])}
+            table = {**table, "request": request}
+            out["auth"] = table
+    for req in [
+        *(out.get("requests") or ()),
+        *(s for f in out.get("flows") or () for s in f.get("steps", ())),
+    ]:
+        if isinstance(req, dict) and isinstance(req.get("messages"), list):
+            req["messages"] = [
+                r.text(m) if isinstance(m, str) else r.mapping(m) if isinstance(m, Mapping) else m
+                for m in req["messages"]
+            ]
+    identities = out.get("identities")
+    if isinstance(identities, (list, tuple)):
+        # identity headers and cookies are credentials by nature: keep only the names
+        out["identities"] = [
+            {
+                **{k: v for k, v in i.items() if k not in ("headers", "cookies")},
+                **{
+                    key: dict.fromkeys(i[key], MASK)
+                    for key in ("headers", "cookies")
+                    if isinstance(i.get(key), Mapping)
+                },
+            }
+            if isinstance(i, Mapping)
+            else i
+            for i in identities
+        ]
+    auth = out.get("auth")
+    if isinstance(auth, Mapping):
+        auth = dict(auth)
+        command = auth.get("command")
+        if isinstance(command, (list, tuple)) and command:
+            auth["command"] = [command[0], *([MASK] if len(command) > 1 else [])]
+        request = auth.get("request")
+        if isinstance(request, Mapping):
+            request = dict(request)
+            if "headers" in request:
+                request["headers"] = headers(request["headers"])
+            if "json" in request:
+                request["json"] = r.mapping(request["json"])
+            if isinstance(request.get("body"), str):
+                request["body"] = MASK
+            auth["request"] = request
+        out["auth"] = auth
     return out
 
 
@@ -224,6 +286,28 @@ class StoreSink:
     def step(self, run_id: str, step: StepResult) -> None:
         self.store.save_run_step(run_id, self.step_row(step))
 
+    def save_metrics(self, run_id: str, step: int, values: dict[str, float], ts: float) -> None:
+        self.store.save_run_metrics(run_id, step, values, pid=0, ts=ts)
+
+    def resource_report(self, run_id: str, knee_step: int | None) -> dict[str, Any] | None:
+        """Per-step resource metrics the application sampled, and the limiting resource."""
+        from ..run_metrics import aggregate, limiting_resource
+
+        samples = getattr(self.store, "run_metric_samples", None)
+        if not callable(samples):
+            return None
+        per_step = aggregate(samples(run_id))
+        if not per_step:
+            return None
+        return {"steps": per_step, "limiting_resource": limiting_resource(per_step, knee_step)}
+
+    def has_run_trace(self, run_id: str) -> bool:
+        """Whether a trace tagged with this run is in the store (the recording probe)."""
+        from ..storage.base import Filters
+
+        page = self.store.list(Filters(tag=("run_id", run_id)), limit=1)
+        return bool(page.items)
+
     def finish(self, run_id: str, status: str, summary: dict[str, Any]) -> None:
         try:
             self.store.finish_run(run_id, status, summary)
@@ -266,8 +350,166 @@ class MultiSink:
     def start(self, meta: RunMeta) -> None:
         self._each("start", meta)
 
+    def save_metrics(self, run_id: str, step: int, values: dict[str, float], ts: float) -> None:
+        for sink in self.sinks:
+            if callable(getattr(sink, "save_metrics", None)):
+                try:
+                    sink.save_metrics(run_id, step, values, ts)
+                except Exception:
+                    log.exception("redline load: %s.save_metrics failed", type(sink).__name__)
+
+    def resource_report(self, run_id: str, knee_step: int | None) -> dict[str, Any] | None:
+        """The first sink's answer: sinks that cannot hold metrics are skipped."""
+        for sink in self.sinks:
+            method = getattr(sink, "resource_report", None)
+            if not callable(method):
+                continue
+            try:
+                report = method(run_id, knee_step)
+            except Exception:
+                log.exception("redline load: %s.resource_report failed", type(sink).__name__)
+                continue
+            if report:
+                return report  # type: ignore[no-any-return]
+        return None
+
     def step(self, run_id: str, step: StepResult) -> None:
         self._each("step", run_id, step)
 
     def finish(self, run_id: str, status: str, summary: dict[str, Any]) -> None:
         self._each("finish", run_id, status, summary)
+
+
+def _mask_userinfo(url: str) -> str:
+    from ..storage.postgres import mask_url
+
+    return mask_url(url)
+
+
+class RegisterError(RuntimeError):
+    """The application refused or could not be reached for a remote run registration."""
+
+
+class HttpSink:
+    """Registers the run with the application over HTTP instead of writing a store.
+
+    For a generator on another host (or an application in a container) with no shared
+    store. The application must run with ``accept_remote_runs`` on; ``base`` is where its
+    Redline UI is mounted (``https://app.example/_redline``) and ``token`` is the Redline
+    access token. The token goes only in the ``Authorization`` header and is never logged.
+    """
+
+    def __init__(
+        self,
+        base: str,
+        token: str | None = None,
+        *,
+        client: Any = None,
+        timeout: float = 10.0,
+    ) -> None:
+        self.base = base.rstrip("/")
+        self._shown = _mask_userinfo(self.base)
+        self._token = token
+        if client is None:
+            import httpx
+
+            client = httpx.Client(timeout=timeout)
+        self._client = client
+
+    def _call(self, method: str, path: str, body: Mapping[str, Any] | None = None) -> Any:
+        headers = {"Authorization": f"Bearer {self._token}"} if self._token else {}
+        try:
+            response = self._client.request(
+                method, f"{self.base}/{path}", json=body, headers=headers
+            )
+        except Exception as exc:
+            raise RegisterError(
+                f"cannot reach the application at {self._shown}: {type(exc).__name__}"
+            ) from None
+        if response.status_code >= 400:
+            code = ""
+            try:
+                code = response.json().get("error", {}).get("code", "")
+            except Exception:
+                pass
+            hint = {
+                "remote_runs_disabled": " (turn on the accept_remote_runs setting)",
+                "read_only": " (the application is read-only)",
+                "feature_disabled": " (the load feature is switched off)",
+            }.get(code, "")
+            raise RegisterError(
+                f"the application answered HTTP {response.status_code} {code}".rstrip() + hint
+            )
+        return response
+
+    def preflight(self) -> None:
+        """Fail early: the application is reachable and accepts this token."""
+        response = self._call("GET", "api/meta")
+        try:
+            meta = response.json()
+        except Exception:
+            meta = None
+        if not isinstance(meta, Mapping) or "version" not in meta:
+            raise RegisterError(
+                f"{self._shown} does not look like a Redline mount (api/meta has no version)"
+            )
+
+    def has_run_trace(self, run_id: str) -> bool:
+        """Whether the application holds a trace tagged with this run (the recording probe)."""
+        from urllib.parse import quote
+
+        response = self._call("GET", f"api/traces?tag=run_id:{quote(run_id, safe='')}&limit=1")
+        data = response.json()
+        return bool(isinstance(data, Mapping) and data.get("items"))
+
+    def save_metrics(self, run_id: str, step: int, values: dict[str, float], ts: float) -> None:
+        self._call("POST", f"api/runs/{run_id}/metrics", {"step": step, "values": values, "ts": ts})
+
+    def resource_report(self, run_id: str, knee_step: int | None) -> dict[str, Any] | None:
+        data = self._call("GET", f"api/runs/{run_id}/metrics").json()
+        if not isinstance(data, Mapping) or not data.get("steps"):
+            return None
+        return {"steps": data["steps"], "limiting_resource": data.get("limiting_resource")}
+
+    def start(self, meta: RunMeta) -> None:
+        row = meta.to_dict()
+        self._call(
+            "POST",
+            "api/runs/register",
+            {
+                "id": row["id"],
+                "name": row.get("name") or "",
+                "created_at": row["created_at"],
+                "config": row.get("config") or {},
+            },
+        )
+
+    def step(self, run_id: str, step: StepResult) -> None:
+        import base64
+
+        row = StoreSink.step_row(step)
+        self._call(
+            "POST",
+            f"api/runs/{run_id}/steps",
+            {
+                "step": row.step,
+                "target_rps": row.target_rps,
+                "started_at": row.started_at,
+                "ended_at": row.ended_at,
+                "achieved_rps": row.achieved_rps,
+                "sent": row.sent,
+                "ok": row.ok,
+                "errors": row.errors,
+                "dropped": row.dropped,
+                "hist": base64.b64encode(row.hist.to_bytes()).decode("ascii"),
+                "error_breakdown": row.error_breakdown,
+            },
+        )
+
+    def finish(self, run_id: str, status: str, summary: dict[str, Any]) -> None:
+        try:
+            self._call("POST", f"api/runs/{run_id}/finish", {"status": status, "summary": summary})
+        finally:
+            close = getattr(self._client, "close", None)
+            if callable(close):
+                close()

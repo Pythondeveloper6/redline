@@ -8,7 +8,160 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). While the
 version is below `1.0` the public API may change between minor versions.
 
-## Unreleased: 0.5.0b1
+## 0.5.0b2 (2026-11-26)
+
+### Added
+
+- `redline load init` ends a TOML scenario with a commented-out example of the optional
+  keys (`[auth]`, `[[flows]]`, `extract`, `expect`, `max_ms`, `think_s`, `own_connection`).
+  Uncomment a line to use that key.
+- `redline instrumentation` lists each loaded raw DB-API driver as `dbapi:<driver>` and shows
+  whether `instrument_dbapi` wraps it, so raw-cursor SQL that is not recorded shows up as a
+  blind spot. These rows never trigger the auto-instrument warning.
+- `instrument_client_method` (and its context-manager form `client_span`) wraps one method
+  of any client as a client span, recording kind, operation, target, duration, payload size
+  and error. New opt-in integrations built on it: pymongo, Kafka (`kafka`), pika, Google Cloud
+  Storage and Azure Blob Storage. `auto_instrument` covers them.
+- An `unattributed_time` detector flags a web request when no span covers at least
+  `unattributed_time_ms` (100 ms) and at least `unattributed_time_ratio` (half) of its time.
+  On a load run, that uncovered time appears as an `other` row in the bottleneck table.
+- `redline_core.contrib.threads.instrument_threads()` runs `ThreadPoolExecutor.submit` (so
+  `map` and `run_in_executor`) and `Thread.start` in a copy of the request's context. Their
+  SQL and outbound calls stay under the request, and each span carries the thread name in
+  `span.data["thread"]`. Opt-in only; `uninstrument_threads()` undoes it.
+- Load runs can span several generator hosts. `redline load agent` runs workers for a
+  controller (`redline load ... --agents https://gen1:7700,https://gen2:7700`); the controller
+  sends each agent its share of one global step plan and a shared start time (clock offsets are
+  measured), merges the agents' per-second histograms exactly like local workers', and reports
+  generator CPU per step, marking a step `generator_limited` when a worker was above 90% of a
+  core. Agents need a token, support TLS and target allow-lists, and never run a token command.
+- A flow can model a user: `think_s` (a number or `[min, max]` range) pauses between its steps
+  and `own_connection` gives each session its own connection. Each step reports the peak number
+  of sessions in flight, so 20 arrivals per second with 5 s of think time shows about 100.
+- Load requests are timed to the first byte as well as the last (`ttfb_p50_ms` / `ttfb_p95_ms`
+  per step and in the summary). `type = "stream"` holds a server-sent-events or chunked response
+  open for `hold_s` and counts events; `type = "websocket"` (extra `redline-core[load-websocket]`)
+  connects, sends scripted messages, times the replies and holds the connection. Each step
+  reports how many were open at once. Browser traffic can be grouped per page load with a
+  `page=<id>` part in `X-Redline-Run` (`GET api/runs/{id}/pages`).
+- The MCP server (`redline mcp`) now covers the whole package, so an agent can run a full
+  performance investigation. New tools: `list_load_runs`, `get_load_run`, `load_run_summary`
+  (flows, recovery, drift, identities, limiting resource, resources), `load_run_bottlenecks`,
+  `load_run_metrics`; `validate_scenario` and `generate_scenario_from_openapi` / `_traces` /
+  `_stages` (scenarios are parsed or built, never run); `analyze_sql_plan` (a pasted SQL Server
+  plan), `database_capabilities`, `lint_sql`, `scan_sql_source`, `scan_sql_project`,
+  `analyze_source`, `analyze_project`, `doctor`, `check_report`, `check_findings`, `fix_prompt`,
+  `diagnose_preview`; and `list_traces`, `list_endpoints`, `compare_traces`, `search_sql`,
+  `index_advice`, `cache_summary`, `external_summary`, `job_summary`, `history`,
+  `compare_periods`, `list_releases`.
+- Tools that change state are opt-in: `start_load_run` and `stop_load_run` need
+  `redline mcp --allow-load --load-target URL` (the target is fixed by the operator and one run
+  at a time is allowed), `delete_load_run` needs `--allow-delete-runs`. Without the flags they
+  are neither listed nor callable.
+- MCP tool arguments are checked against each tool's JSON schema (types, enums, ranges,
+  lengths); results are bounded, and credentials in URLs, token-like values, header, cookie and
+  identity values are masked.
+- A load run reports which resource ran out. While a registered run sends it traffic, each app
+  worker samples its own CPU, memory, GC pauses, threads and connection pool once a second
+  (`run_metrics`, off in the `production` preset); the run summary carries `resources` per
+  step and a `limiting_resource` verdict ("connection pool exhausted (5/5 checked out), wait
+  time 40x"), printed by the CLI and served by `GET api/runs/{id}/metrics`. `metric_sources`
+  (`package.module:function`) pull in numbers from a database or host monitor per step.
+- A `stages` load profile (`--stages 10:1m,200:30s,10:3m`) describes spikes, soaks and any
+  custom shape. A step where the rate falls no longer decides the knee; the run summary reports
+  how long p95 took to return to its pre-spike level (`recovery`) and checks long steps for
+  slow growth in p95 and error rate (`drift`, `drift_verdict` of `stable` or `degrading`).
+- SQL Server plan and index tools check their permissions first. A one-time probe reports
+  `estimated_plan`, `actual_plan`, `index_usage` and `object_definitions` as granted, missing
+  (with the exact `GRANT`) or unknown (`GET api/database/capabilities`, `redline doctor`);
+  a plan request that hits a missing permission answers `403 explain_permission` with the
+  grant instead of a raw driver error. The new `explain_url` setting runs plans on a separate
+  login, `POST api/explain/plan` analyses a pasted XML plan without touching a database, and
+  index suggestions list their evidence and lose a confidence level when catalog visibility
+  is partial. Managed-instance differences are documented.
+- N+1 findings in raw SQL (`text()` or driver SQL) get a real rewrite instead of a hint: a diff
+  at the callsite that replaces the per-row SELECT with one `IN` query over all the keys,
+  chunked to the database's parameter limit (stated per vendor) and grouped back by the key,
+  with the join alternative named when the parent query is in the trace. Dynamic statements get
+  the batched statement as a code block.
+- Load scenarios can run journeys and check responses. `[[flows]]` chain requests: a step
+  `extract`s a value (a JSON path, a header or a regular expression) and later steps use it as
+  `{var:name}`; one arrival starts one flow, a failed step ends it and counts once, and the
+  run summary and CLI report each flow and step (traces carry `flow` and `fstep` tags).
+  `expect` rules and `max_ms` on any request turn a `200` with an error body, an empty list or
+  a slow success into an `assertion` failure instead of a success.
+- `GET api/runs/{id}/bottlenecks?identity=NAME` splits the bottleneck table per load identity.
+- Load scenarios can vary the offered load. `identities` / `identities_file` give many users
+  (`round_robin`, `random` or `sticky`, `${VAR}` for secrets, only the name is recorded as the
+  `identity` trace tag and in the run summary); `[[data]]` files fill `{data:source.column}`
+  in paths, headers and bodies (`sequential`, `random` or `zipf`); `[auth]` gets a token from a
+  command, a request or a Python callable and refreshes it before it expires, stopping the run
+  with a clear error when a refresh fails. Every key is optional, so existing scenarios run
+  unchanged, and `redline load init` writes them (`--data-dir`, `--identities-file`).
+- `redline load --store-url postgresql://...` writes the run to the shared PostgreSQL store,
+  and the project's `storage_url` setting is used when `--store` is not given, so a load
+  generator on another host fills the same bottleneck table as the application. The URL's
+  password is never printed.
+- Requests tagged with a registered, running load run are kept even when `sample_rate`
+  would drop them (`sampled_by="run"`), so low-rate steps still fill the bottleneck table. A
+  made-up run id keeps nothing.
+- `redline load` can check, before the first step, that the application records the run:
+  one tagged `GET` (`step=probe`) and a lookup of its trace, with the likely causes when
+  nothing appears. On by default with `--store-url` / `--register-url` (warns), opt-in with
+  `--probe` for a file store so existing runs send no extra request; `--require-recording`
+  stops the run, `--no-probe` skips it.
+- Load runs started from the UI work on the shared PostgreSQL store. The background process
+  gets the URL through the environment, and stopping a run whose process is gone closes it
+  as `failed`.
+- A generator with no shared store registers its run over HTTP:
+  `redline load --register-url https://app/_redline` (token from `REDLINE_TOKEN` or
+  `--token-file`). The application accepts it only with the new `accept_remote_runs` setting
+  (off by default and in every preset) through `POST api/runs/register`, `.../steps` and
+  `.../finish`; it re-masks the config, validates every field, and only a run registered
+  this way can be changed this way (never a run written by a local process).
+- SQL sent through a raw driver cursor is recorded. `engine.raw_connection().cursor()` on an
+  instrumented SQLAlchemy engine returns a recording proxy, and
+  `redline_core.contrib.dbapi.instrument_dbapi(module)` does the same for a driver used with
+  no engine (`sqlite3`, `psycopg2`, `pymysql` ...). Spans carry `source="raw_cursor"`;
+  an `executemany` is one span with a `batch_size`. SQLAlchemy's own use of
+  `raw_connection` is not double-counted.
+
+### Security
+
+Findings of the security review of this release, all fixed in the same branch with regression
+tests:
+
+- MCP `start_load_run` now accepts only an allow-list of scenario keys. It previously refused
+  only some local-only keys, so `auth` (a command or Python token provider), `identities` and
+  `flows` could reach the detached load process.
+- A remote agent no longer trusts a worker config beyond what it documents: unknown keys are
+  refused; data must be inline rows (no file read); identities must be resolved (no `${VAR}`
+  environment expansion on the agent); the token endpoint is checked like the target; sizes
+  are bounded.
+- Agent target checks resolve names and check every address (decimal and hex IPs, trailing
+  dots, IPv4-mapped IPv6, `fd00:ec2::/32`, DNS names pointing at metadata services), and
+  `--allow-target` matches scheme, host and port exactly on a path boundary (no
+  `http://app.internal.evil.com` or `http://app.internal@evil.com`). Agent tokens need 16
+  characters, connections time out, and a hostile body is a 400, not a crash.
+- Histogram decoding is bounded (a small zlib bomb sent to `POST api/runs/{id}/steps` could
+  inflate to hundreds of MB and spin for seconds); buckets must be strictly increasing.
+- An invented `X-Redline-Run` id is no longer queued as a provisional trace nor looked up in
+  the store: the recorder asks a cached known-runs set.
+- Remote registration is bounded: at most 50 running registered runs, step numbers up to 1000,
+  and metrics only for a run that is still running.
+- Secrets: `explain_url` and other URLs mask `odbc_connect`, `pwd`, `uid` and `password` query
+  values; the stored run config masks the token endpoint URL and WebSocket messages; generator
+  errors and the "open the run" line hide URL credentials; the CLI warns about plain `http`
+  to a non-loopback agent or registration URL.
+- MCP report tools read only files inside the working directory, and scenario validation
+  errors no longer echo the offending value.
+- `GET api/database/capabilities` follows the `explain` feature switch, validates the alias
+  and bounds its cache.
+- A run registered over HTTP is no longer marked failed by the dead-process check on stores
+  that once launched a UI run.
+- A stray `.bak` file was removed from the package source.
+
+## 0.5.0b1 (2026-11-12)
 
 The project moves from alpha to beta.
 
@@ -50,6 +203,29 @@ The project moves from alpha to beta.
   (settings `ai_diagnosis`, `ai_provider`, `ai_model`).
 - The FastAPI demo gains `GET /assistant` (LLM-call findings without a key or network), a
   `.mcp.json` and an `AGENTS.md`.
+- `instrument_client_method` and `client_span` (`redline_core`, `redline_core.extending`) record a
+  call to any client library as a span with client, operation, target, duration, payload size
+  and error class, so a database, queue or storage client without an integration is no longer
+  invisible. See "Instrumenting a client" in `docs/extending.md`.
+- First-party, opt-in integrations built on it: `instrument_pymongo()`, `instrument_kafka()`
+  (kafka-python `KafkaProducer.send`), `instrument_pika()` (`basic_publish`),
+  `instrument_google_cloud_storage()` and `instrument_azure_blob()`. Each imports its library
+  lazily, returns `False` when it is missing, never records payloads, object names or error
+  messages, and is covered by `auto_instrument` and `redline instrumentation`.
+- New finding `unattributed_time`: a Django, FastAPI, Flask or Litestar request with at least
+  `unattributed_time_ratio` (default 0.5) of its time, and at least `unattributed_time_ms`
+  (default 100), covered by no span. It names the profiler's project frame when the trace has a
+  profile. Wrapper spans (`view`, `middleware`, `transaction`) do not count as coverage; jobs and
+  traces with dropped spans are skipped.
+- Load runs: `api/runs/{id}/bottlenecks` gains an item of kind `other` (key `other:uncovered`)
+  with the per-request time no span covers, per step. Existing `sql` and `route` items are
+  unchanged.
+- `instrument_threads()` (opt-in, reversible with `uninstrument_threads()`, idempotent) copies the
+  request context into `ThreadPoolExecutor.submit` and `Thread.start` work. SQL and other spans
+  recorded on worker threads stay under the request and carry the thread name in
+  `span.data["thread"]`; spans from concurrent threads are recorded safely. Work that outlives
+  the request is not recorded. Listed as `threads` in `redline instrumentation`, never enabled by
+  `auto_instrument`.
 
 ### Changed
 

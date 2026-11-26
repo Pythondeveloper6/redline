@@ -1220,6 +1220,13 @@
         },
         {
           "name": [
+            "--stages"
+          ],
+          "required": false,
+          "help": "ordered stages, e.g. 10:30s,200:20s,10:60s for a spike (rps 0 pauses)"
+        },
+        {
+          "name": [
             "--duration"
           ],
           "required": false,
@@ -1245,6 +1252,27 @@
           ],
           "required": false,
           "help": "worker processes (default \u2264 8)"
+        },
+        {
+          "name": [
+            "--agents"
+          ],
+          "required": false,
+          "help": "run workers on remote `redline load agent` hosts (https://host:7700,...); the controller then runs no workers itself unless --workers is given"
+        },
+        {
+          "name": [
+            "--agent-token-file"
+          ],
+          "required": false,
+          "help": "file holding the agents' token (else REDLINE_AGENT_TOKEN)"
+        },
+        {
+          "name": [
+            "--agent-ca"
+          ],
+          "required": false,
+          "help": "CA bundle to verify the agents' TLS certificates"
         },
         {
           "name": [
@@ -1276,10 +1304,59 @@
         },
         {
           "name": [
+            "--store-url"
+          ],
+          "required": false,
+          "help": "write the run to a shared PostgreSQL store (postgresql://...) instead of a file; also taken from the project's storage_url setting when --store is not given"
+        },
+        {
+          "name": [
+            "--register-url"
+          ],
+          "required": false,
+          "help": "register the run with the application over HTTP (its Redline mount, e.g. https://app.example/_redline) when no store is shared; the application needs accept_remote_runs. The access token is read from REDLINE_TOKEN or --token-file"
+        },
+        {
+          "name": [
+            "--token-file"
+          ],
+          "required": false,
+          "help": "file holding the Redline access token (one line)"
+        },
+        {
+          "name": [
             "--no-store"
           ],
           "required": false,
           "help": "do not write to the store"
+        },
+        {
+          "name": [
+            "--probe"
+          ],
+          "required": false,
+          "help": "send one tagged GET before the run and warn when the application does not record it (on by default with --store-url or --register-url)"
+        },
+        {
+          "name": [
+            "--no-probe"
+          ],
+          "required": false,
+          "help": "skip the recording probe"
+        },
+        {
+          "name": [
+            "--require-recording"
+          ],
+          "required": false,
+          "help": "stop the run when the application does not record the probe request (default: only warn)"
+        },
+        {
+          "name": [
+            "--probe-timeout"
+          ],
+          "required": false,
+          "help": "how long to wait for the probe trace"
         },
         {
           "name": [
@@ -1319,6 +1396,54 @@
         }
       ],
       "subcommands": [
+        {
+          "command": "redline load agent",
+          "help": "run a remote load generator for a controller",
+          "arguments": [
+            {
+              "name": [
+                "--listen"
+              ],
+              "required": false,
+              "help": "address to listen on (default 127.0.0.1:7700; use 0.0.0.0 only on a private network)"
+            },
+            {
+              "name": [
+                "--token-file"
+              ],
+              "required": false,
+              "help": "file holding the bearer token controllers must send (else REDLINE_AGENT_TOKEN)"
+            },
+            {
+              "name": [
+                "--max-workers"
+              ],
+              "required": false,
+              "help": "worker processes (default \u2264 8)"
+            },
+            {
+              "name": [
+                "--allow-target"
+              ],
+              "required": false,
+              "help": "only generate load against URLs starting with this (repeatable)"
+            },
+            {
+              "name": [
+                "--cert"
+              ],
+              "required": false,
+              "help": "serve HTTPS with this certificate"
+            },
+            {
+              "name": [
+                "--key"
+              ],
+              "required": false,
+              "help": "private key for --cert"
+            }
+          ]
+        },
         {
           "command": "redline load init",
           "help": "write a scenario file",
@@ -1374,6 +1499,34 @@
             },
             {
               "name": [
+                "--data-dir"
+              ],
+              "required": false,
+              "help": "with --from-traces: write the distinct paths seen per endpoint as CSV files here and use them as zipf data sources instead of one sample path"
+            },
+            {
+              "name": [
+                "--stages"
+              ],
+              "required": false,
+              "help": "write a stages profile, e.g. 10:30s,200:20s,10:60s for a spike"
+            },
+            {
+              "name": [
+                "--identities-file"
+              ],
+              "required": false,
+              "help": "add identities_file to the scenario (CSV: name, header:<Name>, cookie:<name>)"
+            },
+            {
+              "name": [
+                "--identity-mode"
+              ],
+              "required": false,
+              "help": "with --identities-file: how identities are picked (default round_robin)"
+            },
+            {
+              "name": [
                 "-o",
                 "--out"
               ],
@@ -1408,6 +1561,27 @@
           ],
           "required": false,
           "help": "append a JSONL record of each tool call"
+        },
+        {
+          "name": [
+            "--allow-load"
+          ],
+          "required": false,
+          "help": "also offer start_load_run and stop_load_run (sends real traffic to --load-target)"
+        },
+        {
+          "name": [
+            "--load-target"
+          ],
+          "required": false,
+          "help": "the only URL a started load run may target (required with --allow-load)"
+        },
+        {
+          "name": [
+            "--allow-delete-runs"
+          ],
+          "required": false,
+          "help": "also offer delete_load_run (removes a finished run from the store)"
         }
       ]
     },

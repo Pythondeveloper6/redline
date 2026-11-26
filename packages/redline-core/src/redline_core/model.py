@@ -97,6 +97,7 @@ IssueKind = Literal[
     "many_orm_instances",
     "json_decode_hotspot",
     "slow_cache_decode",
+    "unattributed_time",
 ]
 Severity = Literal["info", "warning", "critical"]
 Framework = Literal["django", "fastapi", "flask", "litestar", "other"]
@@ -157,6 +158,7 @@ ISSUE_KINDS: tuple[str, ...] = (
     "many_orm_instances",
     "json_decode_hotspot",
     "slow_cache_decode",
+    "unattributed_time",
 )
 SEVERITIES: tuple[str, ...] = ("info", "warning", "critical")
 FRAMEWORKS: tuple[str, ...] = ("django", "fastapi", "flask", "litestar", "other")

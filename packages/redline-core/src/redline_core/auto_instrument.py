@@ -17,7 +17,17 @@ from .integration_status import integration_status
 logger = logging.getLogger("redline")
 
 #: Integrations with a process-wide ``instrument_<name>()`` and no required arguments.
-AUTO_INTEGRATIONS: tuple[str, ...] = ("httpx", "requests", "redis", "boto3")
+AUTO_INTEGRATIONS: tuple[str, ...] = (
+    "httpx",
+    "requests",
+    "redis",
+    "boto3",
+    "pymongo",
+    "kafka",
+    "pika",
+    "google_cloud_storage",
+    "azure_blob",
+)
 
 _warned: set[tuple[str, ...]] = set()
 

@@ -612,7 +612,11 @@ def _ordered_columns(req: Requirement, col_weight: Mapping[tuple[str, str], floa
 
 
 def select_indexes(
-    queries: Sequence[_Query], *, limit: int = MAX_SUGGESTIONS, verified: Mapping[str, bool]
+    queries: Sequence[_Query],
+    *,
+    limit: int = MAX_SUGGESTIONS,
+    verified: Mapping[str, bool],
+    partial: Mapping[str, bool] | None = None,
 ) -> list[dict[str, Any]]:
     """Greedy weighted set cover over the queries' requirements."""
     col_weight: dict[tuple[str, str], float] = {}
@@ -657,7 +661,7 @@ def select_indexes(
         if best_cand is None:
             break
         uncovered -= set(best_units)
-        chosen.append(_candidate(best_cand, best_units, queries, verified))
+        chosen.append(_candidate(best_cand, best_units, queries, verified, partial or {}))
     return chosen
 
 
@@ -666,6 +670,7 @@ def _candidate(
     units: list[tuple[int, int]],
     queries: Sequence[_Query],
     verified: Mapping[str, bool],
+    partial: Mapping[str, bool] | None = None,
 ) -> dict[str, Any]:
     table, cols, kind, vendor = cand
     fps: list[str] = []
@@ -695,6 +700,22 @@ def _candidate(
         confidence = "medium"
     else:
         confidence = "low"
+    evidence = [f"workload: {executions} executions, {round(total_ms, 1)} ms in the window"]
+    if "scan" in states:
+        evidence.append("plan: a scan of this table was seen")
+    elif "indexed" in states:
+        evidence.append("plan: the table was already read through an index")
+    else:
+        evidence.append("plan: not explained, so no scan was confirmed")
+    evidence.append(
+        "catalog: existing indexes read"
+        if verified.get(vendor)
+        else "catalog: existing indexes could not be read, so this may already be covered"
+    )
+    if (partial or {}).get(vendor):
+        # a login that cannot see every object may be missing an index that already exists
+        confidence = {"high": "medium", "medium": "low"}.get(confidence, "low")
+        evidence.append("catalog visibility is partial (a needed permission is missing)")
     return {
         "table": table,
         "columns": list(cols),
@@ -709,6 +730,7 @@ def _candidate(
         "verified": bool(verified.get(vendor)),
         "explained": "scan" in states or "indexed" in states,
         "note": _TEXT_NOTE.get(kind),
+        "evidence": evidence,
     }
 
 
@@ -822,6 +844,15 @@ def advise(
             verified[vendor] = True
         except Exception:
             logger.debug("Redline: catalog read failed for %s", vendor, exc_info=True)
+    capabilities: dict[str, Any] | None = None
+    partial: dict[str, bool] = {}
+    if "mssql" in vendors:
+        ex = executor_for("mssql")
+        if ex is not None:
+            from .database_capabilities import capabilities_for, partial_visibility
+
+            capabilities = capabilities_for(db, ex, "mssql")
+            partial["mssql"] = partial_visibility(capabilities)
     already = 0
     for q in queries:
         cat = catalogs.get(q.vendor)
@@ -851,7 +882,7 @@ def advise(
         explained += 1
         q.scanned = _scanned_tables(result.tree, {r.table for r in q.requirements})
 
-    candidates = select_indexes(queries, limit=limit, verified=verified)
+    candidates = select_indexes(queries, limit=limit, verified=verified, partial=partial)
 
     # unused indexes (PostgreSQL and SQL Server)
     unused: list[dict[str, Any]] = []
@@ -875,12 +906,35 @@ def advise(
             try:
                 unused = unused_indexes(ex, target)
                 unused_supported = True
+                if target == "mssql":
+                    from .database_capabilities import USAGE_NOTE
+
+                    usage_missing = bool(
+                        capabilities
+                        and capabilities.get("capabilities", {})
+                        .get("index_usage", {})
+                        .get("status")
+                        == "missing"
+                    )
+                    for item in unused:
+                        item["confidence"] = "low" if usage_missing else "medium"
+                        item["evidence"] = [
+                            "no seeks, scans or lookups in sys.dm_db_index_usage_stats",
+                            USAGE_NOTE,
+                        ]
             except Exception as exc:
                 if main_vendor is not None:
-                    unused_error = {
-                        "code": "explain_failed",
-                        "message": f"{type(exc).__name__}: {exc}",
-                    }
+                    from .database_capabilities import permission_hint
+
+                    hint = permission_hint(exc) if target == "mssql" else None
+                    unused_error = (
+                        {"code": "explain_permission", "message": hint["message"]}
+                        if hint
+                        else {
+                            "code": "explain_failed",
+                            "message": f"{type(exc).__name__}: {exc}",
+                        }
+                    )
 
     return {
         "db": db,
@@ -889,6 +943,7 @@ def advise(
         "unused": unused,
         "unused_supported": unused_supported,
         "unused_error": unused_error,
+        "capabilities": capabilities,
         "verified": bool(verified) and all(verified.get(v) for v in vendors if v in _TEXT_KIND),
         "queries_analyzed": analyzed,
         "already_indexed": already,

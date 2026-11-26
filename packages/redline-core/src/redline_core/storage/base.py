@@ -494,8 +494,9 @@ class IssueIndexEntry:
 class Bottlenecks:
     """``GET api/runs/{id}/bottlenecks``: what grew as the load stepped up.
 
-    ``items``: ``{key, kind: "sql" | "route", label, callsite, per_step: [{step, mean_ms,
-    p95_ms, count}], growth}`` sorted by ``growth`` (last step's mean / first step's mean).
+    ``items``: ``{key, kind: "sql" | "route" | "other", label, callsite, per_step: [{step,
+    mean_ms, p95_ms, count}], growth}`` sorted by ``growth`` (last step's mean / first step's
+    mean). ``"other"`` (at most one item) is the request time that no span covers.
     """
 
     steps: builtins.list[dict[str, Any]]

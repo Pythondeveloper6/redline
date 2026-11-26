@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -176,6 +177,23 @@ def test_init_from_openapi(tmp_path, capsys):
     assert all(r.method == "GET" for r in sc.requests)
     # existing file is not overwritten without --force
     assert cli.main(["load", "init", "--from-openapi", str(spec), "-o", str(out)]) == 2
+
+
+@pytest.mark.skipif(sys.version_info < (3, 11), reason="tomllib")
+def test_init_writes_optional_keys_that_parse_once_uncommented(tmp_path, capsys):
+    spec = tmp_path / "openapi.json"
+    spec.write_text(json.dumps(OPENAPI))
+    out = tmp_path / "scenario.toml"
+    assert cli.main(["load", "init", "--from-openapi", str(spec), "-o", str(out)]) == 0
+    text = out.read_text()
+    assert "# [auth]" in text and "# [[flows]]" in text
+    uncommented = re.sub(r"(?m)^# (?=[\[a-z])", "", text)
+    out.write_text(uncommented)
+    sc = load_scenario(out)
+    assert sc.auth is not None and sc.auth.refresh_before_s == 30
+    (flow,) = sc.flows
+    assert [s.path for s in flow.steps] == ["/items", "/items/{var:id}"]
+    assert flow.steps[1].max_ms == 500
 
 
 def test_init_from_openapi_with_writes_to_stdout(tmp_path, capsys):
@@ -473,3 +491,180 @@ def test_import_redline_core_does_not_import_the_load_tester():
     )
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
     assert out.stdout.strip() == "ok"
+
+
+# ---------------------------------------------------------------------------- shared store
+PG_URL = "postgresql://redline:s3cret-pw@db.internal:5432/obs"
+
+
+def test_store_url_must_be_postgres(tmp_path, capsys):
+    sc = write_scenario(tmp_path, "http://127.0.0.1:1")
+    assert cli.main(["load", sc, "--store-url", "mysql://x/y"]) == 2
+    assert "postgresql://" in capsys.readouterr().err
+
+
+def test_store_url_failure_never_prints_the_password(tmp_path, capsys, monkeypatch):
+    opened = []
+
+    def boom(target):
+        opened.append(target)
+        raise RuntimeError(f"cannot connect to {target}")
+
+    monkeypatch.setattr(cli, "_open_run_store", boom)
+    monkeypatch.chdir(tmp_path)
+    sc = write_scenario(tmp_path, "http://127.0.0.1:1")
+    cli.main(["load", sc, "--store-url", PG_URL, "--rps", "1", "--duration", "1s", "-q"])
+    captured = capsys.readouterr()
+    assert opened[0] == PG_URL
+    assert "s3cret-pw" not in captured.out + captured.err
+    assert "db.internal" in captured.err  # the masked URL still says where
+
+
+def test_store_url_run_lands_in_the_given_store(tmp_path, monkeypatch, http_server):
+    _, url = http_server
+    db = str(tmp_path / "shared.db")
+    monkeypatch.setattr(cli, "_open_run_store", lambda target: SQLiteStore(db, background=False))
+    monkeypatch.chdir(tmp_path)
+    sc = write_scenario(tmp_path, url)
+    code = cli.main(["load", sc, "--store-url", PG_URL, "--rps", "5", "--duration", "2s", "-q"])
+    assert code == 0
+    store = SQLiteStore(db, background=False)
+    runs = store.list_runs()
+    store.close()
+    assert len(runs) == 1 and runs[0].status == "done"
+
+
+def test_configured_storage_url_is_used_when_no_store_is_given(tmp_path, monkeypatch):
+    class Settings:
+        storage_url = PG_URL
+
+    class Resolved:
+        settings = Settings()
+
+    import redline_core.config as config
+
+    monkeypatch.setattr(config, "resolve_settings", lambda *a, **k: Resolved())
+    parser = cli._parser()
+    args = parser.parse_args(["load", "x"])
+    assert cli._run_store_target(args, None) == PG_URL
+    args = parser.parse_args(["load", "x", "--store", "mine.db"])
+    assert cli._run_store_target(args, None) == "mine.db"
+    args = parser.parse_args(["load", "x", "--no-store"])
+    assert cli._run_store_target(args, None) is None
+
+
+# ---------------------------------------------------------------------------- register over HTTP
+def test_register_url_must_be_http(tmp_path, capsys):
+    sc = write_scenario(tmp_path, "http://127.0.0.1:1")
+    assert cli.main(["load", sc, "--register-url", "ftp://x"]) == 2
+    assert "http" in capsys.readouterr().err
+
+
+def test_register_url_preflight_failure_is_reported_without_the_token(
+    tmp_path, capsys, monkeypatch, http_server
+):
+    _, url = http_server  # a server that is not a Redline application
+    token_file = tmp_path / "token"
+    token_file.write_text("tok-very-secret-123\n")
+    sc = write_scenario(tmp_path, url)
+    code = cli.main(
+        ["load", sc, "--register-url", url + "/_redline", "--token-file", str(token_file)]
+    )
+    captured = capsys.readouterr()
+    assert code == 2
+    assert "tok-very-secret-123" not in captured.out + captured.err
+
+
+def test_register_url_run_is_registered_with_the_application(
+    tmp_path, capsys, monkeypatch, http_server
+):
+    import httpx
+
+    from redline_core.api import RedlineAPI
+    from redline_core.conf import Settings
+    from redline_core.load import sinks
+
+    _, url = http_server
+    store = SQLiteStore(str(tmp_path / "app.db"), background=False)
+    app = RedlineAPI(store, Settings(accept_remote_runs=True))
+
+    def handler(request):
+        path = request.url.path.removeprefix("/_redline/")
+        body = json.loads(request.content) if request.content else None
+        status, payload = app.dispatch(request.method, path, body=body)
+        return httpx.Response(status, json=payload)
+
+    real = sinks.HttpSink
+
+    class Wired(real):
+        def __init__(self, base, token=None, **kw):
+            super().__init__(
+                base, token, client=httpx.Client(transport=httpx.MockTransport(handler))
+            )
+
+    monkeypatch.setattr(sinks, "HttpSink", Wired)
+    monkeypatch.chdir(tmp_path)
+    sc = write_scenario(tmp_path, url)
+    code = cli.main(
+        ["load", sc, "--register-url", "http://app/_redline", "--rps", "5", "--duration", "2s"]
+    )
+    assert code == 0
+    runs = store.list_runs()
+    assert len(runs) == 1 and runs[0].status == "done" and runs[0].steps
+    assert "http://app/_redline/#/load/" in capsys.readouterr().out
+    store.close()
+
+
+# ---------------------------------------------------------------------------- recording probe
+def _store_run(tmp_path, url, *extra):
+    db = str(tmp_path / "p.db")
+    sc = write_scenario(tmp_path, url)
+    args = ["load", sc, "--store", db, "--rps", "5", "--duration", "1s", "-q", *extra]
+    return args, db
+
+
+def test_probe_warns_by_default_when_the_app_records_nothing(tmp_path, capsys, http_server):
+    _, url = http_server  # not a Redline app: nothing is ever recorded
+    args, _ = _store_run(tmp_path, url, "--probe", "--probe-timeout", "1s")
+    code = cli.main(args)
+    err = capsys.readouterr().err
+    assert code == 0
+    assert "not recording this run" in err and "the run continues" in err
+
+
+def test_require_recording_stops_the_run(tmp_path, capsys, http_server):
+    state, url = http_server
+    args, db = _store_run(tmp_path, url, "--probe-timeout", "1s", "--require-recording")
+    code = cli.main(args)
+    assert code == 1
+    assert state.count == 1  # only the probe request was sent
+    store = SQLiteStore(db, background=False)
+    runs = store.list_runs()
+    store.close()
+    assert runs[0].status == "failed"
+
+
+def test_a_file_store_run_sends_no_probe_unless_asked(tmp_path, http_server):
+    state, url = http_server
+    args, _ = _store_run(tmp_path, url)
+    assert cli.main(args) == 0
+    assert not any("probe" in h for h in state.headers)
+
+
+def test_shared_store_runs_probe_by_default(tmp_path, monkeypatch, capsys, http_server):
+    state, url = http_server
+    db = str(tmp_path / "s.db")
+    monkeypatch.setattr(cli, "_open_run_store", lambda target: SQLiteStore(db, background=False))
+    monkeypatch.chdir(tmp_path)
+    sc = write_scenario(tmp_path, url)
+    args = ["load", sc, "--store-url", PG_URL, "--rps", "5", "--duration", "1s", "-q"]
+    assert cli.main([*args, "--probe-timeout", "1s"]) == 0
+    assert any("step=probe" in h for h in state.headers)
+    assert "not recording this run" in capsys.readouterr().err
+
+
+def test_storage_url_from_the_environment_is_used_by_a_background_run(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("REDLINE_STORAGE_URL", PG_URL)
+    args = cli._parser().parse_args(["load", "x", "--store", cli.DEFAULT_STORE])
+    assert cli._run_store_target(args, None) == PG_URL

@@ -36,10 +36,11 @@ import math
 import multiprocessing as mp
 import os
 import queue as queue_mod
+import threading
 import time
 import uuid
 from collections import Counter
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -105,13 +106,19 @@ class _StepAgg:
         self.breakdown: Counter[str] = Counter()
         self.hist = Histogram()
         self.svc = Histogram()
+        self.ttfb = Histogram()
+        self.streams: dict[str, Any] = {}
+        self.websockets: dict[str, Any] = {}
+        self.sessions: dict[str, Any] = {}
+        #: kind -> worker -> highest number open at once
+        self.peaks: dict[str, dict[int, int]] = {}
         self.done: dict[int, tuple[float, bool]] = {}  # worker -> (until, partial)
         self.final = False
 
     def completed_any(self) -> bool:
         return bool(self.ok or self.errors)
 
-    def add(self, m: Mapping[str, Any]) -> None:
+    def add(self, m: Mapping[str, Any], worker: int = -1) -> None:
         self.sent += m["sent"]
         self.ok += m["ok"]
         self.errors += m["errors"]
@@ -121,6 +128,58 @@ class _StepAgg:
             self.hist.merge(Histogram.from_bytes(m["hist"]))
         if m["svc"]:
             self.svc.merge(Histogram.from_bytes(m["svc"]))
+        if m.get("ttfb"):
+            self.ttfb.merge(Histogram.from_bytes(m["ttfb"]))
+        extra = m.get("extra") or {}
+        if "streams" in extra:
+            _merge_extra(self.streams, extra["streams"], ("ttlb",), self.peaks, "streams", worker)
+        if "sessions" in extra:
+            _merge_extra(self.sessions, extra["sessions"], (), self.peaks, "sessions", worker)
+        if "websockets" in extra:
+            _merge_extra(
+                self.websockets,
+                extra["websockets"],
+                ("connect", "latency"),
+                self.peaks,
+                "websockets",
+                worker,
+            )
+
+
+def _plain(extra: Mapping[str, Any]) -> dict[str, Any]:
+    """Stream/websocket numbers for a step result: histograms become p50/p95 pairs."""
+    out: dict[str, Any] = {}
+    for key, value in extra.items():
+        if isinstance(value, Histogram):
+            out[f"{key}_p50_ms"] = round(value.percentile(50), 3)
+            out[f"{key}_p95_ms"] = round(value.percentile(95), 3)
+        else:
+            out[key] = value
+    return out
+
+
+def _merge_extra(
+    into: dict[str, Any],
+    part: Mapping[str, Any],
+    hists: tuple[str, ...],
+    peaks: dict[str, dict[int, int]],
+    kind: str,
+    worker: int,
+) -> None:
+    """Add one worker's stream/websocket numbers to a step's: counts add, histograms merge,
+    and ``max_open`` is the sum of each worker's own peak (an upper bound that is tight at
+    steady state, when the workers are balanced)."""
+    for key, value in part.items():
+        if key in hists:
+            if value:
+                h = into.setdefault(key, Histogram())
+                h.merge(Histogram.from_bytes(value))
+        elif key == "max_open":
+            by_worker = peaks.setdefault(kind, {})
+            by_worker[worker] = max(by_worker.get(worker, 0), int(value))
+            into[key] = sum(by_worker.values())
+        else:
+            into[key] = into.get(key, 0) + value
 
 
 class _Window:
@@ -161,6 +220,10 @@ def run(
     run_id: str | None = None,
     name: str | None = None,
     on_event: EventCallback | None = None,
+    probe: Callable[[], Any] | None = None,
+    agents: Sequence[str] | None = None,
+    agent_token: str | None = None,
+    agent_verify: bool | str = True,
 ) -> RunResult:
     """Run a load test and return its :class:`RunResult` (blocking).
 
@@ -168,7 +231,10 @@ def run(
     event, :class:`~redline_core.load.control.StopFile`); setting it stops the run
     gracefully with status ``stopped``. ``on_event(kind, data)`` receives live events:
     ``("start", RunMeta)``, ``("second", dict)``, ``("step", StepResult)``,
-    ``("stopping", reason)``.
+    ``("stopping", reason)``. ``probe`` is called once after the run is registered and
+    before any load; when it raises, the run ends ``failed`` with its message. ``agents`` are
+    the URLs of ``redline load agent`` services (with their ``agent_token``) that run workers
+    on other hosts; without ``workers`` the controller itself then runs none.
 
     Workers are started with the *spawn* method, so a script calling this must guard its
     entry point with ``if __name__ == "__main__":``.
@@ -183,9 +249,34 @@ def run(
     if importlib.util.find_spec("httpx") is None:
         raise RuntimeError("the load tester needs httpx: pip install 'redline-core[load]'")
 
+    _preflight(sc)
     plans = prof.plan()
-    n_workers = workers or sc.workers or default_workers()
-    n_workers = max(1, min(n_workers, math.ceil(prof.max_rps)))
+    remote_plan: list[tuple[Any, int]] = []
+    if agents:
+        from .agent import RemoteAgent
+
+        if not agent_token:
+            raise ScenarioError("agents need a token (--agent-token-file or REDLINE_AGENT_TOKEN)")
+        for url in agents:
+            handle = RemoteAgent(url, agent_token, verify=agent_verify)
+            handle.info()  # reachable, token accepted, clock offset measured
+            remote_plan.append((handle, min(handle.cpus, 8)))
+        local = workers if workers is not None else (sc.workers or 0)
+    else:
+        local = workers or sc.workers or default_workers()
+    cap = max(1, math.ceil(prof.max_rps))
+    total = local + sum(c for _, c in remote_plan)
+    while total > cap:  # never more workers than requests per second: trim the largest group
+        sizes = [local, *(c for _, c in remote_plan)]
+        biggest = max(range(len(sizes)), key=lambda i: sizes[i])
+        if sizes[biggest] <= (0 if biggest == 0 else 1):
+            break
+        if biggest == 0:
+            local -= 1
+        else:
+            remote_plan[biggest - 1] = (remote_plan[biggest - 1][0], sizes[biggest] - 1)
+        total -= 1
+    n_workers = max(1, total)
     run_id = run_id or uuid.uuid4().hex
     run_name = name or sc.name
     config = redact_config(sc.to_dict())  # what sinks/results keep: never raw secrets
@@ -198,10 +289,43 @@ def run(
     sinks.start(meta)
     emit("start", meta)
 
-    engine = _Engine(sc, plans, n_workers, run_id, stop_event, sinks, emit)
+    if probe is not None:
+        try:
+            probe()
+        except Exception as exc:  # a failed probe ends the run before any load is sent
+            message = str(exc)
+            summary = analyze([])
+            summary["message"] = message
+            sinks.finish(run_id, "failed", summary)
+            return RunResult(
+                run_id=run_id,
+                name=run_name,
+                status="failed",
+                config=config,
+                created_at=created_at,
+                finished_at=time.time(),
+                steps=[],
+                seconds=[],
+                summary=summary,
+                message=message,
+            )
+
+    engine = _Engine(
+        sc, plans, n_workers, run_id, stop_event, sinks, emit, local_n=local, remote=remote_plan
+    )
     status, message = engine.execute()
     steps = engine.finished_steps
-    summary = analyze(steps)
+    summary = analyze(steps, engine.seconds, {p.index: p.start_s for p in plans})
+    _attach_resources(summary, sc, steps, sinks, run_id)
+    if engine.flow_stats:
+        by_name = {f.name: f for f in sc.flows}
+        summary["flows"] = {
+            name: stats.to_dict(by_name[name])
+            for name, stats in engine.flow_stats.items()
+            if stats.count
+        }
+    if engine.identity_counts:
+        summary["identities"] = _identity_summary(engine.identity_counts)
     if engine.stopped_reason:
         summary["stopped_reason"] = engine.stopped_reason
     if message:
@@ -221,6 +345,127 @@ def run(
     )
 
 
+def _attach_resources(
+    summary: dict[str, Any], sc: Scenario, steps: list[StepResult], sinks: MultiSink, run_id: str
+) -> None:
+    """Pull in the metric sources' numbers, then add what the application sampled about
+    itself (CPU, memory, GC, pool) and the likely limiting resource to the summary."""
+    from ..run_metrics import run_sources
+
+    if sc.metric_sources:
+        failed = run_sources(
+            sc.metric_sources,
+            steps,
+            lambda step, values, ts: sinks.save_metrics(run_id, step, values, ts),
+        )
+        if failed:
+            summary["metric_source_errors"] = sorted(set(failed))
+    try:
+        report = sinks.resource_report(run_id, summary.get("knee_step"))
+    except Exception:  # metrics are an extra: never fail the run for them
+        report = None
+    if report:
+        summary["resources"] = report["steps"]
+        if report.get("limiting_resource"):
+            summary["limiting_resource"] = report["limiting_resource"]
+
+
+def _request_cfg(r: Any) -> dict[str, Any]:
+    """One request as the plain dict a worker process receives."""
+    return {
+        "method": r.method,
+        "path": r.path,
+        "weight": r.weight,
+        "headers": dict(r.headers),
+        "json": r.json,
+        "has_json": r.has_json,
+        "body": r.body,
+        "expect_status": list(r.expect_status) if r.expect_status else None,
+        "expect": [dict(rule) for rule in r.expect],
+        "max_ms": r.max_ms,
+        "extract": {k: dict(v) for k, v in r.extract.items()},
+        "type": r.type,
+        "hold_s": r.hold_s,
+        "messages": list(r.messages),
+        "reply_timeout_s": r.reply_timeout_s,
+    }
+
+
+class _FlowStats:
+    """Run-wide numbers of one flow, merged from the workers' ticks."""
+
+    def __init__(self, steps: int) -> None:
+        self.count = self.errors = 0
+        self.breakdown: Counter[str] = Counter()
+        self.hist = Histogram()
+        self.steps = [[0, 0, Histogram()] for _ in range(steps)]  # count, errors, hist
+
+    def add(self, m: Mapping[str, Any]) -> None:
+        self.count += m["count"]
+        self.errors += m["errors"]
+        self.breakdown.update(m["breakdown"])
+        if m["hist"]:
+            self.hist.merge(Histogram.from_bytes(m["hist"]))
+        for mine, theirs in zip(self.steps, m["steps"], strict=False):
+            mine[0] += theirs["count"]
+            mine[1] += theirs["errors"]
+            if theirs["hist"]:
+                mine[2].merge(Histogram.from_bytes(theirs["hist"]))
+
+    def to_dict(self, flow: Any) -> dict[str, Any]:
+        h = self.hist
+        return {
+            "count": self.count,
+            "errors": self.errors,
+            "error_rate": round(self.errors / self.count, 4) if self.count else 0.0,
+            "p50_ms": round(h.percentile(50), 3),
+            "p95_ms": round(h.percentile(95), 3),
+            "p99_ms": round(h.percentile(99), 3),
+            "error_breakdown": dict(self.breakdown),
+            "steps": [
+                {
+                    "step": i + 1,
+                    "name": flow.steps[i].name,
+                    "count": c,
+                    "errors": err,
+                    "p50_ms": round(hist.percentile(50), 3),
+                    "p95_ms": round(hist.percentile(95), 3),
+                }
+                for i, (c, err, hist) in enumerate(self.steps)
+            ],
+        }
+
+
+def _identity_summary(counts: Counter[str]) -> dict[str, Any]:
+    """Requests per identity (names only, never header or cookie values)."""
+    out: dict[str, Any] = {"count": len(counts), "requests": sum(counts.values())}
+    if len(counts) <= 200:
+        out["by_name"] = dict(sorted(counts.items()))
+    else:
+        values = sorted(counts.values())
+        out["min"], out["max"] = values[0], values[-1]
+    return out
+
+
+def _preflight(sc: Scenario) -> None:
+    """Resolve identities and data files in the parent, so a missing file, environment
+    variable or column fails the run before any worker starts."""
+    from .scenario import _strings_of
+    from .variation import DataFeed, data_refs, load_identities
+
+    if sc.identities or sc.identities_file:
+        load_identities(sc.identities, sc.identities_file, sc.base_dir)
+    if sc.data:
+        feed = DataFeed(sc.data, 0, 1)
+        for r in [*sc.requests, *(s for f in sc.flows for s in f.steps)]:
+            refs = data_refs(r.path)
+            for _, text in _strings_of(
+                {"headers": r.headers, "json": r.json if r.has_json else None, "body": r.body}
+            ):
+                refs += data_refs(text)
+            feed.check_columns(refs)
+
+
 class _Engine:
     def __init__(
         self,
@@ -231,7 +476,19 @@ class _Engine:
         stop_event: Any,
         sinks: MultiSink,
         emit: EventCallback,
+        *,
+        local_n: int | None = None,
+        remote: Sequence[tuple[Any, int]] = (),
     ) -> None:
+        self.local_n = n_workers if local_n is None else local_n
+        #: ``[(agent, [global worker numbers])]``: local workers come first
+        self.remote: list[tuple[Any, list[int]]] = []
+        first = self.local_n
+        for handle, count in remote:
+            self.remote.append((handle, list(range(first, first + count))))
+            first += count
+        self.pumps: list[threading.Thread] = []
+        self.gen_cpu: dict[int, float] = {}
         self.sc = sc
         self.plans = plans
         self.n = n_workers
@@ -244,6 +501,8 @@ class _Engine:
         self.seconds: list[dict[str, Any]] = []
         self.window = _Window()
         self.stopped_reason: str | None = None
+        self.identity_counts: Counter[str] = Counter()
+        self.flow_stats = {f.name: _FlowStats(len(f.steps)) for f in sc.flows}
         self.start_epoch = 0.0
         self.exited: set[int] = set()
         self.errors: dict[int, str] = {}
@@ -262,21 +521,25 @@ class _Engine:
             "max_inflight": sc.max_inflight,
             "poisson": sc.profile.poisson,
             "seed": sc.seed,
-            "requests": [
+            "requests": [_request_cfg(r) for r in sc.requests],
+            "flows": [
                 {
-                    "method": r.method,
-                    "path": r.path,
-                    "weight": r.weight,
-                    "headers": dict(r.headers),
-                    "json": r.json,
-                    "has_json": r.has_json,
-                    "body": r.body,
-                    "expect_status": list(r.expect_status) if r.expect_status else None,
+                    "name": f.name,
+                    "weight": f.weight,
+                    "steps": [_request_cfg(s) for s in f.steps],
+                    "think_s": list(f.think_s) if f.think_s else None,
+                    "own_connection": f.own_connection,
                 }
-                for r in sc.requests
+                for f in sc.flows
             ],
             "steps": [(p.index, p.target_rps, p.start_s, p.duration_s) for p in self.plans],
             "_crash_after_s": sc.extra.get("_crash_after_s"),
+            "identities": [dict(i) for i in sc.identities],
+            "identities_file": sc.identities_file,
+            "identity_mode": sc.identity_mode,
+            "data": [d.to_dict() for d in sc.data],
+            "auth": sc.auth.to_dict() if sc.auth else None,
+            "base_dir": sc.base_dir,
         }
 
     # ------------------------------------------------------------------ lifecycle
@@ -295,7 +558,7 @@ class _Engine:
                 name=f"redline-load-{k}",
                 daemon=True,
             )
-            for k in range(self.n)
+            for k in range(self.local_n)
         ]
         status, message = "done", None
         interrupted = 0
@@ -303,10 +566,14 @@ class _Engine:
             for p in self.procs:
                 p.start()
             try:
-                status, message = self._wait_ready()
+                failure = self._prepare_agents()
+                status, message = ("failed", failure) if failure else self._wait_ready()
                 if status == "done":
-                    self.start_epoch = time.time() + START_DELAY_S
+                    delay = START_DELAY_S + (1.5 if self.remote else 0.0)
+                    self.start_epoch = time.time() + delay
                     self.start_at.value = self.start_epoch
+                    for handle, _ in self.remote:
+                        handle.start(self.start_epoch)
                     self.go.set()
                     status, message = self._loop()
             except KeyboardInterrupt:
@@ -321,6 +588,96 @@ class _Engine:
             self._shutdown(force=interrupted > 1 or status == "failed")
         self._finalize_remaining()
         return status, message
+
+    def _remote_cfg(self, k: int) -> dict[str, Any]:
+        """A worker's config for an agent: identities and data rows inline (the agent reads no
+        files), no parent pid, and no token command or callable."""
+        from .variation import load_data_rows, load_identities
+
+        sc = self.sc
+        if sc.auth is not None and sc.auth.provider != "request":
+            raise ScenarioError(
+                "an agent cannot run a token command or callable; use auth.provider = 'request'",
+                "auth",
+            )
+        cfg = self._worker_cfg(k)
+        cfg.pop("parent_pid", None)
+        cfg.pop("_crash_after_s", None)
+        cfg["base_dir"] = None
+        if sc.identities or sc.identities_file:
+            cfg["identities"] = [
+                {"name": i.name, "headers": dict(i.headers), "cookies": dict(i.cookies)}
+                for i in load_identities(sc.identities, sc.identities_file, sc.base_dir)
+            ]
+            cfg["identities_file"] = None
+        if sc.data:
+            cfg["data_rows"] = {d.name: load_data_rows(d) for d in sc.data}
+        return cfg
+
+    def _prepare_agents(self) -> str | None:
+        """Send each agent its workers (in parallel), then start streaming their events."""
+        if not self.remote:
+            return None
+        results: dict[int, str | None] = {}
+
+        def prepare(i: int, handle: Any, idxs: list[int]) -> None:
+            try:
+                handle.prepare(self.run_id, [self._remote_cfg(k) for k in idxs])
+                results[i] = None
+            except Exception as exc:
+                results[i] = f"{type(exc).__name__}: {exc}"
+
+        threads = [
+            threading.Thread(target=prepare, args=(i, h, idxs), daemon=True)
+            for i, (h, idxs) in enumerate(self.remote)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        failed = [r for r in results.values() if r]
+        if failed:
+            for handle, _ in self.remote:
+                handle.stop()
+            return failed[0]
+        for handle, idxs in self.remote:
+            for k in idxs:
+                self.q.put({"type": "ready", "worker": k, "pid": 0})
+            pump = threading.Thread(
+                target=self._pump_agent, args=(handle, idxs), name="redline-agent-pump", daemon=True
+            )
+            pump.start()
+            self.pumps.append(pump)
+        return None
+
+    def _pump_agent(self, handle: Any, idxs: list[int]) -> None:
+        """Feed an agent's worker messages into the engine's queue until it is finished."""
+        from .agent import decode_event
+
+        after, failures = 0, 0
+        while True:
+            try:
+                batch = handle.events(after, 2.0)
+                failures = 0
+            except Exception as exc:
+                failures += 1
+                if failures >= 3:
+                    self.q.put(
+                        {"type": "error", "worker": idxs[0], "message": f"agent lost: {exc}",
+                         "traceback": ""}
+                    )  # fmt: skip
+                    return
+                time.sleep(0.5)
+                continue
+            for event in batch["events"]:
+                self.q.put(decode_event(event))
+            after = batch["next"]
+            if batch["finished"]:
+                return
+
+    def _stop_agents(self) -> None:
+        for handle, _ in self.remote:
+            threading.Thread(target=handle.stop, daemon=True).start()
 
     def _wait_ready(self) -> tuple[str, str | None]:
         ready: set[int] = set()
@@ -356,6 +713,7 @@ class _Engine:
         if not self.stop.is_set():
             self.stopped_reason = self.stopped_reason or reason
             self.stop.set()
+            self._stop_agents()
             self.emit("stopping", reason)
 
     def _dead_workers(self) -> str | None:
@@ -413,11 +771,21 @@ class _Engine:
         kind = msg["type"]
         k = msg.get("worker", -1)
         if kind == "tick":
+            cpu = msg.get("cpu_pct")
+            for step in msg["steps"]:
+                if isinstance(cpu, (int, float)):
+                    self.gen_cpu[step] = max(self.gen_cpu.get(step, 0.0), float(cpu))
             for step, m in msg["steps"].items():
                 agg = self.aggs.get(step)
                 if agg is not None:
-                    agg.add(m)
+                    agg.add(m, k)
                 self.window.add(m)
+                if m.get("identities"):
+                    self.identity_counts.update(m["identities"])
+            for name, fm in (msg.get("flows") or {}).items():
+                stats = self.flow_stats.get(name)
+                if stats is not None:
+                    stats.add(fm)
         elif kind == "step_done":
             agg = self.aggs.get(msg["step"])
             if agg is not None:
@@ -471,6 +839,11 @@ class _Engine:
             hist=agg.hist,
             service_hist=agg.svc,
             partial=partial,
+            ttfb_hist=agg.ttfb,
+            streams=_plain(agg.streams),
+            websockets=_plain(agg.websockets),
+            sessions=_plain(agg.sessions),
+            generator_cpu_pct=self.gen_cpu.get(plan.index),
         )
         if result.sent == 0 and result.dropped == 0 and partial:
             return
@@ -510,6 +883,12 @@ class _Engine:
     def _shutdown(self, *, force: bool) -> None:
         self.stop.set()
         self.go.set()  # release workers still waiting to start
+        if self.remote:
+            self._stop_agents()
+            for pump in self.pumps:  # their last ticks and exits are still on the way
+                pump.join(timeout=1.0 if force else 8.0)
+            for handle, _ in self.remote:
+                handle.close()
         deadline = time.monotonic() + (0.5 if force else self.sc.timeout_s + EXIT_GRACE_S)
         # keep draining so workers never block on a full pipe while exiting
         while any(p.is_alive() for p in self.procs) and time.monotonic() < deadline:

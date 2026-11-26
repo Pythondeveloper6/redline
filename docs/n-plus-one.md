@@ -175,6 +175,35 @@ code hint at lower confidence.
     Only `n_plus_one` issues get SQLAlchemy suggestions in this version. Duplicates, slow
     queries and query budgets get the generic words.
 
+### N+1 in raw SQL (`text()` and driver SQL)
+
+When the repeated statement is raw SQL, there is no relationship to eager-load, so Redline
+rewrites the loop itself. It takes the column the statement compares to a bound parameter (the
+one that varies between executions) and the callsite of the loop, and for a loop like
+
+```python
+for order in orders:
+    rows = conn.execute(text("SELECT id, qty, order_id FROM items WHERE order_id = :oid"),
+                        {"oid": order.id}).all()
+```
+
+it proposes one query over all the keys, chunked to the database's parameter limit and
+grouped back by the key (`IN :_ids` with an expanding bind parameter, then
+`rows = _rows_by_key.get(order.id, [])` in the loop), as a diff at the callsite with
+**high** confidence. The summary states the limit for your database (about 32,766 bound
+parameters for SQLite, 32,767 for PostgreSQL, 65,535 for MySQL, 2,100 for SQL Server) and the
+chunk size used. If the key column was not in the `SELECT` list it is appended, so each row
+gains that column; the summary says so. When the parent query is in the same trace, the
+summary also names the join alternative.
+
+The rewrite needs a plain `for` loop that directly assigns
+`x = <connection>.execute(text("<one string literal>"), {...}).all()` (or `.fetchall()`),
+iterating a name or attribute (not a call result), with one varying key and no per-parent
+`LIMIT`/`TOP`/`OFFSET`. Anything else (a statement built with an f-string, a result method
+other than `.all()`, several varying parameters) gets the same batched statement as a code
+block, with no diff and lower confidence. `redline check verify` then confirms the finding is
+gone after you apply it.
+
 ## Confidence
 
 Every suggestion carries one of three levels. The UI shows it as a pill.
@@ -200,7 +229,8 @@ Every suggestion carries one of three levels. The UI shows it as a pill.
 - The callsite is in library code and the view cannot be identified. Check
   `project_root` (see [How it works](how-it-works.md#callsites)).
 - The relation is one the suggester does not model (custom managers that rewrite the
-  queryset, raw SQL, `.extra()`): you get the generic advice.
+  queryset, `.extra()`): you get the generic advice. Raw SQL is handled
+  [above](#n1-in-raw-sql-text-and-driver-sql).
 - The source file changed since the trace was recorded: the diff is computed against the
   **current** file on disk, at the line recorded then. Re-record after editing.
 

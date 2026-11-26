@@ -17,7 +17,15 @@ guessing.
 ## Find problems
 
 - `redline mcp --store .redline/redline.db` serves read-only tools over MCP: `list_issues`,
-  `explain_issue`, `get_trace`, `instrumentation_report`, `verify_fix`, `llm_summary`.
+  `explain_issue`, `fix_prompt`, `get_trace`, `list_traces`, `list_endpoints`, `search_sql`,
+  `index_advice`, `compare_periods`, `instrumentation_report`, `verify_fix`, `check_report`,
+  `check_findings`, `llm_summary`, `doctor`, `lint_sql`, `analyze_sql_plan` (a pasted SQL
+  Server plan), `database_capabilities`.
+- Load testing: `list_load_runs`, `get_load_run`, `load_run_summary`, `load_run_bottlenecks`,
+  `load_run_metrics` read runs; `validate_scenario` and `generate_scenario_from_*` build and
+  check scenarios without running them. `start_load_run`, `stop_load_run` and
+  `delete_load_run` exist only when the owner started the server with `--allow-load` or
+  `--allow-delete-runs`; never ask for those flags or work around their absence.
 - Without MCP: `redline fix-prompt ISSUE_ID --store .redline/redline.db` writes a brief for one
   finding. `redline instrumentation --store ...` says what redline cannot see.
 - Findings are ranked by *sampled* observed time. Costs overlap; never add them up as savings.

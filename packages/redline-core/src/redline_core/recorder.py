@@ -9,8 +9,11 @@ variables, recording is correct wherever Python propagates context:
   request record into that request;
 * ``asgiref.sync_to_async``, ``loop.run_in_executor`` via ``contextvars.copy_context()``,
   and Starlette's threadpool all copy context into the worker thread;
-* a plain ``threading.Thread`` does **not** copy context, so work done there is not
-  attributed to any request (by design: it isn't part of the request).
+* a plain ``threading.Thread`` and a ``ThreadPoolExecutor`` worker do **not** copy context, so
+  work done there is not attributed to any request unless
+  :func:`redline_core.contrib.threads.instrument_threads` is on; spans it records on another
+  thread carry the thread's name in ``data["thread"]``. ``TraceBuilder.add`` is guarded by a
+  lock, so concurrent threads may record into one trace.
 
 When no trace is active every hook is one ``ContextVar.get()`` and a ``None`` check.
 
@@ -93,6 +96,9 @@ F = TypeVar("F", bound=Callable[..., Any])
 
 _trace: ContextVar[TraceBuilder | None] = ContextVar("redline_trace", default=None)
 _parent: ContextVar[str | None] = ContextVar("redline_span", default=None)
+#: Name of the worker thread when the code runs inside work started by
+#: ``instrument_threads()``; spans finished there carry it as ``data["thread"]``.
+_thread_label: ContextVar[str | None] = ContextVar("redline_thread", default=None)
 
 _perf = time.perf_counter
 _MAX_MANY_ROWS = 10  # executemany: keep the first N parameter rows
@@ -349,6 +355,9 @@ class TraceBuilder:
         spans are folded into per-(fingerprint, callsite) :class:`OverflowGroup`
         counters so query totals and N+1 detection stay exact.
         """
+        label = _thread_label.get()
+        if label is not None and "thread" not in span.data:
+            span.data["thread"] = label
         estimate = (
             len(json.dumps(span.data, ensure_ascii=True, separators=(",", ":")).encode())
             + len(span.name.encode())
@@ -505,6 +514,25 @@ class Recorder:
             except Exception as exc:  # missing extra, or another profiler running
                 builder.tags["profile_error"] = type(exc).__name__
         return builder
+
+    def _run_is_known(self, run_id: str) -> bool:
+        """A made-up ``X-Redline-Run`` id costs one cached lookup and keeps nothing."""
+        known = getattr(self.store, "is_known_run", None)
+        try:
+            return bool(known(run_id)) if callable(known) else True
+        except Exception:
+            return False
+
+    def _note_run_metrics(self, trace: Trace) -> None:
+        """Start (or keep alive) resource sampling for a registered, running load run."""
+        try:
+            from .run_metrics import sampler_for
+
+            sampler = sampler_for(self.store)
+            if sampler is not None:
+                sampler.note(trace.tags["run_id"], trace.tags.get("step"))
+        except Exception:  # sampling must never reach the request path
+            pass
 
     def finish_trace(
         self,
@@ -716,7 +744,19 @@ class Recorder:
             # the tag (its writer drops it for an unknown or finished check run)
             check="check_run_id" in trace.tags
             and getattr(self.store, "validates_check_tags", False) is True,
+            # the same for a registered load run (X-Redline-Run): kept so low-rate steps
+            # still produce traces; the writer drops it for an unknown or finished run
+            run="run_id" in trace.tags
+            and getattr(self.store, "validates_run_tags", False) is True
+            and self._run_is_known(trace.tags["run_id"]),
         )
+        if (
+            "run_id" in trace.tags
+            and self.store is not None
+            and self.settings.run_metrics
+            and self._run_is_known(trace.tags["run_id"])
+        ):
+            self._note_run_metrics(trace)
         from .testing import active_capture
 
         self._persist_lifecycle()
@@ -1482,8 +1522,17 @@ def _apply_run_header(builder: TraceBuilder, headers: Any) -> None:
             k2, _, v2 = part.partition("=")
             if k2.strip() == "step" and v2.strip():
                 builder.tags["step"] = v2.strip()[:16]
+            elif k2.strip() == "identity" and _IDENTITY_TAG.fullmatch(v2.strip()):
+                builder.tags["identity"] = v2.strip()
+            elif k2.strip() == "flow" and _IDENTITY_TAG.fullmatch(v2.strip()):
+                builder.tags["flow"] = v2.strip()
+            elif k2.strip() == "page" and _IDENTITY_TAG.fullmatch(v2.strip()):
+                builder.tags["page"] = v2.strip()
+            elif k2.strip() == "fstep" and v2.strip().isdigit() and len(v2.strip()) <= 3:
+                builder.tags["fstep"] = v2.strip()
 
 
+_IDENTITY_TAG = re.compile(r"[A-Za-z0-9_.@-]{1,64}")
 _CHECK_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
 _CHECK_NUM = re.compile(r"-?[0-9]{1,9}")
 

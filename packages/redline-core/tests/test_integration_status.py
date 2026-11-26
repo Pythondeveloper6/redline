@@ -30,7 +30,9 @@ def test_status_reports_installed_loaded_and_instrumented_without_importing_prov
     boto._wrapper = object()
     monkeypatch.setitem(sys.modules, "redline_core.contrib.boto3", boto)
 
-    statuses = status_module.integration_status()
+    statuses = [
+        i for i in status_module.integration_status() if not str(i["name"]).startswith("dbapi:")
+    ]
     assert [item["name"] for item in statuses] == [
         "httpx",
         "requests",
@@ -40,6 +42,12 @@ def test_status_reports_installed_loaded_and_instrumented_without_importing_prov
         "boto3",
         "anthropic",
         "openai",
+        "pymongo",
+        "kafka",
+        "pika",
+        "google_cloud_storage",
+        "azure_blob",
+        "threads",
     ]
     assert statuses[0] == {
         "name": "httpx",
@@ -59,7 +67,11 @@ def test_find_spec_errors_mean_not_installed(monkeypatch):
         "find_spec",
         lambda name: (_ for _ in ()).throw(ModuleNotFoundError(name)),
     )
-    assert all(not item["installed"] for item in status_module.integration_status())
+    assert all(
+        not item["installed"]
+        for item in status_module.integration_status()
+        if not str(item["name"]).startswith("dbapi:")
+    )
 
 
 def test_warnings_only_say_installed_does_not_mean_captured():
@@ -96,3 +108,38 @@ def test_health_endpoint_includes_json_friendly_integration_status(store, monkey
     assert data["integrations"][0]["name"] == "httpx"
     assert "not instrumented" in data["warnings"][-1]
     assert "do not indicate whether calls were observed" in data["note"]
+
+
+def test_threads_status_follows_the_patch_and_is_never_a_warning():
+    from redline_core.contrib.threads import instrument_threads, uninstrument_threads
+
+    def entry():
+        return next(i for i in status_module.integration_status() if i["name"] == "threads")
+
+    uninstrument_threads()
+    try:
+        assert entry()["installed"] and not entry()["instrumented"]
+        assert status_module.integration_warnings([entry()]) == []
+        instrument_threads()
+        assert entry()["instrumented"]
+    finally:
+        uninstrument_threads()
+
+
+def test_loaded_raw_driver_is_listed_until_instrument_dbapi_and_is_never_a_warning(monkeypatch):
+    from redline_core.contrib.dbapi import instrument_dbapi, uninstrument_dbapi
+
+    driver = types.ModuleType("pymysql")
+    driver.connect = lambda *a, **k: None
+    monkeypatch.setitem(sys.modules, "pymysql", driver)
+
+    def entry():
+        return next(i for i in status_module.integration_status() if i["name"] == "dbapi:pymysql")
+
+    assert entry()["installed"] and not entry()["instrumented"]
+    assert status_module.integration_warnings([entry()]) == []
+    instrument_dbapi(driver)
+    try:
+        assert entry()["instrumented"]
+    finally:
+        uninstrument_dbapi(driver)

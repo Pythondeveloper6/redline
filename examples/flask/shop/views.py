@@ -11,7 +11,7 @@ from flask import Blueprint, current_app, render_template, request
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import selectinload
 
-from .db import Session
+from .db import Session, sync_engine
 from .models import AuditLog, Customer, Order, OrderItem, Product
 
 bp = Blueprint("shop", __name__)
@@ -34,6 +34,7 @@ def index() -> dict:
             "/orders/1  (a healthy endpoint)",
             "/report/duplicates  (the same query, repeatedly)",
             "/audit/search?q=refund  (slow query, full table scan)",
+            "/audit/raw  (SQL through a raw driver cursor, recorded as source=raw_cursor)",
             "/slow  (slow endpoint)",
             "/boom  (500)",
             "/pricing  (outbound httpx call)",
@@ -124,6 +125,19 @@ def audit_search() -> dict:
             select(func.count()).select_from(AuditLog).where(AuditLog.message.like(f"%{q}%"))
         )
         return {"q": q, "hits": hits}
+
+
+@bp.get("/audit/raw")
+def audit_raw() -> dict:
+    """SQL through a raw driver cursor, bypassing the engine: recorded as a `raw_cursor` span."""
+    raw = sync_engine.raw_connection()
+    try:
+        cursor = raw.cursor()
+        cursor.execute("SELECT COUNT(*) FROM audit_log WHERE message LIKE ?", ("%refund%",))
+        (hits,) = cursor.fetchone()
+    finally:
+        raw.close()
+    return {"hits": hits}
 
 
 @bp.get("/slow")

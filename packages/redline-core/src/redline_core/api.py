@@ -27,6 +27,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import math
 import os
 import re
 import threading
@@ -111,6 +112,10 @@ _SNAPSHOT = re.compile(rf"^api/traces/{_ID}/snapshot$")
 _RUN = re.compile(rf"^api/runs/{_ID}$")
 _RUN_BOTTLENECKS = re.compile(rf"^api/runs/{_ID}/bottlenecks$")
 _RUN_STOP = re.compile(rf"^api/runs/{_ID}/stop$")
+_RUN_STEPS = re.compile(rf"^api/runs/{_ID}/steps$")
+_RUN_METRICS = re.compile(rf"^api/runs/{_ID}/metrics$")
+_RUN_PAGES = re.compile(rf"^api/runs/{_ID}/pages$")
+_RUN_FINISH = re.compile(rf"^api/runs/{_ID}/finish$")
 _ISSUE_KINDS = ISSUE_KINDS
 _BUCKETS = {"1h": 3_600.0, "1d": 86_400.0}
 _LOAD_MODES = ("constant", "ramp", "steps")
@@ -172,7 +177,11 @@ class RedlineAPI:
         #: :class:`~redline_core.access.Access` (meta's ``access`` block, runtime warnings).
         self.access = access
         self.framework = framework
-        self.explain_executor = explain_executor
+        self.explain_executor = (
+            _explain_url_factory(self.settings, explain_executor)
+            if self.settings.explain_url
+            else explain_executor
+        )
         self.run_launcher = run_launcher
         self.run_stopper = run_stopper
         self._index_cache: dict[tuple[float, str], tuple[float, dict[str, Any]]] = {}
@@ -266,6 +275,20 @@ class RedlineAPI:
             return get_routes[path](params) if method == "GET" else _not_allowed()
         if path == "api/checks" or path.startswith("api/checks/"):
             return self.checks.route(method, path, params, body, base_url)
+        if path == "api/runs/register":
+            return self.register_run(body) if method == "POST" else _not_allowed()
+        if m := _RUN_STEPS.match(path):
+            return self.register_step(m.group(1), body) if method == "POST" else _not_allowed()
+        if m := _RUN_PAGES.match(path):
+            return self.run_pages(m.group(1)) if method == "GET" else _not_allowed()
+        if m := _RUN_METRICS.match(path):
+            if method == "GET":
+                return self.run_metrics(m.group(1))
+            if method == "POST":
+                return self.register_metrics(m.group(1), body)
+            return _not_allowed()
+        if m := _RUN_FINISH.match(path):
+            return self.finish_remote_run(m.group(1), body) if method == "POST" else _not_allowed()
         if path == "api/runs":
             if method == "GET":
                 return self.list_runs(params)
@@ -273,7 +296,7 @@ class RedlineAPI:
                 return self.start_run(body, base_url)
             return _not_allowed()
         if m := _RUN_BOTTLENECKS.match(path):
-            return self.run_bottlenecks(m.group(1)) if method == "GET" else _not_allowed()
+            return self.run_bottlenecks(m.group(1), params) if method == "GET" else _not_allowed()
         if m := _RUN_STOP.match(path):
             return self.stop_run(m.group(1)) if method == "POST" else _not_allowed()
         if m := _RUN.match(path):
@@ -340,6 +363,10 @@ class RedlineAPI:
             return self.issues(params) if method == "GET" else _not_allowed()
         if path == "api/explain":
             return self.explain(body) if method == "POST" else _not_allowed()
+        if path == "api/explain/plan":
+            return self.explain_plan(body) if method == "POST" else _not_allowed()
+        if path == "api/database/capabilities":
+            return self.database_capabilities(params) if method == "GET" else _not_allowed()
         return error(404, "not_found", f"No API endpoint at {path!r}.")
 
     # handlers --------------------------------------------------------------
@@ -624,6 +651,64 @@ class RedlineAPI:
         except ExplainError as exc:
             return error(exc.status, exc.code, exc.message)
         return 200, result.to_dict()
+
+    def explain_plan(self, body: bytes | str | Mapping[str, Any] | None) -> Response:
+        """Analyse a plan the caller pastes or uploads (``{"vendor": "mssql", "plan": "<xml>"}``).
+
+        Nothing is executed and no database is touched: for sites where no login may read
+        plans from the application, a plan saved from the database's own tools is enough.
+        """
+        parsed = _json_body(body)
+        if not isinstance(parsed, Mapping):
+            return parsed
+        vendor = str(parsed.get("vendor", "mssql"))
+        plan = parsed.get("plan")
+        if vendor != "mssql":
+            return error(400, "unsupported_vendor", "Plan upload supports SQL Server XML plans.")
+        if not isinstance(plan, str) or not plan.strip() or len(plan) > 5_000_000:
+            return error(400, "invalid_body", "'plan' must be the plan XML (up to 5 MB).")
+        sql = parsed.get("sql", "")
+        if not isinstance(sql, str):
+            return error(400, "invalid_body", "'sql' must be text.")
+        from .explain_mssql import analyze_mssql
+        from .plan_analysis import render_text
+
+        try:
+            analysis = analyze_mssql(plan, sql)
+        except Exception:
+            return error(422, "explain_failed", "The plan could not be parsed as SQL Server XML.")
+        return 200, {
+            "vendor": "mssql",
+            "analyzed": "RunTimeInformation" in plan,
+            "uploaded": True,
+            "plan": plan,
+            "text": render_text(analysis.tree),
+            "tree": analysis.tree.to_dict(),
+            "findings": [f.to_dict() for f in analysis.findings],
+            "suggested_indexes": list(analysis.suggested_indexes),
+        }
+
+    def database_capabilities(self, params: Mapping[str, Any]) -> Response:
+        """What the plan login may do (``GET api/database/capabilities?db=alias``)."""
+        from .database_capabilities import capabilities_for
+
+        alias = _str_param(params, "db") or "default"
+        if not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", alias):
+            return error(
+                400, "invalid_filter", "db must be a database alias (letters, digits, _ . -)."
+            )
+        refresh = _str_param(params, "refresh") in ("1", "true")
+        executor = self.explain_executor(alias, "mssql") if self.explain_executor else None
+        if executor is None:
+            return 200, {
+                "db": alias,
+                "vendor": None,
+                "supported": False,
+                "capabilities": {},
+                "message": f"No plan-capable database connection for {alias!r}.",
+            }
+        report = capabilities_for(f"{alias}", executor, "mssql", refresh=refresh)
+        return 200, {"db": alias, "supported": True, **(report or {})}
 
     # v0.2 ------------------------------------------------------------------
     def _ext(self, name: str) -> Callable[..., Any]:
@@ -913,8 +998,12 @@ class RedlineAPI:
             return error(404, "run_not_found", f"No run {run_id!r}.")
         return 200, run.to_dict()
 
-    def run_bottlenecks(self, run_id: str) -> Response:
-        result = self._ext("run_bottlenecks")(run_id)
+    def run_bottlenecks(self, run_id: str, params: Mapping[str, Any] | None = None) -> Response:
+        identity = _str_param(params or {}, "identity")
+        if identity is not None and not re.fullmatch(r"[A-Za-z0-9_.@-]{1,64}", identity):
+            return error(400, "invalid_filter", "identity must be an identity name.")
+        fn = self._ext("run_bottlenecks")
+        result = fn(run_id, identity=identity) if identity else fn(run_id)
         if result is None:
             return error(404, "run_not_found", f"No run {run_id!r}.")
         return 200, result.to_dict()
@@ -959,6 +1048,189 @@ class RedlineAPI:
             return error(400, "invalid_body", str(exc))
         return 202, {"id": run_id, "name": config["name"], "status": "running"}
 
+    # remote runs ---------------------------------------------------------
+    def _remote_gate(self) -> Response | None:
+        if not self.settings.accept_remote_runs:
+            return error(
+                403,
+                "remote_runs_disabled",
+                "Registering load runs over HTTP is off; enable the accept_remote_runs setting.",
+            )
+        return None
+
+    def _remote_run(self, run_id: str, *, open_only: bool = True) -> Any:
+        """The run a remote generator may change: it must exist, have been registered over
+        HTTP (so a local run cannot be tampered with) and still be running."""
+        run = self._ext("get_run")(run_id)
+        if run is None:
+            return error(404, "run_not_found", f"No run {run_id!r}.")
+        if not (run.config or {}).get(_REMOTE_FLAG):
+            return error(403, "run_not_remote", "This run was not registered over HTTP.")
+        if open_only and run.status != "running":
+            return error(409, "run_closed", "This run has already finished.")
+        return run
+
+    def register_run(self, body: bytes | str | Mapping[str, Any] | None) -> Response:
+        if (denied := self._remote_gate()) is not None:
+            return denied
+        parsed = _json_body(body)
+        if not isinstance(parsed, Mapping):
+            return parsed
+        run_id = parsed.get("id")
+        if not isinstance(run_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", run_id):
+            return error(400, "invalid_body", "'id' must be 1-64 letters, digits, _ or -.")
+        if run_id == "register":
+            return error(400, "invalid_body", "'id' is reserved.")
+        name = parsed.get("name", "")
+        config = parsed.get("config", {})
+        created_at = parsed.get("created_at")
+        if not isinstance(name, str) or len(name) > 200:
+            return error(400, "invalid_body", "'name' must be text of at most 200 characters.")
+        if not isinstance(config, Mapping):
+            return error(400, "invalid_body", "'config' must be an object.")
+        if len(json.dumps(config, default=str)) > _MAX_REMOTE_CONFIG:
+            return error(400, "invalid_body", "'config' is too large.")
+        created = _number(created_at)
+        if created is None or not math.isfinite(created):
+            return error(400, "invalid_body", "'created_at' must be an epoch number.")
+        from .load.sinks import redact_config
+        from .runs import Run
+
+        safe = redact_config(dict(config))  # masked again here: never trust the sender
+        safe[_REMOTE_FLAG] = True
+        if self._ext("get_run")(run_id) is not None:
+            return error(409, "run_exists", f"Run {run_id!r} already exists.")
+        live = [
+            r
+            for r in self._ext("list_runs")(200)
+            if r.status == "running" and (r.config or {}).get(_REMOTE_FLAG)
+        ]
+        if len(live) >= _MAX_REMOTE_RUNNING:
+            return error(
+                429, "too_many_runs", f"{_MAX_REMOTE_RUNNING} registered runs are already running."
+            )
+        self._ext("save_run")(
+            Run(id=run_id, name=name, status="running", config=safe, created_at=created)
+        )
+        return 201, {"id": run_id, "status": "running"}
+
+    def register_step(self, run_id: str, body: bytes | str | Mapping[str, Any] | None) -> Response:
+        if (denied := self._remote_gate()) is not None:
+            return denied
+        parsed = _json_body(body)
+        if not isinstance(parsed, Mapping):
+            return parsed
+        run = self._remote_run(run_id)
+        if not hasattr(run, "id"):
+            return run
+        step, problem = _remote_step(parsed)
+        if problem:
+            return error(400, "invalid_body", problem)
+        if step.step > _MAX_REMOTE_STEP:
+            return error(400, "invalid_body", f"'step' must be at most {_MAX_REMOTE_STEP}.")
+        self._ext("save_run_step")(run_id, step)
+        return 200, {"id": run_id, "step": step.step}
+
+    def run_pages(self, run_id: str) -> Response:
+        """Requests grouped by page load: traces of the run tagged ``page=<id>`` (a browser
+        script sends ``X-Redline-Run: <run>;step=<n>;page=<id>``), summed per page."""
+        if self._ext("get_run")(run_id) is None:
+            return error(404, "run_not_found", f"No run {run_id!r}.")
+        page = self.store.list(Filters(tag=("run_id", run_id)), limit=500)
+        pages: dict[str, dict[str, Any]] = {}
+        for item in page.items:
+            tags = item.get("tags") or {}
+            pid = tags.get("page")
+            if not pid:
+                continue
+            row = pages.setdefault(
+                pid,
+                {"page": pid, "requests": 0, "total_ms": 0.0, "queries": 0, "slowest": None,
+                 "started_at": item.get("started_at"), "_slow_ms": -1.0},
+            )  # fmt: skip
+            ms = float(item.get("duration_ms") or 0.0)
+            row["requests"] += 1
+            row["total_ms"] = round(row["total_ms"] + ms, 3)
+            row["queries"] += int(item.get("query_count") or 0)
+            row["started_at"] = min(row["started_at"] or 0, item.get("started_at") or 0)
+            if ms > row["_slow_ms"]:
+                row["_slow_ms"] = ms
+                row["slowest"] = {
+                    "route": item.get("route") or item.get("path"),
+                    "ms": round(ms, 3),
+                }
+        items = sorted(pages.values(), key=lambda r: -r["total_ms"])
+        for row in items:
+            row.pop("_slow_ms", None)
+        return 200, {"id": run_id, "items": items, "truncated": bool(page.next_cursor)}
+
+    def run_metrics(self, run_id: str) -> Response:
+        """Resource metrics sampled during a run, per step, and the likely limiting resource."""
+        from .run_metrics import aggregate, limiting_resource
+
+        run = self._ext("get_run")(run_id)
+        if run is None:
+            return error(404, "run_not_found", f"No run {run_id!r}.")
+        per_step = aggregate(self._ext("run_metric_samples")(run_id))
+        knee = (run.summary or {}).get("knee_step")
+        return 200, {
+            "id": run_id,
+            "steps": per_step,
+            "limiting_resource": limiting_resource(
+                per_step, knee if isinstance(knee, int) else None
+            ),
+        }
+
+    def register_metrics(
+        self, run_id: str, body: bytes | str | Mapping[str, Any] | None
+    ) -> Response:
+        """A remote generator adds named numbers from its own metric sources to a run."""
+        if (denied := self._remote_gate()) is not None:
+            return denied
+        parsed = _json_body(body)
+        if not isinstance(parsed, Mapping):
+            return parsed
+        run = self._remote_run(run_id)
+        if not hasattr(run, "id"):
+            return run
+        step = _count(parsed.get("step"))
+        values = parsed.get("values")
+        ts = _number(parsed.get("ts", time.time()))
+        if step is not None and step > _MAX_REMOTE_STEP:
+            step = None
+        if step is None or not isinstance(values, Mapping) or not 0 < len(values) <= 50:
+            return error(400, "invalid_body", "'step' and 1-50 numeric 'values' are required.")
+        if ts is None or not math.isfinite(ts):
+            return error(400, "invalid_body", "'ts' must be an epoch number.")
+        numbers = {}
+        for k, v in values.items():
+            n = _number(v)
+            if not isinstance(k, str) or not 0 < len(k) <= 64 or n is None or not math.isfinite(n):
+                return error(400, "invalid_body", "'values' maps short names to finite numbers.")
+            numbers[k] = n
+        self._ext("save_run_metrics")(run_id, step, numbers, pid=0, ts=ts)
+        return 200, {"id": run_id, "step": step, "stored": len(numbers)}
+
+    def finish_remote_run(
+        self, run_id: str, body: bytes | str | Mapping[str, Any] | None
+    ) -> Response:
+        if (denied := self._remote_gate()) is not None:
+            return denied
+        parsed = _json_body(body)
+        if not isinstance(parsed, Mapping):
+            return parsed
+        status = parsed.get("status")
+        if status not in ("done", "stopped", "failed"):
+            return error(400, "invalid_body", "'status' must be done, stopped or failed.")
+        summary = parsed.get("summary", {})
+        if not isinstance(summary, Mapping) or len(json.dumps(summary, default=str)) > 65_536:
+            return error(400, "invalid_body", "'summary' must be an object under 64 KB.")
+        run = self._remote_run(run_id)
+        if not hasattr(run, "id"):
+            return run
+        self._ext("finish_run")(run_id, status, dict(summary))
+        return 200, {"id": run_id, "status": status}
+
     def _run_target(self, derived: str | None) -> str | None:
         """Where a UI-started run goes: the ``base_url`` setting, else the URL the adapter
         derived from the server's own listening port (:func:`own_base_url`) – only when its
@@ -988,11 +1260,126 @@ class RedlineAPI:
         return 200, {"stopped": bool(self.run_stopper(run_id))}
 
 
+def _explain_url_factory(settings: Settings, fallback: Any) -> Any:
+    """An ``explain_executor`` that runs plans on the separate ``explain_url`` login for the
+    databases of that vendor, and leaves the others to ``fallback``."""
+    state: dict[str, Any] = {}
+    lock = threading.Lock()
+
+    def factory(alias: str, vendor: str) -> Any:
+        from .vendors import get_vendor
+
+        try:
+            from sqlalchemy.engine import make_url
+        except ImportError:  # pragma: no cover - core has no SQLAlchemy without the extra
+            return fallback(alias, vendor) if fallback else None
+        with lock:
+            if "executor" not in state:
+                try:
+                    url = make_url(str(settings.explain_url))
+                    state["vendor"] = get_vendor(url.get_backend_name()).name
+                    state["engine"] = _make_explain_engine(url)
+                except Exception:
+                    capture_failure("Redline explain_url engine could not be created")
+                    state["executor"] = None
+                    state["vendor"] = None
+                else:
+                    from .contrib.sqlalchemy import build_executor
+
+                    state["executor"] = build_executor(
+                        state["engine"], state["vendor"], lambda: None
+                    )
+        if state.get("executor") is not None and state.get("vendor") == vendor:
+            return state["executor"]
+        return fallback(alias, vendor) if fallback else None
+
+    return factory
+
+
+def _make_explain_engine(url: Any) -> Any:
+    from sqlalchemy import create_engine
+
+    if "+async" in str(url.drivername) or str(url.drivername).endswith(("asyncpg", "aiosqlite")):
+        raise ValueError("explain_url needs a synchronous driver")
+    return create_engine(url, pool_size=1, max_overflow=0, pool_pre_ping=True)
+
+
+_REMOTE_FLAG = "registered_remote"
+_MAX_REMOTE_CONFIG = 262_144
+_MAX_REMOTE_RUNNING = 50
+_MAX_REMOTE_STEP = 1_000
+_COUNT_MAX = 10**12
+
+
+def _count(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= _COUNT_MAX:
+        return None
+    return value
+
+
+def _remote_step(body: Mapping[str, Any]) -> tuple[Any, str | None]:
+    """Validate a ``POST api/runs/{id}/steps`` body into a :class:`RunStep`."""
+    import base64
+    import binascii
+
+    from .histogram import Histogram
+    from .runs import RunStep
+
+    ints: dict[str, int] = {}
+    for key in ("step", "sent", "ok", "errors", "dropped"):
+        value = _count(body.get(key, 0 if key != "step" else None))
+        if value is None:
+            return None, f"'{key}' must be a non-negative integer."
+        ints[key] = value
+    floats: dict[str, float | None] = {}
+    for key in ("target_rps", "started_at", "ended_at", "achieved_rps"):
+        raw = body.get(key)
+        if raw is None and key == "ended_at":
+            floats[key] = None
+            continue
+        value = _number(raw if raw is not None else 0.0)
+        if value is None or not math.isfinite(value) or value < 0:
+            return None, f"'{key}' must be a finite non-negative number."
+        floats[key] = value
+    raw_hist = body.get("hist")
+    if not isinstance(raw_hist, str) or len(raw_hist) > 262_144:
+        return None, "'hist' must be a base64 histogram."
+    try:
+        hist = Histogram.from_bytes(base64.b64decode(raw_hist, validate=True))
+    except (binascii.Error, ValueError):
+        return None, "'hist' is not a valid histogram."
+    breakdown = body.get("error_breakdown", {})
+    if not isinstance(breakdown, Mapping) or len(breakdown) > 64:
+        return None, "'error_breakdown' must be an object of at most 64 entries."
+    clean: dict[str, int] = {}
+    for key, value in breakdown.items():
+        count = _count(value)
+        if not isinstance(key, str) or not 0 < len(key) <= 64 or count is None:
+            return None, "'error_breakdown' maps short names to counts."
+        clean[key] = count
+    return (
+        RunStep(
+            step=ints["step"],
+            target_rps=floats["target_rps"] or 0.0,
+            started_at=floats["started_at"] or 0.0,
+            ended_at=floats["ended_at"],
+            achieved_rps=floats["achieved_rps"] or 0.0,
+            sent=ints["sent"],
+            ok=ints["ok"],
+            errors=ints["errors"],
+            dropped=ints["dropped"],
+            hist=hist,
+            error_breakdown=clean,
+        ),
+        None,
+    )
+
+
 def _json_body(body: bytes | str | Mapping[str, Any] | None) -> Mapping[str, Any] | Response:
     if isinstance(body, (bytes, bytearray, str)):
         try:
             body = json.loads(body or "{}")
-        except ValueError:
+        except (ValueError, RecursionError):
             return error(400, "invalid_json", "The request body is not valid JSON.")
     if not isinstance(body, Mapping):
         return error(400, "invalid_body", "Expected a JSON object.")
@@ -1042,6 +1429,11 @@ def _run_config(body: Mapping[str, Any]) -> tuple[dict[str, Any], str | None]:
         value = _number(profile.get(key))
         if value is None or value <= 0:
             return {}, f"profile.{key} must be a positive number for mode {profile['mode']!r}."
+    from .load.variation import LOCAL_ONLY_KEYS
+
+    local = [k for k in LOCAL_ONLY_KEYS if k in body]
+    if local:  # these can run a command or read a file: scenario files only
+        return {}, f"{', '.join(local)} can only be set in a scenario file, not from the UI."
     # The target is never taken from the body: the adapter's base URL always wins.
     extra = {k: v for k, v in body.items() if k not in ("base_url", "workers")}
     config = {**extra, "name": name.strip(), "requests": clean, "profile": dict(profile)}

@@ -31,6 +31,8 @@ _LOG_GROWTH = math.log(_GROWTH)
 _MAGIC = b"RLH"
 _VERSION = 1
 _TAIL = struct.Struct("<ddd")  # min, max, sum
+#: A real encoded histogram is a few KB; anything inflating past this is not one.
+_MAX_INFLATED = 1_048_576
 _MAX_BUCKET = int(math.log(MAX_MS / MIN_MS) / _LOG_GROWTH)  # index of the last bucket
 
 
@@ -183,17 +185,24 @@ class Histogram:
         if data[3] != _VERSION:
             raise ValueError(f"unsupported histogram version {data[3]}")
         try:
-            raw = zlib.decompress(data[4:])
+            inflater = zlib.decompressobj()
+            raw = inflater.decompress(data[4:], _MAX_INFLATED)  # bounded: a zip bomb is refused
+            if inflater.unconsumed_tail or not inflater.eof:
+                raise ValueError("histogram is larger than any real one")
         except zlib.error as exc:
             raise ValueError(f"corrupt histogram: {exc}") from None
         hist = cls()
         pos = 0
         try:
             n, pos = _get_varint(raw, pos)
+            if n > _MAX_BUCKET + 1:
+                raise ValueError("too many buckets")
             idx = 0
-            for _ in range(n):
+            for i in range(n):
                 delta, pos = _get_varint(raw, pos)
                 cnt, pos = _get_varint(raw, pos)
+                if i and delta <= 0:
+                    raise ValueError("buckets out of order")
                 idx += delta
                 if idx > _MAX_BUCKET or cnt <= 0:
                     raise ValueError("bucket out of range")

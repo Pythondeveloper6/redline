@@ -36,7 +36,7 @@ load test that shows which query broke.
   <img alt="Redline showing an N+1 on order items in the Django demo shop: 30 queries from one line, with a prefetch_related diff" src="docs/assets/screenshots/django-n-plus-one-light.png">
 </picture>
 
-> **Development release: `0.5.0b1` (beta).** This branch includes the next release's
+> **Development release: `0.5.0b2` (beta).** This branch includes the next release's
 > features; published packages can be an earlier version. Start with development or
 > staging. Production use requires validation of your actual framework, database driver,
 > traffic and process model: see the [deployment gate](docs/production.md).
@@ -167,7 +167,7 @@ mode. Django uses its framework permission gate.
 | Application bottlenecks | Event-loop blocking, slow serializers, long transactions, HTTP calls inside transactions, large responses, many ORM instances, pool checkout waits, JSON/cache decoding hotspots |
 | External calls and caches | Slow/duplicate outbound calls and retry storms; cache hit/miss patterns, stampedes and large entries, where instrumentation supplies evidence |
 | GraphQL | Strawberry/Graphene integrations and resolver context for captured repeated queries |
-| Custom instrumentation | Context-manager/decorator/async spans and application tags; optional client/database integrations |
+| Custom instrumentation | Context-manager/decorator/async spans and application tags; optional client/database integrations, including SQL sent through raw driver cursors (`instrument_dbapi`) |
 | Profiling | Opt-in request flamegraphs and speedscope download; requires the `profile` extra |
 
 Read [the UI guide](docs/the-ui.md), [detector reference](docs/detectors.md),
@@ -180,8 +180,8 @@ apply code changes or database indexes automatically.
 | Capability | What it adds |
 |---|---|
 | EXPLAIN | Eligible captured read queries, plan findings and index suggestions; executable/actual plans require a separate opt-in |
-| Database/workload view | Cross-recording SQL search, workload index advice, catalog evidence and unused-index observations where the database supports them |
-| Load testing | CLI scenarios and an opt-in UI builder, stepped offered load, latency/error charts, saturation/knee detection and query/endpoint bottlenecks per step |
+| Database/workload view | Cross-recording SQL search, workload index advice with its evidence, catalog evidence and unused-index observations where the database supports them; a SQL Server permission probe that names the exact `GRANT`, an optional separate plan login (`explain_url`) and pasted-plan analysis; raw-SQL N+1 loops rewritten into one batched query |
+| Load testing | CLI scenarios and an opt-in UI builder; open-model offered load as constant, ramp, steps or custom **stages** (spike, soak) with recovery and drift analysis; many **identities**, skewed **data feeds** and **token refresh**; chained **flows** with value extraction, response checks, **think time** and sessions; first-byte timing, held streams and WebSockets; several generator hosts (`redline load agent`); resource metrics and a likely limiting resource; saturation/knee detection and query/endpoint bottlenecks per step; runs registered in a shared PostgreSQL store or over HTTP |
 | Refactor checks | Record a read-only baseline, replay against a changed app, compare response structure, latency/query/N+1 behavior, emit a verdict and CI reports |
 | Test and CI gates | Pytest query/issue/outbound budgets, SQL-error/session-leak/round-trip assertions; refactor-check JUnit and Markdown results |
 | Static N+1 scan | Template/DRF serializer checks that complement runtime evidence |
@@ -222,14 +222,16 @@ Detailed APIs, support boundaries and UI paths are in [Real-world workflows](doc
 | Runtime engines | `engines="auto"` captures SQLAlchemy engines created per user or per request; stored procedures (`EXEC`, `CALL`) are their own query kind, and session housekeeping (`sp_set_session_context`, `SET ...`) is ignored by default (`ignore_sql`) |
 | Grouping | Flask requests carry their blueprint; `api/endpoints?group_by=blueprint` and `flask redline endpoints --group-by blueprint` aggregate per blueprint |
 | Jobs | RQ, Dramatiq and FastAPI/Starlette background tasks are recorded as jobs linked to the request that queued them |
-| Coverage | `auto_instrument` (`off`/`warn`/`on`) warns about, or instruments, installed httpx/requests/Redis/boto3 |
+| Coverage | `auto_instrument` (`off`/`warn`/`on`) warns about, or instruments, installed httpx/requests/Redis/boto3 and, when present, pymongo, kafka-python, pika, Google Cloud Storage and Azure Blob clients; `instrument_client_method` makes any other client visible |
+| Threads and pools | `instrument_threads()` copies the request context into `Thread` and `ThreadPoolExecutor` work, so queries run on worker threads stay under the request, labelled with the thread name |
+| Unattributed time | `unattributed_time` flags web requests spending most of their time where no span is recorded, naming the profiled callsite; load runs show it as an `other` bottleneck row |
 | Static analysis | More dynamic SQL resolved, unresolved inputs reported by reason, and a precision harness to measure the false-positive rate on your own code |
 | Sharing and alerts | `redline export ID --html` writes one redacted, self-contained page; `redline digest` posts new issues to a webhook; `api/metrics` exposes recorder health for Prometheus; `redline_trace_id` links logs, Sentry events and OTLP spans to a recording |
 | Release checks | Live MySQL qualification (pymysql, aiomysql, asyncmy) in CI; fresh-venv install and old-store upgrade checks against published releases |
 
 | Explain and rank | Every finding carries `why` (rule, observed, threshold, grouping, limits); `api/issues?sort=impact` ranks by sampled observed time, never presented as additive savings |
 | Prove a fix | `redline check verify` answers gone / still present / inconclusive and whether responses stayed equal; `redline check compare-live` alternates requests between two running versions; latency budgets accept `min_samples`; `redline instrumentation` reports what redline cannot see |
-| AI agents | `redline mcp` serves read-only tools over MCP, `redline fix-prompt` writes a fix brief, `redline agent-skill` emits a Claude skill and AGENTS.md section, `llms.txt` and JSON references document everything for machines, and `redline diagnose` previews (opt-in: sends) a redacted finding. See [Working with AI agents](docs/agents.md) |
+| AI agents | `redline mcp` serves over 40 tools over MCP (findings, traces, load runs, scenarios, SQL Server plans, SQL lints, doctor, check reports; starting or deleting load runs is opt-in behind `--allow-load` / `--allow-delete-runs`), `redline fix-prompt` writes a fix brief, `redline agent-skill` emits a Claude skill and AGENTS.md section, `llms.txt` and JSON references document everything for machines, and `redline diagnose` previews (opt-in: sends) a redacted finding. See [Working with AI agents](docs/agents.md) |
 | LLM calls | `instrument_anthropic()` / `instrument_openai()` record `llm_call` spans (model, tokens, timing; never prompt text) with findings for duplicate, serial, in-transaction, looping and uncached large-prompt calls, and `api/llm` for sampled token usage. See [LLM-call observability](docs/llm.md) |
 
 Stability promises for these and older APIs are in [API stability](docs/api-stability.md).
@@ -238,7 +240,7 @@ Stability promises for these and older APIs are in [API stability](docs/api-stab
 
 ```bash
 redline agent-skill --write ~/.claude/skills     # teach a coding agent to find, fix and verify
-redline mcp --store .redline/redline.db          # read-only tools over MCP (add to .mcp.json)
+redline mcp --store .redline/redline.db          # tools over MCP, read-only by default (add to .mcp.json)
 redline fix-prompt ISSUE_ID --store .redline/redline.db > brief.md
 redline check compare check.toml --json report.json
 redline check verify report.json --kind n_plus_one   # exit 0 only when the finding is gone
@@ -293,7 +295,7 @@ production jobs need the production capture/access/storage policy and lifecycle 
 | Django + SQLite/PostgreSQL/MySQL | Native execute-wrapper SQL capture, handled errors, fetched-row evidence where supported | Existing Django plan paths; each deployed backend/driver/process combination still needs qualification |
 | Django + SQL Server backend | Native wrapper evidence with normalized vendor naming; depends on the selected third-party backend | **Django SQL Server EXPLAIN is unsupported**; live backend/driver validation pending |
 | FastAPI/Flask/Litestar + SQLAlchemy + SQLite/PostgreSQL/MySQL | Registered sync/async engine capture and optional engine discovery (`engines="auto"`) | Existing SQLAlchemy plan paths; live MySQL EXPLAIN, index advice and reconnect tests run in CI with pymysql, aiomysql and asyncmy; actual driver support differs by capability |
-| FastAPI/Flask/Litestar + SQLAlchemy + SQL Server | SQL failure/session/connection evidence and SQL Server parsing support | **Experimental** plan/catalog support; actual-plan mode requires a supported sync multi-result driver; per-request engine capture is tested in the Compose suite; live Azure SQL and deployment qualification remain pending |
+| FastAPI/Flask/Litestar + SQLAlchemy + SQL Server | SQL failure/session/connection evidence and SQL Server parsing support | **Experimental** plan/catalog support, with a permission probe (`redline doctor`, `GET api/database/capabilities`), clear grant messages, an optional separate plan login (`explain_url`) and pasted-plan analysis; actual-plan mode requires a supported sync multi-result driver; per-request engine capture is tested in the Compose suite; live Azure SQL and deployment qualification remain pending |
 | Celery | Explicit worker recorder and signal integration; eager-mode coverage | Live broker, retries, prefork/restart and actual database driver behavior require deployment tests |
 
 An explicit engine registry is the default. Opting into `instrument_engines="all"`
@@ -377,7 +379,10 @@ redline check record checks/orders.toml --label before
 redline check compare checks/orders.toml --markdown report.md --junit report.xml
 ```
 
-Set the correct `--store` and target base URL for the application you are testing.
+Set the correct `--store` and target base URL for the application you are testing. When the
+generator runs on another host, write to the shared PostgreSQL store with `--store-url`, or
+register the run with the application over HTTP with `--register-url` (the application needs
+`accept_remote_runs`); `--require-recording` stops the run if the application does not record it.
 Online SQL compilation and schema snapshots are explicit development-database operations;
 see [the workflow guide](docs/real-world-workflows.md#explicit-online-compilation-and-schema-drift).
 OTLP export currently sends selected recording summaries, not a complete distributed

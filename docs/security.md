@@ -293,6 +293,47 @@ load_disabled`). When on, its safety rests on these rules:
 3. It is a real load: a user who may start runs can make your instance slow. Enable it only
    in environments where that is acceptable, and not in production.
 
+### Run metrics and metric sources
+
+Resource sampling happens only for a run that exists in the store and is running; a made-up
+`X-Redline-Run` header starts nothing. It reads process counters (CPU, memory, pool sizes),
+never request or user data, and stores at most 20,000 samples per run. `metric_sources` run
+your own functions, so like the other scenario-file keys they are refused from the UI and
+`POST api/runs`.
+
+### Flows
+
+`flows` is accepted only from a scenario file, like the other keys below, and any request
+path starting with `//` is refused, so a path can never turn into another host.
+
+### Identities, data files and token commands
+
+A scenario file may name identities, data files and a token provider (a command, a request or
+a Python callable). These can run a program or read a file, so they are accepted **only from a
+scenario file** you run yourself, never from the UI or `POST api/runs` (`400`). The token
+command runs without a shell. Identity and token values are masked in the stored run config;
+only the identity name reaches the app (as the `identity` trace tag) and the run summary.
+
+### Remote generator agents
+
+`redline load agent` is a service that generates load for whoever holds its token, so treat
+the token like a deploy key. It refuses to start without one, listens on `127.0.0.1` by
+default, supports TLS (`--cert`/`--key`) and target allow-lists (`--allow-target`), blocks
+link-local and cloud-metadata targets, never runs a token command or Python callable, and
+reads no files (identities and data rows are sent inline). The scenario it receives includes
+credentials, so use TLS or a private network between controller and agents.
+
+### Registering runs over HTTP
+
+`accept_remote_runs` lets a load generator on another host register its run
+(`POST api/runs/register`, `.../steps`, `.../finish`). It is **off by default and in every
+preset**, refused while `read_only` is on, and behind the same access policy as every other
+mutation (use `access="token"`). The application checks each field's type and size, masks the
+run's config again, and refuses to change any run that was not registered this way, so a
+local run cannot be rewritten through it. Requests of a run are kept past `sample_rate` only
+while that run exists and is running; an invented run id keeps nothing. The generator reads
+the token from `REDLINE_TOKEN` or `--token-file`, and a PostgreSQL store URL is never printed.
+
 The `redline load` command line is a different matter: it runs on the machine you run it
 on, against the URL you give it, with the rights you have there. Point it only at systems you
 own or are authorised to test.

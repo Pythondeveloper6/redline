@@ -108,7 +108,7 @@ See [How it works: sampling](how-it-works.md#sampling).
 | `capture_logs` | `bool` | `True` | Keep the log records emitted during a request. See [Logs and exceptions](logs-and-exceptions.md) |
 | `log_level` | `str` (`DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`; case-insensitive) | `"INFO"` | An extra minimum level for records stored in a trace. Capture follows your application's own logger levels (Redline never adds a root handler or changes a level), so a record your logging configuration drops is never captured; `log_level` can only raise the bar further |
 | `max_logs_per_trace` | `int` | `200` | Cap per trace; extras are counted, not stored |
-| `auto_instrument` | `"off"`, `"warn"` or `"on"` | `"warn"` | Outbound-call integrations (httpx, requests, redis, boto3). `"warn"`: at install, log one warning naming installed but uninstrumented ones; `"on"`: instrument every installed one at install; `"off"`: neither. See [Integrations](integrations.md#zero-config-coverage) |
+| `auto_instrument` | `"off"`, `"warn"` or `"on"` | `"warn"` | Client integrations (httpx, requests, redis, boto3, pymongo, kafka-python, pika, google-cloud-storage, azure-storage-blob). `"warn"`: at install, log one warning naming installed but uninstrumented ones; `"on"`: instrument every installed one at install; `"off"`: neither. See [Integrations](integrations.md#zero-config-coverage) |
 | `capture_locals` | `bool` | `True` | Keep the local variables of project frames in an exception (names matching `redact_keys` are masked). See [Logs and exceptions](logs-and-exceptions.md#exceptions-with-locals) |
 | `capture_error_details` | `bool` | `True` | Capture exception messages and formatted tracebacks. When false, errors retain type/codes without formatting message or traceback text; exception locals are also disabled. SQL messages additionally require SQL parameter capture for that statement. Shared-dev and production default to false |
 
@@ -129,6 +129,8 @@ See [N+1 detection](n-plus-one.md).
 | `slow_serializer_ms` | `float` | `50` | 0 | A [serializer](serializers.md) at least this slow is reported |
 | `long_transaction_ms` | `float` | `200` | 0 | A [transaction](transactions.md) open at least this long is reported |
 | `slow_external_ms` | `float` | `500` | 0 | An [outbound call](external-calls.md) at least this slow is reported |
+| `unattributed_time_ratio` | `float` | `0.5` | 0 | A web request with at least this share of its time covered by no span is [unattributed time](detectors.md#unattributed-time). Between 0 and 1; `0` disables the detector |
+| `unattributed_time_ms` | `float` | `100` | 0 | ...and only when that uncovered time is also at least this many milliseconds |
 
 Two more switches belong here. `detect_blocking` (`bool`, default `True`) runs the
 event-loop lag monitor in async adapters, only while a request is in flight; set it false to
@@ -156,6 +158,9 @@ See [Flamegraphs](flamegraphs.md). Needs `redline-core[profile]`.
 | `editor` | `"vscode"`, `"cursor"`, `"pycharm"`, `"idea"`, `"sublime"`, `"none"`, or a template string | `"vscode"` | Where callsite links open. A template contains `{file}` (absolute path) and `{line}`. See [Open in editor](the-ui.md#open-in-editor) |
 | `server_timing` | `"auto"` or `bool` | `"auto"` | Add a `Server-Timing` header (trace id, query count and time) to recorded responses. `auto` means on when the framework is in debug mode. See [Server-Timing and the badge](server-timing-badge.md) |
 | `badge` | `"auto"` or `bool` | `"auto"` | Inject the floating badge into HTML responses. `auto` means on when the framework is in debug mode (FastAPI, Flask and Litestar: the app's `debug` flag) |
+| `explain_url` | `str` | `None` | A SQLAlchemy URL for a separate plan-capable login (synchronous driver). EXPLAIN, plan and catalog requests for that database type use it so the application's own login stays least-privilege. The password is masked in `redline config` and the API |
+| `run_metrics` | `bool` | `True` | While a registered load run sends this process traffic, sample its CPU, memory, GC pauses and connection pool once a second into the store. Off in the `production` preset |
+| `accept_remote_runs` | `bool` | `False` | Accept load runs registered over HTTP by a generator on another host (`POST api/runs/register`, `.../steps`, `.../finish`). Refused while `read_only` is on |
 | `load_from_ui` | `bool` | `False` | Allow starting a [load run](load-testing.md#starting-a-run-from-the-ui) from the UI (`POST api/runs`). Needs `redline-core[load]`. Off whenever `read_only` is on or the `load` feature is off |
 | `checks_from_ui` | `"auto"` or `bool` | `"auto"` | Allow starting [refactor-check](refactor-check.md) baseline and compare runs from the UI (`POST api/checks/runs`). `auto` means on only while the framework is in debug mode; `true` and `false` force it. Needs `redline-core[load]` (httpx). Off whenever `read_only` is on or the `checks` feature is off; the `production` preset sets it to `false`. Reading suites and reports is not affected |
 
@@ -255,6 +260,7 @@ exactly what `redline_core.conf.PRESETS` applies:
 | `read_only` | off | on | off | on |
 | `badge` / `server_timing` | `auto` | `auto` | `auto` | off |
 | `load_from_ui` | off | off | off | off |
+| `accept_remote_runs` | off | off | off | off |
 | `checks_from_ui` / `analysis_from_ui` | `auto` | off | `auto` | off |
 | `explain_analyze` | off | off | off | off |
 | `profile` | `off` | `off` | `off` | `off` |

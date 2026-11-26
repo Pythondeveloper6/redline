@@ -1,0 +1,23 @@
+name = "flask shop: first byte, streams"
+description = "Held server-sent events and a plain page, timed to the first and the last byte."
+base_url = "http://127.0.0.1:8012"
+timeout_s = 10
+connections = 200
+
+[[requests]]
+name = "orders page"
+path = "/orders/page"
+weight = 4
+
+# The demo shop has no streaming route; point this at your own server-sent-events endpoint.
+[[requests]]
+name = "live feed (disabled until you set a real path)"
+type = "stream"
+path = "/events"
+hold_s = 20
+weight = 0
+
+[profile]
+mode = "constant"
+rps = 10
+duration_s = "20s"

@@ -1,5 +1,5 @@
 import { call, qs } from './api'
-import type { Bottlenecks, CompareResp, HistoryResp, NewRunBody, ReleaseInfo, Run, RunItem } from './types'
+import type { Bottlenecks, CompareResp, DbCapabilities, HistoryResp, NewRunBody, PageStat, ReleaseInfo, Run, RunItem, RunMetrics } from './types'
 
 const enc = encodeURIComponent
 
@@ -12,6 +12,9 @@ export const apiLoad = {
   runs: () => call<{ items: RunItem[] }>('GET', './api/runs'),
   run: (id: string) => call<Run>('GET', `./api/runs/${enc(id)}`),
   bottlenecks: (id: string) => call<Bottlenecks>('GET', `./api/runs/${enc(id)}/bottlenecks`),
+  metrics: (id: string) => call<RunMetrics>('GET', `./api/runs/${enc(id)}/metrics`),
+  pages: (id: string) => call<{ items: PageStat[]; truncated: boolean }>('GET', `./api/runs/${enc(id)}/pages`),
+  capabilities: (db: string, refresh = false) => call<DbCapabilities>('GET', './api/database/capabilities' + qs({ db, refresh: refresh ? '1' : undefined })),
   startRun: (body: NewRunBody) => call<Partial<RunItem>>('POST', './api/runs', body),
   stopRun: (id: string) => call<unknown>('POST', `./api/runs/${enc(id)}/stop`, {}),
   deleteRun: (id: string) => call<unknown>('DELETE', `./api/runs/${enc(id)}`),

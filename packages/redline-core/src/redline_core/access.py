@@ -436,7 +436,7 @@ def _limit_key(ip: str | None) -> str:
 
 
 def _feature_for(method: str, path: str) -> str | None:
-    if path == "api/explain":
+    if path in ("api/explain", "api/explain/plan", "api/database/capabilities"):
         return "explain"
     if path == "api/stream":
         return "sse"
@@ -472,7 +472,7 @@ def route_policy(method: str, path: str, settings: Settings) -> Decision | None:
         settings.read_only
         and method not in _SAFE_METHODS
         and p.startswith("api/")
-        and p not in ("api/explain", "api/login", "api/logout")
+        and p not in ("api/explain", "api/explain/plan", "api/login", "api/logout")
     ):
         return _deny(403, "read_only", "This Redline instance is read-only.")
     return None
